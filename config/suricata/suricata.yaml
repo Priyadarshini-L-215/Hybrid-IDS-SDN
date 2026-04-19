@@ -1,0 +1,52 @@
+%YAML 1.1
+---
+
+# Suricata configuration for ML Integration Project
+# This is a minimal configuration focusing on EVE JSON output.
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular # Can be changed to 'unix_dgram' or 'unix_stream' later
+      filename: /mnt/d/projects/FYP/data/logs/eve.json
+      types:
+        - alert:
+            payload: yes             # Include packet payload in alerts
+            payload-printable: yes   # Include printable payload
+            packet: yes              # Include full packet in base64
+            http-body: yes           # Include HTTP body
+            metadata: yes            # Include metadata
+        - anomaly
+        - http:
+            extended: yes
+        - dns:
+            query: yes
+            answer: yes
+        - tls:
+            extended: yes
+        - files:
+            force-magic: yes
+        - drop
+        - flow
+        - smb
+        - ssh
+        - smtp
+        - krb5
+        - snmp
+        - rdp
+        - sip
+
+af-packet:
+  - interface: eth0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+    http:
+      enabled: yes
