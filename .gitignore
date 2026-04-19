@@ -60,3 +60,4 @@ Thumbs.db
 
 # Jupyter / Output
 .ipynb_checkpoints
+*.log
