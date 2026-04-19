@@ -1,4 +1,4 @@
-# Anti-Gravity Intrusion Detection System (IDS)
+# Hybrid Intrusion Detection System (IDS)
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![Flask](https://img.shields.io/badge/Framework-Flask-black?logo=flask)
@@ -8,9 +8,9 @@
 
 ## Project Overview
 
-Anti-Gravity IDS is an advanced Network Intrusion Detection System (NIDS) designed for real-time monitoring and threat classification. The system integrates **Suricata** for high-performance network traffic analysis with a powerful **Machine Learning (ML)** engine for automated, intelligent threat detection. 
+Hybrid IDS is an advanced Network Intrusion Detection System (NIDS) designed for real-time monitoring and threat classification. The system integrates **Suricata** for high-performance network traffic analysis with a powerful **Machine Learning (ML)** engine for automated, intelligent threat detection. 
 
-By capturing network flow data, extracting relevant features, and leveraging a trained Random Forest model, the Anti-Gravity IDS accurately identifies potential security breaches, presenting insights through a dynamic and professional dashboard interface.
+By capturing network flow data, extracting relevant features, and leveraging a trained Random Forest model, the Hybrid IDS accurately identifies potential security breaches, presenting insights through a dynamic and professional dashboard interface.
 
 ---
 
