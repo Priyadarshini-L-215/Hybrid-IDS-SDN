@@ -20,16 +20,16 @@ GEMINI_BIN = os.environ.get("GEMINI_BIN", "gemini")
 
 # Scan profiles exposed to the UI
 SCAN_PROFILES = {
-    "ping":          {"flags": ["-sn"],                        "label": "Ping Sweep",         "danger": "low"},
-    "quick":         {"flags": ["-T4", "-F"],                  "label": "Quick Scan",         "danger": "low"},
-    "service":       {"flags": ["-sV", "-T4"],                 "label": "Service Detection",  "danger": "medium"},
-    "os_detect":     {"flags": ["-O", "-T4"],                  "label": "OS Detection",       "danger": "medium"},
-    "vuln":          {"flags": ["--script=vuln", "-T4"],       "label": "Vuln Scripts",       "danger": "high"},
-    "aggressive":    {"flags": ["-A", "-T4"],                  "label": "Aggressive (-A)",    "danger": "high"},
-    "stealth_syn":   {"flags": ["-sS", "-T2"],                 "label": "Stealth SYN",        "danger": "medium"},
-    "udp":           {"flags": ["-sU", "-T3", "--top-ports=50"], "label": "UDP Top-50",       "danger": "medium"},
-    "full_ports":    {"flags": ["-p-", "-T4"],                 "label": "Full Port Scan",     "danger": "medium"},
-    "custom":        {"flags": [],                             "label": "Custom Flags",       "danger": "custom"},
+    "ping":          {"flags": ["-sn", "-Pn", "--unprivileged"],                 "label": "Ping Sweep",         "danger": "low"},
+    "quick":         {"flags": ["-T4", "-F", "-Pn", "--unprivileged"],           "label": "Quick Scan",         "danger": "low"},
+    "service":       {"flags": ["-sV", "-T4", "-Pn", "--unprivileged"],          "label": "Service Detection",  "danger": "medium"},
+    "os_detect":     {"flags": ["-O", "-T4", "-Pn", "--unprivileged"],           "label": "OS Detection",       "danger": "medium"},
+    "vuln":          {"flags": ["--script=vuln", "-T4", "-Pn", "--unprivileged"],"label": "Vuln Scripts",       "danger": "high"},
+    "aggressive":    {"flags": ["-A", "-T4", "-Pn", "--unprivileged"],           "label": "Aggressive (-A)",    "danger": "high"},
+    "stealth_syn":   {"flags": ["-sS", "-T2", "-Pn", "--unprivileged"],          "label": "Stealth SYN",        "danger": "medium"},
+    "udp":           {"flags": ["-sU", "-T3", "--top-ports=50", "-Pn", "--unprivileged"], "label": "UDP Top-50", "danger": "medium"},
+    "full_ports":    {"flags": ["-p-", "-T4", "-Pn", "--unprivileged"],          "label": "Full Port Scan",     "danger": "medium"},
+    "custom":        {"flags": ["-Pn", "--unprivileged"],                        "label": "Custom Flags",       "danger": "custom"},
 }
 
 # Hard cap – prevent runaway scans

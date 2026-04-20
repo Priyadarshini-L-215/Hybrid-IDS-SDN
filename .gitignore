@@ -57,6 +57,7 @@ data/logs/ml_alerts.json
 *.swo
 .DS_Store
 Thumbs.db
+GEMINI.md
 
 # Jupyter / Output
 .ipynb_checkpoints

@@ -54,16 +54,25 @@ def predict_alert(alert: dict) -> dict:
             confidence = 100.0
             
         # If the log is an alert, grab the signature. Otherwise, it's just a network flow.
-        alert_sig = alert.get("alert", {}).get("signature", "Flow Connection")
+        alert_info = alert.get("alert", {})
+        alert_sig = alert_info.get("signature", "Flow Connection")
+        severity  = alert_info.get("severity", 0)
+        category  = alert_info.get("category", "")
             
         return {
             "prediction": "Attack" if label == 1 else "Normal",
             "confidence": confidence,
             "src_ip":    alert.get("src_ip", "Unknown"),
+            "src_port":  alert.get("src_port", 0),
             "dest_ip":   alert.get("dest_ip", "Unknown"),
             "dest_port": alert.get("dest_port", 0),
+            "protocol":  alert.get("proto", "Unknown"),
             "timestamp": alert.get("timestamp", "Unknown"),
             "alert_sig": alert_sig,
+            "severity":  severity,
+            "category":  category,
+            "flow_id":   alert.get("flow_id", ""),
+            "event_type": alert.get("event_type", "unknown"),
         }
     except Exception as e:
         return {"prediction": "Error", "confidence": 0, "error": str(e)}

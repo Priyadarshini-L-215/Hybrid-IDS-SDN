@@ -1,33 +1,38 @@
 @echo off
-title Anti-Gravity IDS Launcher
-color 0B
+setlocal
+title Hybrid IDS Launcher
 
-echo ========================================================
-echo.
-echo      ANTI-GRAVITY IDS - LAUNCH SEQUENCE INITIATED
-echo.
-echo ========================================================
-echo.
+echo =================================================================
+echo             HYBRID IDS MANAGEMENT SYSTEM
+echo =================================================================
 
-echo [1/2] Booting Defensive Backend (Flask)...
-IF EXIST ".venv\Scripts\python.exe" (
-    start "Backend (port 5000)" cmd /k ".venv\Scripts\python.exe src\dashboard\app.py"
-) ELSE (
-    start "Backend (port 5000)" cmd /k "cd src\dashboard && python app.py"
-)
-timeout /t 2 /nobreak >nul
+:: 1. Launch WSL Suricata Sensor
+echo [+] Launching Suricata Sensor in WSL...
+:: Cleanup old instances and start new one with auto-sudo
+:: Ensure the script has Linux line endings and run it
+start "Suricata Sensor" wsl bash -c "sed -i 's/\r$//' /mnt/d/projects/FYP/start_suricata.sh; bash /mnt/d/projects/FYP/start_suricata.sh"
 
-echo [2/2] Starting Visual Subsystem (React)...
-start "Frontend (port 5173)" cmd /k "cd ui && npm run dev"
+:: 2. Launch Flask Backend
+echo [+] Launching Flask Dashboard Backend...
+start "Backend" ".venv\Scripts\python.exe" "src\dashboard\app.py"
+
+:: 3. Launch Vite Frontend
+echo [+] Launching React Frontend...
+cd ui
+start "Frontend" cmd /c npm run dev
+cd ..
 
 echo.
-echo ========================================================
-echo   ALL SYSTEMS ONLINE
-echo   - Dashboard API proxying correctly
+echo =================================================================
+echo [SUCCESS] All components are initializing.
 echo.
-echo   Keep the two new command windows open to keep 
-echo   the servers running. To stop the application, 
-echo   simply close those two windows.
-echo ========================================================
+echo - Dashboard (UI): http://localhost:5173
+echo - API Backend:    http://localhost:5000
+echo.
+echo INSTRUCTIONS:
+echo 1. Keep all terminal windows open.
+echo 2. Check the "Suricata Sensor" window for logs.
+echo 3. Use the WSL IP (172.25.24.205) for testing.
+echo =================================================================
 echo.
 pause

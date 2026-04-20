@@ -22,13 +22,13 @@ _cache = {"alerts": [], "last_updated": "never"}
 #  Background IDS refresh                                              #
 # ------------------------------------------------------------------ #
 def background_refresh():
-    """Refresh ML predictions every 5 seconds."""
+    """Refresh ML predictions every 3 seconds."""
     while True:
         fresh_alerts = tail_eve_json(50)
         with _cache_lock:
             _cache["alerts"]       = fresh_alerts
             _cache["last_updated"] = time.strftime("%H:%M:%S")
-        time.sleep(5)
+        time.sleep(1)
 
 threading.Thread(target=background_refresh, daemon=True).start()
 
@@ -44,6 +44,23 @@ def index():
 def api_alerts():
     with _cache_lock:
         return jsonify(_cache)
+
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """Return summary statistics for the dashboard stat cards."""
+    with _cache_lock:
+        alerts = _cache["alerts"]
+        total   = len(alerts)
+        attacks = sum(1 for a in alerts if a.get("prediction") == "Attack")
+        normal  = total - attacks
+        attack_pct = round((attacks / total) * 100, 1) if total > 0 else 0.0
+        return jsonify({
+            "total": total,
+            "attacks": attacks,
+            "normal": normal,
+            "attack_pct": attack_pct,
+            "last_updated": _cache["last_updated"],
+        })
 
 @app.route("/api/alerts/clear", methods=["POST"])
 def api_alerts_clear():
