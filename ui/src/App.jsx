@@ -36,6 +36,54 @@ function formatTimestamp(ts) {
   }
 }
 
+function SortDirectionIcon({ field, sortField, sortDir }) {
+  if (sortField !== field) return <ArrowUpDown size={11} style={{ opacity: 0.3 }} />;
+  return sortDir === 'desc' ? <ArrowDown size={11} /> : <ArrowUp size={11} />;
+}
+
+function ThreatChartTooltip({ active, payload, label }) {
+  if (!(active && payload && payload.length)) {
+    return null;
+  }
+
+  const d = payload[0].payload;
+  const isAttack = d.attackConfidence > 0;
+  const sev = getSeverity(d.severityRaw);
+
+  return (
+    <div className={`glass-panel tooltip-panel ${isAttack ? 'attack' : 'normal'}`}>
+      <div className="tooltip-header">
+        <span className="tooltip-time">{label}</span>
+        {isAttack && (
+          <span className="tooltip-sev-badge" style={{ background: sev.bg, color: sev.color, borderColor: sev.border }}>
+            {sev.label}
+          </span>
+        )}
+      </div>
+      {isAttack && (
+        <div className="tooltip-body">
+          <p className="threat-sig"><AlertTriangle size={14} className="inline mr-1" /> {d.signature}</p>
+          <div className="tooltip-metric">
+            <span className="ml-label">ML CONFIDENCE:</span>
+            <span className="ml-value">{d.attackConfidence}%</span>
+          </div>
+          <p className="detail-meta">SRC: {d.ip}</p>
+        </div>
+      )}
+      {!isAttack && (
+        <div className="tooltip-body">
+          <p className="threat-sig safe"><ShieldCheck size={14} className="inline mr-1" /> VERIFIED FLOW</p>
+          <div className="tooltip-metric">
+            <span className="ml-label">STABILITY:</span>
+            <span className="ml-value">{d.normalConfidence}%</span>
+          </div>
+          <p className="detail-meta">SRC: {d.ip}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────
 //  Nmap Attack Lab Component
 // ─────────────────────────────────────────────────────────────────
@@ -431,11 +479,6 @@ function AlertsTable({ alerts }) {
     return list;
   }, [alerts, filter, sortField, sortDir]);
 
-  const SortIcon = ({ field }) => {
-    if (sortField !== field) return <ArrowUpDown size={11} style={{opacity: 0.3}} />;
-    return sortDir === 'desc' ? <ArrowDown size={11} /> : <ArrowUp size={11} />;
-  };
-
   return (
     <div className="alerts-table-section glass-panel">
       {/* Table Header */}
@@ -485,13 +528,13 @@ function AlertsTable({ alerts }) {
                 className="th-conf sortable" 
                 onClick={() => toggleSort('confidence')}
               >
-                Confidence <SortIcon field="confidence" />
+                Confidence <SortDirectionIcon field="confidence" sortField={sortField} sortDir={sortDir} />
               </th>
               <th 
                 className="th-sev sortable"
                 onClick={() => toggleSort('severity')}
               >
-                Severity <SortIcon field="severity" />
+                Severity <SortDirectionIcon field="severity" sortField={sortField} sortDir={sortDir} />
               </th>
             </tr>
           </thead>
@@ -654,47 +697,6 @@ function App() {
     }
   };
 
-  const CustomTooltip = ({ active, payload, label }) => {
-    if (active && payload && payload.length) {
-      const d = payload[0].payload;
-      const isAttack = d.attackConfidence > 0;
-      const sev = getSeverity(d.severityRaw);
-      return (
-        <div className={`glass-panel tooltip-panel ${isAttack ? 'attack' : 'normal'}`}>
-          <div className="tooltip-header">
-            <span className="tooltip-time">{label}</span>
-            {isAttack && (
-              <span className="tooltip-sev-badge" style={{background: sev.bg, color: sev.color, borderColor: sev.border}}>
-                {sev.label}
-              </span>
-            )}
-          </div>
-          {isAttack && (
-            <div className="tooltip-body">
-              <p className="threat-sig"><AlertTriangle size={14} className="inline mr-1"/> {d.signature}</p>
-              <div className="tooltip-metric">
-                <span className="ml-label">ML CONFIDENCE:</span>
-                <span className="ml-value">{d.attackConfidence}%</span>
-              </div>
-              <p className="detail-meta">SRC: {d.ip}</p>
-            </div>
-          )}
-          {!isAttack && (
-            <div className="tooltip-body">
-              <p className="threat-sig safe"><ShieldCheck size={14} className="inline mr-1"/> VERIFIED FLOW</p>
-              <div className="tooltip-metric">
-                <span className="ml-label">STABILITY:</span>
-                <span className="ml-value">{d.normalConfidence}%</span>
-              </div>
-              <p className="detail-meta">SRC: {d.ip}</p>
-            </div>
-          )}
-        </div>
-      );
-    }
-    return null;
-  };
-
   return (
     <>
       <div className="app-background"></div>
@@ -788,7 +790,7 @@ function App() {
                         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false}/>
                         <XAxis dataKey="time" stroke="#8b9bb4" tick={{fill:'#8b9bb4', fontSize:12, fontFamily:'Fira Code'}} tickMargin={10}/>
                         <YAxis stroke="#8b9bb4" tick={{fill:'#8b9bb4', fontSize:12, fontFamily:'Fira Code'}} domain={[0,100]} tickFormatter={v=>`${v}%`}/>
-                        <Tooltip content={<CustomTooltip/>}/>
+                        <Tooltip content={<ThreatChartTooltip/>}/>
                         <ReferenceLine y={90} label={{position:'top', value:'High Threat Threshold', fill:'rgba(255,0,110,0.5)', fontSize:10}} stroke="rgba(255,0,110,0.3)" strokeDasharray="3 3"/>
                         <Area type="monotone" dataKey="normalConfidence" stroke="#00f9ff" strokeWidth={2} fillOpacity={1} fill="url(#colorNormal)" animationDuration={1000}/>
                         <Area type="monotone" dataKey="attackConfidence" stroke="#ff006e" strokeWidth={3} fillOpacity={1} fill="url(#colorAttack)" animationDuration={1000} activeDot={{r:8, fill:'#ff006e', stroke:'#fff', strokeWidth:2}}/>
