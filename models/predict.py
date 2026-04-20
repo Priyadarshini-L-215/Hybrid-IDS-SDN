@@ -2,16 +2,20 @@ import pickle
 import json
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
+# Resolve paths relative to this script so the helper works from any shell location.
+BASE_DIR = Path(__file__).resolve().parent
 
 # Load model
-with open("model.pkl", "rb") as f:
+with open(BASE_DIR / "model.pkl", "rb") as f:
     model = pickle.load(f)
 
 # Load feature names
-with open("features.json", "r") as f:
+with open(BASE_DIR / "features.json", "r", encoding="utf-8") as f:
     features = json.load(f)
 
-print("Model loaded successfully ✅")
+print("Model loaded successfully")
 
 def predict_traffic(input_features):
     df = pd.DataFrame([input_features], columns=features)
@@ -26,4 +30,4 @@ if __name__ == "__main__":
     if result == 0:
         print("Prediction: NORMAL traffic")
     else:
-        print("Prediction: ATTACK 🚨")
+        print("Prediction: ATTACK")

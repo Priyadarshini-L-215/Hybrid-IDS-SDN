@@ -1,6 +1,7 @@
 # Environments
 .env
 .venv
+.venv_wsl/
 env/
 venv/
 ENV/
@@ -40,8 +41,10 @@ ui/dist/
 .pnp.js
 
 # Data & Logs (Suricata & ML Engine)
+data/alerts.db
 data/logs/*.json
 data/logs/*.log
+data/logs/*.txt
 data/logs/eve.json
 data/logs/ml_alerts.json
 
@@ -57,7 +60,14 @@ data/logs/ml_alerts.json
 *.swo
 .DS_Store
 Thumbs.db
+
+# Documentation
+*.md
+!README.md
+
+# AI Context Files
 GEMINI.md
+.github/copilot-instructions.md
 
 # Jupyter / Output
 .ipynb_checkpoints

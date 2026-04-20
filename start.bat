@@ -1,87 +1,60 @@
 @echo off
 setlocal EnableExtensions
-title Hybrid IDS Launcher
+title Anti-Gravity IDS Launcher
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "PYTHON_EXE=%ROOT%\.venv\Scripts\python.exe"
 set "UI_DIR=%ROOT%\ui"
 set "BACKEND_APP=%ROOT%\src\dashboard\app.py"
-set "SURICATA_SH_WIN=%ROOT%\start_suricata.sh"
-set "SURICATA_SH_WSL="
+set "START_IDS_SH=%ROOT%\start_ids.sh"
 
 echo =================================================================
-echo             HYBRID IDS MANAGEMENT SYSTEM
+echo             ANTI-GRAVITY HYBRID IDS LAUNCHER
 echo =================================================================
 echo [+] Project root: %ROOT%
+echo [+] Cleaning up existing instances...
+call "%ROOT%\stop.bat"
 echo.
 
-if not exist "%PYTHON_EXE%" (
-	echo [ERROR] Python virtual environment not found:
-	echo         %PYTHON_EXE%
-	echo [HINT] Run these commands and retry:
-	echo        python -m venv .venv
-	echo        .venv\Scripts\pip install -r models\requirements.txt
-	goto :finish
-)
-
-where npm >nul 2>&1
-if errorlevel 1 (
-	echo [ERROR] npm is not available in PATH. Install Node.js 18+ and retry.
-	goto :finish
-)
-
-if not exist "%UI_DIR%\package.json" (
-	echo [ERROR] Frontend project not found:
-	echo         %UI_DIR%
-	goto :finish
-)
-
-if not exist "%BACKEND_APP%" (
-	echo [ERROR] Backend entrypoint not found:
-	echo         %BACKEND_APP%
-	goto :finish
-)
-
-:: 1. Launch WSL Suricata Sensor
-echo [+] Launching Suricata Sensor in WSL...
+:: 1. Launch WSL Engine (Suricata + ML Consumer + WebSocket)
+echo [+] Launching WSL Pipeline (Suricata + ML Engine + WebSocket)...
 where wsl >nul 2>&1
 if errorlevel 1 (
-	echo [WARN] WSL is not installed. Skipping Suricata launch.
-) else (
-	for /f "delims=" %%I in ('wsl wslpath "%SURICATA_SH_WIN%" 2^>nul') do set "SURICATA_SH_WSL=%%I"
+    echo [ERROR] WSL is not installed. Failed to launch core IDS sensor.
+    pause
+    exit /b 1
 )
 
-if defined SURICATA_SH_WSL (
-	start "Suricata Sensor" wsl bash -lc "sed -i 's/\r$//' '%SURICATA_SH_WSL%' && bash '%SURICATA_SH_WSL%'"
-) else (
-	if not errorlevel 1 (
-		echo [WARN] Could not resolve WSL path for start_suricata.sh. Skipping Suricata launch.
-	)
-)
+:: Convert Windows path to WSL path and run
+for /f "delims=" %%I in ('wsl wslpath "%START_IDS_SH%"') do set "WSL_SCRIPT=%%I"
+start "IDS Core (WSL)" wsl -u root bash -lc "sed -i 's/\r$//' '%WSL_SCRIPT%' && bash '%WSL_SCRIPT%'"
 
-:: 2. Launch Flask Backend
+:: 2. Launch Flask Backend (Windows)
 echo [+] Launching Flask Dashboard Backend...
-start "Backend" /D "%ROOT%" cmd /k "echo [INFO] Starting Flask backend... && .venv\Scripts\python.exe src\dashboard\app.py"
+if not exist "%PYTHON_EXE%" (
+    echo [ERROR] Python virtual environment not found at %PYTHON_EXE%
+    pause
+    exit /b 1
+)
+start "Backend (Flask)" /D "%ROOT%" cmd /k "echo [DASHBOARD] Starting Relay... && .venv\Scripts\python.exe %BACKEND_APP%"
 
-:: 3. Launch Vite Frontend
-echo [+] Launching React Frontend...
-start "Frontend" /D "%UI_DIR%" cmd /k "npm run dev"
+:: 3. Launch React Frontend
+echo [+] Launching React Frontend (Vite)...
+if exist "%UI_DIR%\node_modules" (
+    start "Frontend (Vite)" /D "%UI_DIR%" cmd /k "npm run dev"
+) else (
+    echo [INFO] node_modules not found. Installing UI dependencies...
+    start "Frontend (Vite)" /D "%UI_DIR%" cmd /k "npm install && npm run dev"
+)
 
 echo.
 echo =================================================================
-echo [SUCCESS] Launch commands issued.
+echo [SUCCESS] IDS components are launching in separate windows.
 echo.
-echo - Dashboard (UI): http://localhost:5173
-echo - API Backend:    http://localhost:5000
-echo.
-echo INSTRUCTIONS:
-echo 1. Keep all opened terminal windows running.
-echo 2. Check the "Suricata Sensor" window for IDS logs.
-echo 3. If WSL launch failed, start Suricata manually.
+echo - Dashboard UI: http://localhost:5173
+echo - Backend API:  http://localhost:5000
+echo - Core Sensor:   Running in WSL
 echo =================================================================
 echo.
-
-:finish
 pause
-endlocal

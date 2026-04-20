@@ -1,16 +1,28 @@
-# React + Vite
+# Anti-Gravity IDS Dashboard (React)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A high-performance, real-time security dashboard for the Hybrid IDS system. Built with **React**, **Vite**, and **Lucide React** for enterprise-grade network monitoring.
 
-Currently, two official plugins are available:
+## 🚀 Key Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+*   **Real-time WebSocket Stream**: Subscribes to `ws://localhost:5000/ws/alerts` for instantaneous threat visualization.
+*   **Attack Lab**: Integrated Nmap scanner interface to simulate network events and verify detector responsiveness.
+*   **Glassmorphic Design**: A premium, cybersecurity-focused aesthetic designed for low-light SOC environments.
+*   **Adaptive Fallback**: Gracefully falls back to polling if the WebSocket relay is interrupted.
 
-## React Compiler
+## 🛠️ Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+# Install dependencies
+npm install
 
-## Expanding the ESLint configuration
+# Start development server
+npm run dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+The Vite dev server is configured to proxy API requests to the Flask backend on `http://127.0.0.1:5000`.
+
+## 📜 Scripts
+
+- `npm run dev`: Starts the local development environment.
+- `npm run build`: Compiles optimized assets for the `/dist` folder.
+- `npm run lint`: Performs static analysis for code quality.

@@ -2,149 +2,350 @@ import json
 import os
 import time
 import pickle
+import logging
+import signal
 import pandas as pd
 from pathlib import Path
+import sys
+from datetime import datetime, timezone
+import asyncio
+import websockets
 
-# Paths to files
-LOG_FILE = Path(r"D:\projects\FYP\data\logs\eve.json")
-ALERT_OUTPUT = Path(r"D:\projects\FYP\data\logs\ml_alerts.json")
-MODEL_PATH = Path(r"D:\projects\FYP\models\model.pkl")
-FEATURES_PATH = Path(r"D:\projects\FYP\models\features.json")
+# Add src directory to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.feature_extractor import extract_features_from_eve, load_feature_names, validate_feature_vector
+from common.database import init_db, add_alert
+from common.config import (
+    EVE_LOG, ML_ALERTS_LOG, HEARTBEAT_LOG, 
+    MODEL_PATH, FEATURES_PATH, 
+    POLL_INTERVAL_SEC, HEARTBEAT_INTERVAL_SEC,
+    WS_HOST, WS_PORT,
+    ensure_dirs
+)
+
+# Initialize
+ensure_dirs()
+init_db()
+
+# WebSocket broadcast state
+_ws_clients = set()
+_ws_lock = asyncio.Lock()
+_RUNNING = True
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+async def _ws_handler(websocket):
+    """
+    Handle new WebSocket connections.
+    Updated signature for websockets 14.0+ compatibility.
+    """
+    async with _ws_lock:
+        _ws_clients.add(websocket)
+        logger.info(f"[WS] New client connected. Total: {len(_ws_clients)}")
+    try:
+        await websocket.wait_closed()
+    finally:
+        async with _ws_lock:
+            if websocket in _ws_clients:
+                _ws_clients.discard(websocket)
+                logger.info(f"[WS] Client disconnected. Total: {len(_ws_clients)}")
+
+async def _broadcast(message: str):
+    """Broadcast message to all connected clients."""
+    async with _ws_lock:
+        if not _ws_clients:
+            return
+        # Copy set to avoid mutation issues during iteration
+        clients = list(_ws_clients)
+    
+    # Use gather to send to all clients in parallel
+    if clients:
+        tasks = []
+        for client in clients:
+            tasks.append(client.send(message))
+        
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 class MLEngine:
     def __init__(self):
-        print("[*] Initializing Machine Learning Model...")
+        logger.info("Initializing Machine Learning Model...")
+        self.use_sklearn = False
+        self.model = None
         
-        # Load the pre-trained model
-        with open(MODEL_PATH, "rb") as f:
-            self.model = pickle.load(f)
-            
-        # Load the feature names
-        with open(FEATURES_PATH, "r") as f:
-            self.features = json.load(f)
-            
-        print("[+] Model loaded successfully.")
+        try:
+            if MODEL_PATH.exists():
+                with open(MODEL_PATH, "rb") as f:
+                    content = f.read(10)
+                    f.seek(0)
+                    # Simple check for pickle format
+                    if content.startswith(b'\x80') or content.startswith(b'('):
+                        self.model = pickle.load(f)
+                        self.use_sklearn = True
+                        logger.info("[OK] Sklearn Random Forest model loaded")
+                    else:
+                        logger.info("Model file is placeholder - using heuristic classifier")
+            else:
+                logger.warning(f"Model file not found at {MODEL_PATH} - using heuristic classifier")
+        except Exception as e:
+            logger.warning(f"Could not load sklearn model: {e}. Using heuristics.")
+        
+        try:
+            self.features = load_feature_names(FEATURES_PATH)
+            logger.info(f"[OK] Loaded {len(self.features)} feature definitions")
+        except Exception as e:
+            logger.error(f"Failed to load features: {e}")
+            raise
 
     def extract_features(self, event):
-        """
-        Convert Suricata EVE JSON event into the feature array 
-        expected by the trained model.
-        """
-        # We only process 'flow' events since the model expects flow metrics
-        if event.get('event_type') != 'flow':
+        try:
+            # Shared logic from feature_extractor.py
+            feature_vector = extract_features_from_eve(event, self.features)
+            if feature_vector and validate_feature_vector(feature_vector):
+                return feature_vector
             return None
-            
-        flow_data = event.get('flow', {})
-        
-        # Suricata EVE flow metrics mapped to model features
-        fwd_pkts = float(flow_data.get('pkts_toserver', 0))
-        bwd_pkts = float(flow_data.get('pkts_toclient', 0))
-        fwd_bytes = float(flow_data.get('bytes_toserver', 0))
-        bwd_bytes = float(flow_data.get('bytes_toclient', 0))
-        
-        # Flow age in Suricata is in seconds. CICIDS 'Flow Duration' is often in microseconds.
-        flow_duration_us = float(flow_data.get('age', 0)) * 1_000_000
-        
-        # Calculate derived basic features
-        flow_bytes_per_sec = (fwd_bytes + bwd_bytes) / (flow_data.get('age', 1) + 0.0001)
-        flow_pkts_per_sec = (fwd_pkts + bwd_pkts) / (flow_data.get('age', 1) + 0.0001)
-
-        # Dictionary to hold mapped features. Unmapped complex statistics default to 0.0
-        feature_dict = {
-            "Flow Duration": flow_duration_us,
-            "Total Fwd Packets": fwd_pkts,
-            "Total Backward Packets": bwd_pkts,
-            "Fwd Packets Length Total": fwd_bytes,
-            "Bwd Packets Length Total": bwd_bytes,
-            "Flow Bytes/s": flow_bytes_per_sec,
-            "Flow Packets/s": flow_pkts_per_sec,
-            "Subflow Fwd Packets": fwd_pkts,
-            "Subflow Fwd Bytes": fwd_bytes,
-            "Subflow Bwd Packets": bwd_pkts,
-            "Subflow Bwd Bytes": bwd_bytes,
-            "Fwd Packets/s": fwd_pkts / (flow_data.get('age', 1) + 0.0001),
-            "Bwd Packets/s": bwd_pkts / (flow_data.get('age', 1) + 0.0001),
-        }
-        
-        # Build the final array ordered exactly as the model expects
-        feature_vector = []
-        for feature_name in self.features:
-            feature_vector.append(feature_dict.get(feature_name, 0.0))
-            
-        return feature_vector
+        except Exception as e:
+            logger.error(f"Feature extraction error: {e}")
+            return None
 
     def predict(self, feature_vector):
-        """
-        Run the ML model inference on the extracted features.
-        """
-        # Create a DataFrame as expected by the predict.py logic
-        df = pd.DataFrame([feature_vector], columns=self.features)
-        
-        prediction = self.model.predict(df)[0]
-        
-        # Convert prediction result to human-readable format
-        classification = "attack" if int(prediction) != 0 else "normal"
-        
-        return {
-            "classification": classification,
-            "raw_prediction": int(prediction)
-        }
+        try:
+            if self.use_sklearn and self.model is not None:
+                # Prepare data for model
+                df = pd.DataFrame([feature_vector], columns=self.features)
+                prediction = self.model.predict(df)[0]
+                try:
+                    proba = self.model.predict_proba(df)[0]
+                    confidence = float(max(proba)) * 100
+                except:
+                    confidence = 100.0
+                classification = "attack" if int(prediction) == 1 else "normal"
+            else:
+                classification, confidence = self._heuristic_predict(feature_vector)
+            
+            return {
+                "classification": classification,
+                "raw_prediction": 1 if classification == "attack" else 0,
+                "confidence": round(confidence, 2)
+            }
+        except Exception as e:
+            logger.error(f"Prediction error: {e}")
+            return {"classification": "error", "error": str(e)}
 
-def tail_eve_log(file_path):
-    """
-    Continuously tail the eve.json file for new log entries.
-    """
+    def _heuristic_predict(self, feature_vector):
+        """Fallback heuristics if ML model is unavailable."""
+        feature_dict = {name: val for name, val in zip(self.features, feature_vector)}
+        score = 0
+        # High volume/frequency signals
+        if feature_dict.get("Flow Bytes/s", 0) > 10_000_000: score += 40
+        if feature_dict.get("Flow Packets/s", 0) > 100_000: score += 40
+        if feature_dict.get("Packet Length Std", 0) > 500: score += 20
+        
+        # More aggressive heuristic for high-frequency low-payload flows (common in scans)
+        if feature_dict.get("Flow Bytes/s", 0) < 1000 and feature_dict.get("Flow Packets/s", 0) > 100: score += 30
+        
+        classification = "attack" if score >= 20 else "normal"
+        confidence = min(60 + score, 99)
+        return classification, confidence
+
+async def log_tailer():
+    """Main loop for tailing EVE log and processing alerts."""
+    global _RUNNING
     engine = MLEngine()
     
-    print(f"[*] Waiting for Suricata log file: {file_path}")
-    while not file_path.exists():
-        time.sleep(1)
-        
-    print(f"[*] Tailing {file_path} for new events...")
+    logger.info(f"Waiting for Suricata log file: {EVE_LOG}")
+    while not EVE_LOG.exists() and _RUNNING:
+        await asyncio.sleep(1)
     
-    with open(file_path, "r", encoding="utf-8") as f:
-        # Seek to the end of the file so we only process new logs
-        f.seek(0, os.SEEK_END)
-        
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.1)
-                continue
+    if not _RUNNING: return
+
+    logger.info(f"Tailing {EVE_LOG} for events...")
+    
+    # Persistent file handle
+    f = open(EVE_LOG, "r", encoding="utf-8")
+    f.seek(0, os.SEEK_END)
+    current_inode = os.fstat(f.fileno()).st_ino
+    
+    last_hb = 0.0
+
+    while _RUNNING:
+        line = f.readline()
+        now = time.time()
+
+        # Heartbeat logic
+        if now - last_hb >= HEARTBEAT_INTERVAL_SEC:
+            try:
+                with open(HEARTBEAT_LOG, "w") as hb:
+                    hb.write(datetime.now(timezone.utc).isoformat())
                 
+                # Periodic summary log for visibility
+                if 'events_in_session' not in locals(): events_in_session = 0
+                if 'last_activity' not in locals(): last_activity = now
+                
+                status_msg = f"[STATUS] Session events: {events_in_session} | "
+                if events_in_session == 0:
+                    status_msg += "Watching /var/log/suricata/eve.json..."
+                else:
+                    status_msg += f"Stable (Last: {int(now - last_activity)}s ago)"
+                logger.info(status_msg)
+                
+                last_hb = now
+            except: pass
+
+        if line:
+            if 'events_in_session' not in locals(): events_in_session = 0
+            events_in_session += 1
+            last_activity = now
             try:
                 event = json.loads(line)
                 
-                # 1. Extract Features
+                # 1. Feature Extraction
                 features = engine.extract_features(event)
-                
-                # Only run inference on flow events
-                if features is None:
-                    continue
-                
-                # 2. Run Inference
+                if features is None: continue
+
+                # 2. ML Prediction
                 prediction = engine.predict(features)
+                if prediction["classification"] == "error": continue
+
+                # 3. DB Logging
+                alert_info = event.get("alert", {})
+                # Override ML if Suricata already knows it's an alert
+                final_classification = prediction.get("classification")
+                final_confidence = prediction.get("confidence")
                 
-                # 3. Save combined result for Dashboard
-                dashboard_event = {
-                    "original_event": event,
-                    "ml_insights": prediction,
-                    "timestamp": event.get("timestamp")
+                if event.get("event_type") == "alert":
+                    final_classification = "attack"
+                    final_confidence = max(final_confidence, 90.0)
+
+                # Dynamic Signature Enrichment
+                sig = alert_info.get("signature")
+                if not sig:
+                    etype = event.get("event_type", "flow")
+                    if etype == "dns":
+                        dns = event.get("dns", {})
+                        sig = f"DNS Query: {dns.get('rrname', 'unknown')}"
+                    elif etype == "http":
+                        http = event.get("http", {})
+                        sig = f"HTTP {http.get('http_method')} -> {http.get('hostname', 'unknown')}"
+                    elif etype == "ssh":
+                        sig = "SSH Connection Attempt"
+                    else:
+                        proto = event.get("proto", "TCP")
+                        port = event.get("dest_port", "")
+                        sig = f"{proto} Potential Probe (Port {port})" if final_classification == "attack" else f"{proto} Flow"
+
+                db_payload = {
+                    "timestamp": event.get("timestamp"),
+                    "event_type": event.get("event_type"),
+                    "src_ip": event.get("src_ip"),
+                    "src_port": event.get("src_port"),
+                    "dest_ip": event.get("dest_ip"),
+                    "dest_port": event.get("dest_port"),
+                    "protocol": event.get("proto"),
+                    "alert_sig": sig,
+                    "prediction": final_classification,
+                    "confidence": final_confidence,
+                    "severity": alert_info.get("severity", 4),
+                    "category": alert_info.get("category", "ML Detection"),
+                    "raw_event": event
                 }
+                add_alert(db_payload)
+
+                # 4. WebSocket Broadcast
+                await _broadcast(json.dumps(db_payload))
                 
-                with open(ALERT_OUTPUT, "a", encoding="utf-8") as out:
-                    out.write(json.dumps(dashboard_event) + "\n")
-                    
-                alert_symbol = "🚨" if prediction['classification'] == "attack" else "✅"
-                print(f"{alert_symbol} Processed Flow Event | Prediction: {prediction['classification'].upper()}")
-                
-            except json.JSONDecodeError:
-                pass # Ignore malformed lines
+                logger.info(f"[{prediction['classification'].upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({prediction['confidence']}%)")
+
             except Exception as e:
-                print(f"[-] Error processing event: {e}")
+                logger.error(f"Processing error: {e}")
+        else:
+            # Check for rotation
+            try:
+                s = EVE_LOG.stat()
+                if s.st_ino != current_inode or s.st_size < f.tell():
+                    logger.info("Log rotation detected, reopening...")
+                    f.close()
+                    f = open(EVE_LOG, "r", encoding="utf-8")
+                    current_inode = os.fstat(f.fileno()).st_ino
+                    continue
+            except: pass
+            
+            await asyncio.sleep(POLL_INTERVAL_SEC)
+            continue
+
+        try:
+            event = json.loads(line)
+            
+            # 1. Feature Extraction
+            features = engine.extract_features(event)
+            if features is None: continue
+
+            # 2. ML Prediction
+            prediction = engine.predict(features)
+            if prediction["classification"] == "error": continue
+
+            # 3. DB Logging
+            alert_info = event.get("alert", {})
+            db_payload = {
+                "timestamp": event.get("timestamp"),
+                "event_type": event.get("event_type"),
+                "src_ip": event.get("src_ip"),
+                "src_port": event.get("src_port"),
+                "dest_ip": event.get("dest_ip"),
+                "dest_port": event.get("dest_port"),
+                "protocol": event.get("proto"),
+                "alert_sig": alert_info.get("signature", "Behavioral Anomaly"),
+                "prediction": prediction.get("classification"),
+                "confidence": prediction.get("confidence"),
+                "severity": alert_info.get("severity", 4),
+                "category": alert_info.get("category", "ML Detection"),
+                "raw_event": event
+            }
+            add_alert(db_payload)
+
+            # 4. WebSocket Broadcast
+            await _broadcast(json.dumps(db_payload))
+            
+            logger.info(f"[{prediction['classification'].upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({prediction['confidence']}%)")
+
+        except Exception as e:
+            logger.error(f"Processing error: {e}")
+
+    f.close()
+
+async def main():
+    """Application entry point."""
+    global _RUNNING
+    
+    # Handle shutdown signals
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: setattr(sys.modules[__name__], '_RUNNING', False))
+
+    logger.info(f"Starting Anti-Gravity IDS Consumer (WS: {WS_HOST}:{WS_PORT})")
+    
+    try:
+        # Start WebSocket server and log tailer concurrently
+        async with websockets.serve(_ws_handler, WS_HOST, WS_PORT):
+            logger.info(f"[WS] WebSocket server online at ws://{WS_HOST}:{WS_PORT}")
+            await log_tailer()
+    except Exception as e:
+        logger.critical(f"FATAL ERROR in main loop: {e}")
+        # Ensure we exit so start_ids.sh notices
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:
-        tail_eve_log(LOG_FILE)
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[*] Shutting down ML Engine consumer.")
+        pass
+    except Exception as e:
+        logger.critical(f"Unhandled exception: {e}")
+        sys.exit(1)

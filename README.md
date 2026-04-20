@@ -1,4 +1,4 @@
-# Hybrid Intrusion Detection System (IDS)
+# Anti-Gravity Hybrid Intrusion Detection System (IDS)
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![Flask](https://img.shields.io/badge/Framework-Flask-black?logo=flask)
@@ -8,101 +8,93 @@
 
 ## Project Overview
 
-Hybrid IDS is an advanced Network Intrusion Detection System (NIDS) designed for real-time monitoring and threat classification. The system integrates **Suricata** for high-performance network traffic analysis with a powerful **Machine Learning (ML)** engine for automated, intelligent threat detection. 
+Anti-Gravity IDS is a high-performance, real-time Network Intrusion Detection System (NIDS). It integrates **Suricata** for standard signature-based detection with a **Machine Learning (ML)** inference engine for automated behavioral threat classification, providing zero-day detection capabilities.
 
-By capturing network flow data, extracting relevant features, and leveraging a trained Random Forest model, the Hybrid IDS accurately identifies potential security breaches, presenting insights through a dynamic and professional dashboard interface.
+This project features a modern **WebSocket-based architecture**, enabling instantaneous threat visualization on a React dashboard with sub-millisecond relay latency.
 
 ---
 
 ## 🏗️ Architecture
 
-The system operates across four primary layers:
+The system utilizes a split-host architecture to maximize performance and compatibility:
 
-1. **Traffic Capture (Suricata):** Actively monitors network interfaces and generates highly detailed EVE JSON logs (`data/logs/eve.json`) containing rich flow metrics.
-2. **ML Inference Engine (`src/ml_engine`):** A persistent consumer service that tails Suricata logs in real-time, extracts over 70 pertinent network features, and executes inference using a tailored Random Forest classifier.
-3. **Model Management (`models/`):** Manages the AI core, including the training pipeline (`train.py`), serialized model artifacts (`model.pkl`), and feature blueprints (`features.json`).
-4. **Visual Subsystem & Dashboard (`ui/` & `src/dashboard/`):** A modern React-based frontend supported by a robust Flask backend API, providing real-time data visualization and alerts for security analysts.
-
----
-
-## 🛠️ Tech Stack
-
-* **Network Security Subsystem:** Suricata (IDS/IPS)
-* **Machine Learning Engine:** Scikit-learn (Random Forest), Pandas, NumPy
-* **Backend API & Web Orchestration:** Python 3.12, Flask
-* **Frontend Visualization:** React, Node.js (`npm`)
-* **Standard Data Exchange Format:** EVE JSON
+1.  **Core Sensor (WSL - Ubuntu/Linux)**: 
+    *   **Suricata**: Monitors raw network packets and generates EVE JSON logs.
+    *   **ML Consumer**: A high-performance Python service that tails logs, extracts 57 features, and executes inference. It broadcasts processed alerts via a native WebSocket server.
+2.  **Management Layer (Windows)**:
+    *   **Flask Backend**: Serves as a WebSocket relay and REST API. It maintains a persistent connection to the WSL sensor.
+    *   **React Dashboard**: A modern, glassmorphic UI that subscribes to the alert stream for real-time visualization.
+3.  **Data Layer**:
+    *   **SQLite (Persistent)**: Optimized database handler using batch-write logic to handle high-traffic bursts without locking.
 
 ---
 
-## 📂 Key Components & Directory Structure
+## 🚀 Getting Started
 
-* **`config/`**: Contains core configurations for Suricata and the application itself.
-* **`data/logs/`**: Repository for raw and processed network traffic and machine learning logs.
-* **`models/`**: Houses the training scripts (`train.py`) and compiled binary models.
-    * *Pipeline:* Trains the model employing class balancing, evaluating with Accuracy and ROC-AUC metrics, and generating feature importance reports.
-* **`src/ml_engine/`**: The real-time inference logic.
-    * *Consumer (`consumer.py`)*: Tails `eve.json`, extracts numerical features, categorizes traffic seamlessly as `normal` or `attack`, and pushes enriched security events to `ml_alerts.json`.
-* **`src/dashboard/`**: The Flask REST Backend driving analytical data consumption (`app.py`).
-* **`ui/`**: The React-based graphical command interface.
-* **`start.bat`**: Windows quick-launcher script.
+### Prerequisites
 
----
+*   **Windows 10/11** with **WSL2** installed.
+*   **Suricata** installed within the WSL distribution.
+*   **Python 3.12+** (Windows & WSL)
+*   **Node.js 18+** & NPM
 
-## 🚀 Development & Operational Workflow
+### Setup & Installation
 
-### System Requirements
-1. **Suricata** installed and properly bound to the primary network interface (configured via `config/suricata/`).
-2. **Python 3.12+**
-3. **Node.js 18+** & NPM
+1.  **Initialize the Environment**:
+    ```cmd
+    :: On Windows
+    python -m venv .venv
+    .venv\Scripts\activate
+    pip install -r requirements.txt
+    ```
 
-### Setup Instructions
+2.  **WSL Setup**:
+    Ensure your WSL environment has the necessary libraries:
+    ```bash
+    sudo apt update && sudo apt install suricata python3-pip
+    pip3 install websockets pandas scikit-learn
+    ```
 
-1. **Initialize the Python Environment:**
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-2. **Install Frontend Dependencies:**
-   ```bash
-   cd ui
-   npm install
-   ```
+3.  **Frontend Setup**:
+    ```cmd
+    cd ui
+    npm install
+    ```
 
-### Running the System
+### Operation
 
-You have two options for starting the system:
-
-#### Option A: Quick Launch (Windows)
-Simply run the included batch script to launch the unified servers automatically:
+**Quick Start**:
+Run the unified launcher from your Windows terminal:
 ```cmd
 start.bat
 ```
-*(This bootstrapper automatically launches both the Defense Backend/Flask API on Port 5000 and the React Visual Dashboard on Port 5173).*
+This script orchestrates the entire pipeline:
+*   Starts Suricata and the ML Engine in **WSL**.
+*   Starts the Flask Relay in **Windows**.
+*   Starts the Vite Dev Server for the **React UI**.
 
-#### Option B: Manual Startup
+---
 
-**1. Start the Machine Learning Engine:**
-*(For live inference against incoming Suricata logs)*
-```bash
-python src/ml_engine/consumer.py
-```
+## 📂 Key Components
 
-**2. Start the Backend API (Flask):**
-```bash
-python src/dashboard/app.py
-```
+*   **`src/ml_engine/consumer.py`**: The "Heart" of the system. Handles feature extraction, ML prediction, and WebSocket broadcasting.
+*   **`src/dashboard/app.py`**: The "Bridge". Relays data from the Linux sensor to the Windows browser.
+*   **`ui/src/App.jsx`**: The "Eyes". Real-time visualization with integrated attack simulation tools.
+*   **`src/common/database.py`**: High-performance logging subsystem.
 
-**3. Start the Frontend Application (React):**
-```bash
-cd ui
-npm run dev
-```
+---
 
-### Retraining the AI Model
-To train or update the core detection algorithms based on new network datasets:
-```bash
-cd models
-python train.py
+## 🛠️ Simulation & Testing
+
+The dashboard includes an **Attack Lab** (Nmap Integration) to test the system's responsiveness:
+1.  Navigate to the "Attack Lab" tab in the UI.
+2.  Enter a target IP and select a scan profile.
+3.  Monitor the "Monitor" tab to see real-time ML-classified alerts as the scan progresses.
+
+---
+
+## 🛡️ Shutdown
+To cleanly close all project components (including background WSL processes):
+```cmd
+stop.bat
 ```

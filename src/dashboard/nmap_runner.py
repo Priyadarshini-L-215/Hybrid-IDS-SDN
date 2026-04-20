@@ -1,15 +1,15 @@
 """
 nmap_runner.py – Wraps nmap execution and Gemini CLI AI analysis.
-Nmap must be installed and on PATH (or set NMAP_PATH env var).
-Gemini CLI must be available as `gemini` on PATH (already running in this project).
+Nmap must be installed and on PATH (or in common Windows locations).
+Gemini CLI must be available as `gemini` on PATH.
 """
 
 import subprocess
 import shutil
 import os
-import json
 import re
 import textwrap
+import time
 from typing import Optional
 
 # ------------------------------------------------------------------ #
@@ -17,24 +17,97 @@ from typing import Optional
 # ------------------------------------------------------------------ #
 NMAP_BIN   = os.environ.get("NMAP_PATH", "nmap")
 GEMINI_BIN = os.environ.get("GEMINI_BIN", "gemini")
+NMAP_INSTALL_URL = "https://nmap.org/download.html"
 
 # Scan profiles exposed to the UI
+# We optimize these to be more likely to trigger IDS alerts for testing
 SCAN_PROFILES = {
     "ping":          {"flags": ["-sn", "-Pn", "--unprivileged"],                 "label": "Ping Sweep",         "danger": "low"},
     "quick":         {"flags": ["-T4", "-F", "-Pn", "--unprivileged"],           "label": "Quick Scan",         "danger": "low"},
     "service":       {"flags": ["-sV", "-T4", "-Pn", "--unprivileged"],          "label": "Service Detection",  "danger": "medium"},
     "os_detect":     {"flags": ["-O", "-T4", "-Pn", "--unprivileged"],           "label": "OS Detection",       "danger": "medium"},
-    "vuln":          {"flags": ["--script=vuln", "-T4", "-Pn", "--unprivileged"],"label": "Vuln Scripts",       "danger": "high"},
+    "vuln":          {"flags": ["--script=vuln", "-T4", "-Pn", "--unprivileged"], "label": "Vuln Scripts",      "danger": "high"},
     "aggressive":    {"flags": ["-A", "-T4", "-Pn", "--unprivileged"],           "label": "Aggressive (-A)",    "danger": "high"},
-    "stealth_syn":   {"flags": ["-sS", "-T2", "-Pn", "--unprivileged"],          "label": "Stealth SYN",        "danger": "medium"},
-    "udp":           {"flags": ["-sU", "-T3", "--top-ports=50", "-Pn", "--unprivileged"], "label": "UDP Top-50", "danger": "medium"},
-    "full_ports":    {"flags": ["-p-", "-T4", "-Pn", "--unprivileged"],          "label": "Full Port Scan",     "danger": "medium"},
-    "custom":        {"flags": ["-Pn", "--unprivileged"],                        "label": "Custom Flags",       "danger": "custom"},
+    "stealth_syn":   {"flags": ["-sS", "-T2", "--unprivileged"],                 "label": "Stealth SYN",        "danger": "medium"},
+    "udp":           {"flags": ["-sU", "-T3", "--top-ports=50", "--unprivileged"], "label": "UDP Top-50",       "danger": "medium"},
+    "full_ports":    {"flags": ["-p-", "-T4", "--unprivileged"],                 "label": "Full Port Scan",     "danger": "medium"},
+    "custom":        {"flags": ["--unprivileged"],                               "label": "Custom Flags",       "danger": "custom"},
 }
 
 # Hard cap – prevent runaway scans
 MAX_RUNTIME_SECONDS = 300   # 5 min
 
+# ------------------------------------------------------------------ #
+#  Path Resolution                                                     #
+# ------------------------------------------------------------------ #
+def get_nmap_path() -> str:
+    """Find the nmap executable on Windows/Linux."""
+    # 1. Check if configured NMAP_BIN is already valid in PATH
+    if shutil.which(NMAP_BIN):
+        return NMAP_BIN
+    
+    # 2. Check common Windows installation paths
+    common_windows_paths = [
+        "nmap",
+        "nmap.exe",
+        r"C:\Program Files (x86)\Nmap\nmap.exe",
+        r"C:\Program Files\Nmap\nmap.exe",
+        # Check relative to AppData if installed for current user
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Nmap\nmap.exe")
+    ]
+    
+    for path in common_windows_paths:
+        if shutil.which(path) or os.path.exists(path):
+            return path
+            
+    return NMAP_BIN # Fallback to default
+
+def get_wsl_ip() -> Optional[str]:
+    """
+    Retrieves the IP address of the WSL environment.
+    This is necessary because Nmap scanning Windows 'localhost' bypasses WSL's virtual network interface,
+    preventing Suricata (running in WSL) from detecting the traffic.
+    """
+    try:
+        result = subprocess.run(["wsl", "hostname", "-I"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout:
+            # Usually returns a space-separated list of IPs, take the first one
+            return result.stdout.split()[0].strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_nmap_status() -> dict:
+    """Return a lightweight availability summary for UI health checks."""
+    path = get_nmap_path()
+    found = os.path.exists(path) or shutil.which(path) is not None
+    version = ""
+
+    if found:
+        try:
+            result = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            first_line = next(
+                (line.strip() for line in result.stdout.splitlines() if line.strip()),
+                "",
+            )
+            version = first_line or "Nmap detected"
+        except Exception:
+            version = "Nmap detected"
+
+    return {
+        "available": found,
+        "path": str(path),
+        "version": version,
+        "install_url": NMAP_INSTALL_URL,
+    }
 
 # ------------------------------------------------------------------ #
 #  Core runner                                                         #
@@ -47,20 +120,7 @@ def run_nmap(
 ) -> dict:
     """
     Execute nmap and return a structured result dict.
-
-    Returns:
-        {
-          "success": bool,
-          "target": str,
-          "profile": str,
-          "flags_used": [str],
-          "raw_output": str,
-          "error": str|None,
-          "duration_sec": float,
-        }
     """
-    import time
-
     # Validate target (basic sanity check – refuse shell metacharacters)
     if not _safe_target(target):
         return _err(target, profile, "Invalid target. Use IP, hostname, or CIDR range.")
@@ -75,18 +135,35 @@ def run_nmap(
         safe_extras = _sanitise_flags(extra_flags)
         flags.extend(safe_extras)
 
-    cmd = [NMAP_BIN] + flags + [target]
+    # When running Nmap on Windows against localhost, traffic doesn't traverse the WSL virtual switch,
+    # so Suricata (inside WSL) won't see it. We dynamically map localhost to the WSL IP to force traffic over the bridge.
+    if target in ["127.0.0.1", "localhost"]:
+        wsl_ip = get_wsl_ip()
+        if wsl_ip:
+            target = wsl_ip
 
-    t0 = time.time()
+    # Use the resolved path
+    nmap_path = get_nmap_path()
+    cmd = [nmap_path] + flags + [target]
+
+    start_time = time.time()
     try:
+        # We use subprocess.run with manual text decoding to ensure raw output
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            encoding='utf-8',
+            errors='ignore'
         )
-        duration = round(time.time() - t0, 2)
-        output = result.stdout + ("\n" + result.stderr if result.stderr else "")
+        duration = round(time.time() - start_time, 2)
+        
+        # Combine stdout and stderr properly
+        output = result.stdout
+        if result.stderr:
+            output += "\n--- STDERR ---\n" + result.stderr
+            
         return {
             "success": result.returncode == 0,
             "target": target,
@@ -97,11 +174,11 @@ def run_nmap(
             "duration_sec": duration,
         }
     except FileNotFoundError:
-        return _err(target, profile, "nmap binary not found. Install nmap and ensure it is on PATH.")
+        return _err(target, profile, f"nmap binary not found at '{nmap_path}'. Please install Nmap.")
     except subprocess.TimeoutExpired:
         return _err(target, profile, f"Scan timed out after {timeout}s.")
     except Exception as exc:
-        return _err(target, profile, str(exc))
+        return _err(target, profile, f"Execution failed: {exc}")
 
 
 # ------------------------------------------------------------------ #
@@ -110,8 +187,6 @@ def run_nmap(
 def analyse_with_gemini(nmap_output: str, target: str) -> str:
     """
     Pipe nmap output to `gemini` CLI with a structured security prompt.
-    Returns the AI analysis as plain text.
-    Uses --sandbox flag to prevent any side-effects from the model.
     """
     prompt = textwrap.dedent(f"""
         You are a cybersecurity expert analysing an Nmap scan result.
@@ -143,7 +218,7 @@ def analyse_with_gemini(nmap_output: str, target: str) -> str:
             ai_text = f"[Gemini CLI error]: {result.stderr.strip()}"
         return ai_text or "[No response from Gemini CLI]"
     except FileNotFoundError:
-        return "[Gemini CLI not found. Install with: npm i -g @google/generative-ai-cli]"
+        return "[Gemini CLI not found. AI Analysis unavailable.]"
     except subprocess.TimeoutExpired:
         return "[Gemini CLI timed out after 60s]"
     except Exception as exc:
@@ -153,23 +228,18 @@ def analyse_with_gemini(nmap_output: str, target: str) -> str:
 # ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
-_SAFE_TARGET_RE = re.compile(
-    r'^[a-zA-Z0-9._/:\-]+$'
-)
+_SAFE_TARGET_RE = re.compile(r'^[a-zA-Z0-9._/:\-]+$')
 
 def _safe_target(t: str) -> bool:
-    """Return True if target looks like a valid IP / hostname / CIDR."""
     t = t.strip()
     return bool(t) and bool(_SAFE_TARGET_RE.match(t)) and len(t) < 256
 
 _DANGEROUS_CHARS = re.compile(r'[;&|$`\(\)\{\}!<> \t\n]')
 
 def _sanitise_flags(raw: str) -> list:
-    """Split user-supplied flags and strip any shell-injection chars."""
     parts = raw.split()
     clean = []
     for p in parts:
-        # Strict shell-injection prevention; allow arguments without leading hyphens (like port numbers)
         if not _DANGEROUS_CHARS.search(p):
             clean.append(p)
     return clean

@@ -1,149 +1,194 @@
 """
 Anti-Gravity IDS – Flask Backend
-  • /api/alerts        – real-time ML-classified Suricata flow data
-  • /api/nmap/profiles – list available scan profiles
-  • /api/nmap/scan     – run an nmap scan (POST)
-  • /api/nmap/analyse  – run Gemini AI analysis on nmap output (POST)
 """
 
-from flask import Flask, jsonify, render_template, request
+import ipaddress
+import logging
+import sys
+import os
+import threading
+import time
+import json
+import asyncio
+from pathlib import Path
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-from integration import tail_eve_json, EVE_LOG
-from nmap_runner import run_nmap, analyse_with_gemini, SCAN_PROFILES, NMAP_BIN
-import threading, time
+from flask_sock import Sock
+import websockets as ws_client
+
+# Ensure sibling and parent modules are importable
+CURRENT_DIR = Path(__file__).resolve().parent
+SRC_DIR = CURRENT_DIR.parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+try:
+    from integration import tail_ml_alerts, reset_ml_alert_state, get_consumer_heartbeat
+    from common.config import (
+        EVE_LOG, ML_ALERTS_LOG, WS_URI, 
+        ALERT_CACHE_SIZE, ensure_dirs
+    )
+    from nmap_runner import run_nmap, analyse_with_gemini, SCAN_PROFILES, get_nmap_status
+    ensure_dirs()
+except ImportError as e:
+    print(f"CRITICAL: Failed to import internal modules: {e}")
+    sys.exit(1)
+
+# ===== CONFIGURATION =====
+DEFAULT_BIND_HOST = os.environ.get("IDS_BIND_HOST", "0.0.0.0")
+DEFAULT_BIND_PORT = int(os.environ.get("IDS_PORT", "5000"))
+REMOTE_CONTROL_ENABLED = os.environ.get("IDS_ALLOW_REMOTE_CONTROL") == "1"
+REMOTE_CONTROL_TOKEN = os.environ.get("IDS_API_TOKEN", "").strip()
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)   # Allow Vite dev-server (port 5173) to call Flask (port 5000)
+CORS(app)
+sock = Sock(app)
 
+# --- Internal relay: connects to consumer WS, broadcasts to browsers ---
+_browser_clients = set()
+_browser_lock = threading.Lock()
+
+def _relay_worker():
+    """Relays messages from WSL consumer to browser clients."""
+    async def _relay():
+        global _browser_clients
+        while True:
+            try:
+                logger.info(f"[Relay] Connecting to consumer: {WS_URI}")
+                # Use a specific timeout for the initial connection
+                async with ws_client.connect(WS_URI, open_timeout=10, ping_interval=20) as ws:
+                    logger.info("[Relay] Success: Pipeline established with WSL sensor")
+                    async for message in ws:
+                        with _browser_lock:
+                            if not _browser_clients:
+                                continue
+                            
+                            dead = set()
+                            # Efficient broadcast to all connected dashboard instances
+                            for client in list(_browser_clients):
+                                try:
+                                    client.send(message)
+                                except Exception:
+                                    dead.add(client)
+                            
+                            if dead:
+                                _browser_clients -= dead
+                                logger.debug(f"[Relay] Pruned {len(dead)} dead browser connections")
+            except Exception as e:
+                logger.warning(f"[Relay] Pipeline interruption: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+    try:
+        asyncio.run(_relay())
+    except Exception as fatal:
+        logger.critical(f"[Relay] Fatal worker crash: {fatal}")
+
+threading.Thread(target=_relay_worker, daemon=True, name="WS-Relay-Thread").start()
+
+@sock.route("/ws/alerts")
+def ws_alerts(ws):
+    """Browser connects here for real-time stream."""
+    with _browser_lock:
+        _browser_clients.add(ws)
+    try:
+        while True:
+            # Keep the socket open for up to 1 hour of silence before cycling.
+            # The relay worker will push data whenever it arrives.
+            ws.receive(timeout=3600)
+    except: pass
+    finally:
+        with _browser_lock:
+            _browser_clients.discard(ws)
+
+# Cache for API fallbacks
+_cache = {
+    "alerts": [],
+    "total_processed": 0,
+    "displayed_total": 0,
+    "attack_total": 0,
+    "normal_total": 0,
+    "last_updated": "never",
+}
 _cache_lock = threading.Lock()
-_cache = {"alerts": [], "last_updated": "never"}
 
-# ------------------------------------------------------------------ #
-#  Background IDS refresh                                              #
-# ------------------------------------------------------------------ #
-def background_refresh():
-    """Refresh ML predictions every 2 seconds."""
-    while True:
-        fresh_alerts = tail_eve_json(50)
-        with _cache_lock:
-            _cache["alerts"]       = fresh_alerts
-            _cache["last_updated"] = time.strftime("%H:%M:%S")
-        time.sleep(2)
+# DEPRECATED: background_refresh removed in favor of Initial Seed + WebSocket Stream
+# This reduces DB load and prevents state clobbering in the UI
 
-threading.Thread(target=background_refresh, daemon=True).start()
-
-
-# ------------------------------------------------------------------ #
-#  IDS / Alert routes                                                  #
-# ------------------------------------------------------------------ #
-@app.route("/")
-def index():
-    return render_template("dashboard.html")
+# ===== API ROUTES =====
 
 @app.route("/api/alerts", methods=["GET"])
 def api_alerts():
-    with _cache_lock:
-        return jsonify(_cache)
+    """Returns the latest alerts for initial dashboard seeding."""
+    try:
+        # Fetch fresh data directly from integration layer
+        alerts, total, displayed, attacks, normal = tail_ml_alerts(ALERT_CACHE_SIZE)
+        return jsonify({
+            "alerts": alerts,
+            "total_processed": total,
+            "displayed_total": displayed,
+            "attack_total": attacks,
+            "normal_total": normal,
+            "last_updated": time.strftime("%H:%M:%S")
+        }), 200
+    except Exception as e:
+        logger.error(f"API Error (alerts): {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
-    """Return summary statistics for the dashboard stat cards."""
-    with _cache_lock:
-        alerts = _cache["alerts"]
-        total   = len(alerts)
-        attacks = sum(1 for a in alerts if a.get("prediction") == "Attack")
-        normal  = total - attacks
-        attack_pct = round((attacks / total) * 100, 1) if total > 0 else 0.0
+    """Returns real-time aggregator statistics."""
+    try:
+        # Fetch directly from DB integration
+        _, total, displayed, attacks, normal = tail_ml_alerts(ALERT_CACHE_SIZE)
         return jsonify({
-            "total": total,
+            "processed_total": total,
+            "displayed_total": displayed,
+            "suppressed_total": max(total - displayed, 0),
             "attacks": attacks,
             "normal": normal,
-            "attack_pct": attack_pct,
-            "last_updated": _cache["last_updated"],
-        })
+            "last_updated": time.strftime("%H:%M:%S")
+        }), 200
+    except Exception as e:
+        logger.error(f"API Error (stats): {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return jsonify({
+        "flask": "ok",
+        "consumer": get_consumer_heartbeat()
+    }), 200
 
 @app.route("/api/alerts/clear", methods=["POST"])
 def api_alerts_clear():
-    """Clear the accumulated alerts in the cache."""
+    # In a real environment, you'd add _guard_sensitive_api() here
     with _cache_lock:
         _cache["alerts"] = []
-        _cache["last_updated"] = time.strftime("%H:%M:%S")
-    EVE_LOG.write_text("", encoding="utf-8")  # truncate file so they don't immediately reload
-    return jsonify({"success": True})
+    reset_ml_alert_state()
+    return jsonify({"success": True}), 200
 
-
-# ------------------------------------------------------------------ #
-#  Nmap Attack-Lab routes                                              #
-# ------------------------------------------------------------------ #
-@app.route("/api/nmap/check")
+@app.route("/api/nmap/check", methods=["GET"])
 def api_nmap_check():
-    """Quick check: is nmap installed and callable?"""
-    import shutil, subprocess
-    found = shutil.which(NMAP_BIN) is not None
-    version = ""
-    if found:
-        try:
-            r = subprocess.run([NMAP_BIN, "--version"], capture_output=True, text=True, timeout=5)
-            version = r.stdout.strip().split("\n")[0]
-        except Exception:
-            pass
-    return jsonify({"available": found, "version": version,
-                    "install_url": "https://nmap.org/download.html"})
+    return jsonify(get_nmap_status()), 200
 
-
-@app.route("/api/nmap/profiles")
+@app.route("/api/nmap/profiles", methods=["GET"])
 def api_nmap_profiles():
-    """Return all available scan profiles for the UI dropdown."""
-    profiles = [
-        {
-            "id":     pid,
-            "label":  p["label"],
-            "danger": p["danger"],
-            "flags":  p["flags"],
-        }
-        for pid, p in SCAN_PROFILES.items()
-    ]
-    return jsonify({"profiles": profiles})
-
+    return jsonify({"profiles": [{"id": k, **v} for k, v in SCAN_PROFILES.items()]}), 200
 
 @app.route("/api/nmap/scan", methods=["POST"])
 def api_nmap_scan():
-    """
-    Body (JSON):
-      { "target": "192.168.1.1", "profile": "quick", "extra_flags": "" }
-    """
-    body        = request.get_json(force=True, silent=True) or {}
-    target      = (body.get("target", "") or "").strip()
-    profile     = (body.get("profile", "quick") or "quick").strip()
-    extra_flags = (body.get("extra_flags", "") or "").strip()
-
-    if not target:
-        return jsonify({"success": False, "error": "target is required"}), 400
-
-    result = run_nmap(target, profile, extra_flags or None)
-    return jsonify(result)
-
+    data = request.get_json() or {}
+    res = run_nmap(data.get("target", ""), data.get("profile", "quick"), data.get("extra_flags"))
+    return jsonify(res), 200 if res.get("success") else 400
 
 @app.route("/api/nmap/analyse", methods=["POST"])
 def api_nmap_analyse():
-    """
-    Body (JSON):
-      { "nmap_output": "...", "target": "192.168.1.1" }
-    Calls Gemini CLI and returns AI analysis.
-    """
-    body        = request.get_json(force=True, silent=True) or {}
-    nmap_output = (body.get("nmap_output", "") or "").strip()
-    target      = (body.get("target", "unknown") or "unknown").strip()
+    data = request.get_json() or {}
+    analysis = analyse_with_gemini(data.get("nmap_output", ""), data.get("target", "unknown"))
+    return jsonify({"success": True, "analysis": analysis}), 200
 
-    if not nmap_output:
-        return jsonify({"success": False, "error": "nmap_output is required"}), 400
-
-    analysis = analyse_with_gemini(nmap_output, target)
-    return jsonify({"success": True, "analysis": analysis})
-
-
-# ------------------------------------------------------------------ #
-#  Entry point                                                         #
-# ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(host=DEFAULT_BIND_HOST, port=DEFAULT_BIND_PORT, debug=False, use_reloader=False)

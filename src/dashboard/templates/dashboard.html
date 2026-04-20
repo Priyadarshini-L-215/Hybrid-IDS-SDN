@@ -6,7 +6,15 @@
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f9; }
         .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0px 4px 6px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
+        h1 { color: #333; margin: 0; }
+        .title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .badge { background: #007bff; color: #fff; border-radius: 999px; padding: 4px 10px; font-size: 0.9rem; }
+        .status-banner { margin-top: 12px; padding: 8px 10px; border-radius: 6px; font-weight: 600; }
+        .status-live { background: #e7f9ee; color: #146c43; border: 1px solid #b4e3c7; }
+        .status-stale { background: #fff8e1; color: #8a6d1d; border: 1px solid #f0db9f; }
+        .status-down { background: #fde7e9; color: #8f1f2c; border: 1px solid #efb8bd; }
+        .stats { margin-top: 10px; display: flex; gap: 20px; flex-wrap: wrap; color: #333; }
+        .debug { margin-top: 12px; padding: 10px; background: #0b1220; color: #dbeafe; border-radius: 8px; font-size: 0.85rem; }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; }
         th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
         th { background-color: #007bff; color: white; }
@@ -18,8 +26,18 @@
 <body>
 
 <div class="container">
-    <h1>Suricata AI-IDS Dashboard</h1>
+    <div class="title-row">
+        <h1>Live IDS Activity</h1>
+        <span id="row-count-badge" class="badge">Processed: 0</span>
+    </div>
     <p>Last Refresh: <span id="last-updated">Waiting...</span></p>
+    <div id="consumer-status" class="status-banner status-down">✗ Consumer Down</div>
+    <div class="stats">
+        <div>Attacks: <strong id="attack-count">0</strong></div>
+        <div>Normal: <strong id="normal-count">0</strong></div>
+        <div>Total Processed: <strong id="processed-count">0</strong></div>
+        <div>Displayed Window: <strong id="displayed-count">0</strong></div>
+    </div>
 
     <table>
         <thead>
@@ -37,14 +55,160 @@
             <tr><td colspan="7" style="text-align: center;">Loading data from ML Engine...</td></tr>
         </tbody>
     </table>
+
+    <div class="debug">
+        <strong>Debug</strong>
+        <div>Last file update: <span id="last-file-update">N/A</span></div>
+        <div id="debug-console">Waiting for /api/debug...</div>
+    </div>
 </div>
 
 <script>
+    const REFRESH_INTERVAL = 10000;
+    const HEALTH_INTERVAL = 5000;
+
+    // --- WebSocket real-time feed ---
+    const wsUrl = `ws://${location.host}/ws/alerts`;
+    let ws = null;
+    let wsActive = false;
+
+    function connectWS() {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            wsActive = true;
+            console.log("[WS] Connected to live feed");
+            updateConnectionBadge(true);
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const alert = JSON.parse(event.data);
+                injectAlert(alert);          // add single row to top of table
+                updateStatsFromAlert(alert); // increment counters
+            } catch(e) {
+                console.warn("[WS] Bad message", e);
+            }
+        };
+
+        ws.onclose = () => {
+            wsActive = false;
+            console.warn("[WS] Disconnected, retrying in 3s...");
+            updateConnectionBadge(false);
+            setTimeout(connectWS, 3000);
+        };
+
+        ws.onerror = (e) => {
+            console.error("[WS] Error", e);
+            ws.close();
+        };
+    }
+
+    function formatTimestamp(ts) {
+        if (!ts) return "Unknown";
+        // Convert to a simple legible format, or just return raw if already iso
+        try { return new Date(ts).toISOString().replace("T", " ").split(".")[0]; }
+        catch(e) { return ts; }
+    }
+
+    function injectAlert(alert) {
+        const tbody = document.getElementById("alert-table-body");
+
+        // Remove "no alerts" placeholder if present
+        const placeholder = tbody.querySelector("[data-placeholder]");
+        if (placeholder) placeholder.remove();
+
+        const isPredictionAttack = (alert.prediction || "").toLowerCase() === "attack";
+        const row = document.createElement("tr");
+        row.className = isPredictionAttack ? "attack" : "normal";
+        row.innerHTML = `
+            <td>${formatTimestamp(alert.timestamp)}</td>
+            <td>${alert.src_ip || "N/A"}</td>
+            <td>${alert.dest_ip || "N/A"}:${alert.dest_port || "-"}</td>
+            <td>${alert.dest_port || "-"}</td>
+            <td>${alert.alert_sig || alert.event_type || "flow"}</td>
+            <td><span class="${isPredictionAttack 
+                ? "prediction-attack" 
+                : "prediction-normal"}">${alert.prediction || "Unknown"}</span></td>
+            <td>${alert.confidence || 0}%</td>
+        `;
+
+        // Insert at top, cap table at 100 rows
+        if(tbody.firstChild) {
+            tbody.insertBefore(row, tbody.firstChild);
+        } else {
+            tbody.appendChild(row);
+        }
+        while (tbody.children.length > 100) {
+            tbody.removeChild(tbody.lastChild);
+        }
+    }
+
+    // Lightweight stat counter that increments without a full re-render
+    let _statTotal = 0;
+    let _statAttacks = 0;
+
+    function updateStatsFromAlert(alert) {
+        _statTotal++;
+        if ((alert.prediction || "").toLowerCase() === "attack") _statAttacks++;
+        document.getElementById("processed-count").textContent = _statTotal;
+        document.getElementById("attack-count").textContent = _statAttacks;
+        document.getElementById("normal-count").textContent = _statTotal - _statAttacks;
+    }
+
+    function updateConnectionBadge(online) {
+        const banner = document.getElementById("consumer-status");
+        if (banner) {
+            if(online) {
+                banner.className = "status-banner status-live";
+                banner.innerText = "● WebSocket Live";
+            } else {
+                banner.className = "status-banner status-down";
+                banner.innerText = "✗ WebSocket Down";
+            }
+        }
+    }
+
+    // Start WebSocket on page load
+    connectWS();
+
+    function setStatusBanner(health) {
+        const banner = document.getElementById('consumer-status');
+        const secondsAgo = Number(health?.consumer_heartbeat?.seconds_ago ?? 999999);
+        const alive = Boolean(health?.consumer_alive);
+
+        banner.className = 'status-banner';
+        if (!alive) {
+            banner.classList.add('status-down');
+            banner.innerText = '✗ Consumer Down';
+            return;
+        }
+
+        if (secondsAgo > 30) {
+            banner.classList.add('status-stale');
+            banner.innerText = '⚠ Consumer Stale';
+            return;
+        }
+
+        banner.classList.add('status-live');
+        banner.innerText = '● Live';
+    }
+
     function fetchAlerts() {
         fetch('/api/alerts')
             .then(response => response.json())
             .then(data => {
                 document.getElementById('last-updated').innerText = data.last_updated;
+                document.getElementById('processed-count').innerText = data.total_processed ?? 0;
+                document.getElementById('displayed-count').innerText = data.displayed_total ?? 0;
+
+                const attacks = Number(data.attack_total ?? 0);
+                const processed = Number(data.total_processed ?? 0);
+                const normal = Number(data.normal_total ?? Math.max(processed - attacks, 0));
+                document.getElementById('attack-count').innerText = attacks;
+                document.getElementById('normal-count').innerText = normal;
+                document.getElementById('row-count-badge').innerText = `Processed: ${processed}`;
+
                 const tbody = document.getElementById('alert-table-body');
                 tbody.innerHTML = '';
                 
@@ -75,9 +239,39 @@
             .catch(err => console.error("Failed to fetch alerts:", err));
     }
 
-    // Refresh every 5 seconds
-    setInterval(fetchAlerts, 5000);
+    function pollHealth() {
+        fetch('/api/health')
+            .then(response => response.json())
+            .then(data => {
+                setStatusBanner(data);
+            })
+            .catch(() => {
+                setStatusBanner({ consumer_alive: false });
+            });
+    }
+
+    function pollDebug() {
+        fetch('/api/debug')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('last-file-update').innerText = data.ml_alerts_mtime ?? 'N/A';
+                document.getElementById('debug-console').innerText = `ml_alerts_size=${data.ml_alerts_size ?? 0} bytes | lines=${data.ml_alerts_lines ?? 0}`;
+                setStatusBanner({
+                    consumer_alive: data?.consumer_heartbeat?.alive ?? false,
+                    consumer_heartbeat: data?.consumer_heartbeat ?? {},
+                });
+            })
+            .catch(err => {
+                document.getElementById('debug-console').innerText = `debug error: ${err}`;
+            });
+    }
+
+    setInterval(fetchAlerts, REFRESH_INTERVAL);
+    setInterval(pollHealth, HEALTH_INTERVAL);
+    setInterval(pollDebug, HEALTH_INTERVAL);
     fetchAlerts(); // Initial call
+    pollHealth();
+    pollDebug();
 </script>
 
 </body>
