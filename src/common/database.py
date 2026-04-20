@@ -2,9 +2,8 @@ import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
-from common.config import BASE_DIR
+from common.config import BASE_DIR, DB_PATH
 
-DB_PATH = BASE_DIR / "data" / "alerts.db"
 logger = logging.getLogger(__name__)
 
 class DatabaseHandler:
@@ -16,8 +15,10 @@ class DatabaseHandler:
 
     def _connect(self):
         try:
-            # Allow multi-threaded access (synchronization handled by SQLite or app logic)
+            # Allow multi-threaded access and enable WAL mode for high concurrency performance
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.row_factory = sqlite3.Row
         except Exception as e:
             logger.error(f"Database connection failed: {e}")

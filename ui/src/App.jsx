@@ -255,17 +255,26 @@ function App() {
     return () => wsRef.current?.close();
   }, []);
 
-  // Data Pipeline: Initial Seeding ONLY
+  // Data Pipeline: Initial Seeding
   useEffect(() => {
     const seedData = async () => {
       try {
-        console.log("[Pipeline] Seeding initial state from database...");
-        const response = await fetch('/api/alerts');
+        console.log("[Pipeline] Fetching historical state...");
+        const response = await fetch('http://127.0.0.1:5000/api/alerts');
         const json = await response.json();
-        // Only seed if we haven't received live data yet or if it's the first run
+        
         setData(prev => {
-           if (prev.total_processed > 0) return prev; // Live data already in, don't overwrite
-           return json;
+           // Create a merged list of unique alerts
+           const existingIds = new Set(prev.alerts.map(a => `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
+           const newHistorical = json.alerts.filter(a => !existingIds.has(`${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
+           
+           return {
+             ...json,
+             alerts: [...newHistorical, ...prev.alerts].slice(-100),
+             total_processed: Math.max(json.total_processed, prev.total_processed),
+             attack_total: Math.max(json.attack_total, prev.attack_total),
+             normal_total: Math.max(json.normal_total, prev.normal_total)
+           };
         });
       } catch (error) {
         console.error("[Pipeline] Seeding error:", error);

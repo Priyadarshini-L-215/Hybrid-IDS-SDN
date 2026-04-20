@@ -18,8 +18,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from common.config import EVE_LOG, ML_ALERTS_LOG, HEARTBEAT_LOG, ALERT_CACHE_SIZE
-
+from common.config import EVE_LOG, ML_ALERTS_LOG, HEARTBEAT_LOG, ALERT_CACHE_SIZE, DATA_SERVICE_PORT
+import requests
 from common.database import query_alerts, get_stats
 
 def reset_ml_alert_state():
@@ -28,18 +28,31 @@ def reset_ml_alert_state():
 
 def tail_ml_alerts(cache_size=ALERT_CACHE_SIZE):
     """
-    Fetch alerts and stats from the SQLite database.
-    This replaces the slow file-reading mechanism.
+    Fetch alerts and stats from the internal Bridge (WSL) or local DB.
     """
     try:
-        # 1. Get recent alerts (SQL query is much faster than parsing JSON text)
-        db_alerts = query_alerts(limit=500)
+        # Check platform - if Windows, we hit the WSL Data Service
+        if sys.platform == "win32":
+            try:
+                # 1. Fetch alerts from Bridge
+                resp = requests.get(f"http://127.0.0.1:{DATA_SERVICE_PORT}/api/alerts", timeout=2)
+                db_alerts = resp.json()
+                
+                # 2. Fetch stats from Bridge
+                resp_s = requests.get(f"http://127.0.0.1:{DATA_SERVICE_PORT}/api/stats", timeout=2)
+                stats = resp_s.json()
+            except Exception as e:
+                logger.warning(f"WSL Data Service unreachable ({e}), falling back to direct DB access...")
+                db_alerts = query_alerts(limit=500)
+                stats = get_stats()
+        else:
+            # Native Linux execution
+            db_alerts = query_alerts(limit=500)
+            stats = get_stats()
         
-        # 2. Map DB format back to the dashboard format
+        # Mapping for dashboard format
         alerts = []
         for a in db_alerts:
-            # Reconstruct the format expected by the frontend
-            # Filtering noise: Only show attacks or non-flow events in the feed
             if a['event_type'] == 'flow' and a['prediction'].lower() == 'normal':
                 continue
 
@@ -58,11 +71,6 @@ def tail_ml_alerts(cache_size=ALERT_CACHE_SIZE):
                 "event_type": a['event_type']
             })
 
-        # 3. Get global stats
-        stats = get_stats()
-        
-        # Format for compatibility with app.py cache
-        # (alerts, total_processed, displayed_total, attack_total, normal_total)
         return (
             alerts[:cache_size], 
             stats['total_processed'], 
@@ -71,7 +79,7 @@ def tail_ml_alerts(cache_size=ALERT_CACHE_SIZE):
             stats['normal_total']
         )
     except Exception as e:
-        logger.error(f"Error reading database: {e}")
+        logger.error(f"Error seeding data: {e}")
         return ([], 0, 0, 0, 0)
 
 

@@ -20,9 +20,12 @@ from common.config import (
     EVE_LOG, ML_ALERTS_LOG, HEARTBEAT_LOG, 
     MODEL_PATH, FEATURES_PATH, 
     POLL_INTERVAL_SEC, HEARTBEAT_INTERVAL_SEC,
-    WS_HOST, WS_PORT,
+    WS_HOST, WS_PORT, DATA_SERVICE_PORT,
     ensure_dirs
 )
+from ml_engine.data_service import start_data_service
+from ml_engine.firewall import ActiveFirewall
+import collections
 
 # Initialize
 ensure_dirs()
@@ -160,6 +163,12 @@ async def log_tailer():
     global _RUNNING
     engine = MLEngine()
     
+    # Stateful Tracking for Flow Correlation
+    # Stores timestamps of flows per IP: {ip: [ts1, ts2, ...]}
+    flow_history = collections.defaultdict(list)
+    port_history = collections.defaultdict(set)
+    WINDOW_SIZE = 10.0 # seconds
+    
     logger.info(f"Waiting for Suricata log file: {EVE_LOG}")
     while not EVE_LOG.exists() and _RUNNING:
         await asyncio.sleep(1)
@@ -241,7 +250,7 @@ async def log_tailer():
                         port = event.get("dest_port", "")
                         sig = f"{proto} Potential Probe (Port {port})" if final_classification == "attack" else f"{proto} Flow"
 
-                db_payload = {
+                    db_payload = {
                     "timestamp": event.get("timestamp"),
                     "event_type": event.get("event_type"),
                     "src_ip": event.get("src_ip"),
@@ -256,6 +265,43 @@ async def log_tailer():
                     "category": alert_info.get("category", "ML Detection"),
                     "raw_event": event
                 }
+
+                # --- 3a. Stateful Flow Correlation ---
+                src_ip = db_payload['src_ip']
+                if src_ip and src_ip not in ["127.0.0.1", "172.25.16.1"]:
+                    flow_history[src_ip].append(now)
+                    if db_payload['dest_port']:
+                        port_history[src_ip].add(db_payload['dest_port'])
+                    
+                    # Cleanup old entries
+                    flow_history[src_ip] = [ts for ts in flow_history[src_ip] if now - ts < WINDOW_SIZE]
+                    
+                    # Detection Rules
+                    detected_scan = False
+                    if len(port_history[src_ip]) > 25:
+                        final_classification = "attack"
+                        final_confidence = 99.0
+                        db_payload['alert_sig'] = f"Stateful Port Scan (Targeting {len(port_history[src_ip])} ports)"
+                        db_payload['category'] = "Reconnaissance"
+                        detected_scan = True
+                        port_history[src_ip].clear() # Reset after detection
+                    
+                    if len(flow_history[src_ip]) > 100:
+                        final_classification = "attack"
+                        final_confidence = 98.0
+                        db_payload['alert_sig'] = "Volumetric Flow Anomaly (DoS Pattern)"
+                        db_payload['category'] = "Resource Exhaustion"
+                        detected_scan = True
+                    
+                    if detected_scan:
+                        db_payload['prediction'] = final_classification
+                        db_payload['confidence'] = final_confidence
+
+                # --- 3b. Active IPS (Firewall) ---
+                if final_classification == "attack" and final_confidence >= 95.0:
+                    ActiveFirewall.block(db_payload['src_ip'])
+                    db_payload['category'] = f"IPS Blocked - {db_payload.get('category', 'Threat')}"
+
                 add_alert(db_payload)
 
                 # 4. WebSocket Broadcast
@@ -280,44 +326,6 @@ async def log_tailer():
             await asyncio.sleep(POLL_INTERVAL_SEC)
             continue
 
-        try:
-            event = json.loads(line)
-            
-            # 1. Feature Extraction
-            features = engine.extract_features(event)
-            if features is None: continue
-
-            # 2. ML Prediction
-            prediction = engine.predict(features)
-            if prediction["classification"] == "error": continue
-
-            # 3. DB Logging
-            alert_info = event.get("alert", {})
-            db_payload = {
-                "timestamp": event.get("timestamp"),
-                "event_type": event.get("event_type"),
-                "src_ip": event.get("src_ip"),
-                "src_port": event.get("src_port"),
-                "dest_ip": event.get("dest_ip"),
-                "dest_port": event.get("dest_port"),
-                "protocol": event.get("proto"),
-                "alert_sig": alert_info.get("signature", "Behavioral Anomaly"),
-                "prediction": prediction.get("classification"),
-                "confidence": prediction.get("confidence"),
-                "severity": alert_info.get("severity", 4),
-                "category": alert_info.get("category", "ML Detection"),
-                "raw_event": event
-            }
-            add_alert(db_payload)
-
-            # 4. WebSocket Broadcast
-            await _broadcast(json.dumps(db_payload))
-            
-            logger.info(f"[{prediction['classification'].upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({prediction['confidence']}%)")
-
-        except Exception as e:
-            logger.error(f"Processing error: {e}")
-
     f.close()
 
 async def main():
@@ -330,6 +338,9 @@ async def main():
         loop.add_signal_handler(sig, lambda: setattr(sys.modules[__name__], '_RUNNING', False))
 
     logger.info(f"Starting Anti-Gravity IDS Consumer (WS: {WS_HOST}:{WS_PORT})")
+    
+    # Start the native bridge data service for Windows bypass
+    start_data_service()
     
     try:
         # Start WebSocket server and log tailer concurrently

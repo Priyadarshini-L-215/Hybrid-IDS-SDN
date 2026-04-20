@@ -32,6 +32,8 @@ try:
     ensure_dirs()
 except ImportError as e:
     print(f"CRITICAL: Failed to import internal modules: {e}")
+    print(f"Python Executable: {sys.executable}")
+    print(f"Python Path: {sys.path}")
     sys.exit(1)
 
 # ===== CONFIGURATION =====

@@ -3,6 +3,11 @@
 # Backend & ML Engine Requirements
 
 # Machine Learning & Data Processing
+# Hybrid IDS - Python Dependencies
+# ================================
+# Backend & ML Engine Requirements
+
+# Machine Learning & Data Processing
 scikit-learn>=1.3.0
 pandas>=2.0.0
 numpy>=1.24.0
@@ -11,12 +16,14 @@ matplotlib>=3.7.0
 # Flask Backend
 Flask>=2.3.0
 Flask-CORS>=4.0.0
+Flask-Sock>=0.6.0
+requests>=2.31.0
+websockets>=11.0
 
 # Utilities
 python-dotenv>=1.0.0
 pyarrow>=12.0.0
 python-nmap>=0.7.1
-
 # Development (optional)
 pytest>=7.0.0
 black>=23.0.0
