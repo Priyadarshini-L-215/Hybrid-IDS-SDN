@@ -1,20 +1,23 @@
 import json
 import pickle
-import numpy as np
 import pandas as pd
 from pathlib import Path
+from collections import deque
 
-# Updated paths to match your FYP project structure
-MODEL_PATH = r"D:\projects\FYP\models\model.pkl"
-FEATURES_PATH = r"D:\projects\FYP\models\features.json"
-EVE_LOG = r"D:\projects\FYP\data\logs\eve.json"
+BASE_DIR = Path(__file__).resolve().parents[2]
+MODEL_PATH = BASE_DIR / "models" / "model.pkl"
+FEATURES_PATH = BASE_DIR / "models" / "features.json"
+EVE_LOG = BASE_DIR / "data" / "logs" / "eve.json"
 
 # Load model and feature list once at startup
-with open(MODEL_PATH, "rb") as f:
+with MODEL_PATH.open("rb") as f:
     model = pickle.load(f)
 
-with open(FEATURES_PATH, "r") as f:
+with FEATURES_PATH.open("r", encoding="utf-8") as f:
     FEATURES = json.load(f)   # list of 57/83 feature names
+
+_EVE_LOG_POS = 0
+_RECENT_ALERTS = deque(maxlen=50)
 
 def extract_features(alert: dict) -> list:
     """Map a Suricata eve.json alert/flow to the feature vector."""
@@ -87,10 +90,27 @@ def predict_alert(alert: dict) -> dict:
 
 def tail_eve_json(n_recent=50) -> list:
     """Read last n_recent alert events from eve.json."""
-    results = []
+    global _EVE_LOG_POS
+
     try:
-        lines = Path(EVE_LOG).read_text(encoding="utf-8").strip().splitlines()
-        for line in reversed(lines[-2000:]):          # scan last 2000 lines
+        eve_path = EVE_LOG
+        if not eve_path.exists():
+            return list(_RECENT_ALERTS)[-n_recent:]
+
+        current_size = eve_path.stat().st_size
+        if current_size < _EVE_LOG_POS:
+            _EVE_LOG_POS = 0
+            _RECENT_ALERTS.clear()
+
+        with eve_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            handle.seek(_EVE_LOG_POS)
+            new_chunk = handle.read()
+            _EVE_LOG_POS = handle.tell()
+
+        if not new_chunk:
+            return list(_RECENT_ALERTS)[-n_recent:]
+
+        for line in new_chunk.splitlines():
             try:
                 evt = json.loads(line)
                 # We analyze both 'alert' and 'flow' events so you can see live normal traffic too
@@ -100,14 +120,11 @@ def tail_eve_json(n_recent=50) -> list:
                     # Prevent 'Normal' background flow connections from spamming the UI
                     if evt.get("event_type") == "flow" and pred_res["prediction"].lower() == "normal":
                         continue
-                        
-                    results.append(pred_res)
-                    if len(results) >= n_recent:
-                        break
+                    _RECENT_ALERTS.append(pred_res)
             except json.JSONDecodeError:
                 continue
     except FileNotFoundError:
         pass
     
     # Reverse so the newest is at the top/bottom depending on how Flask sends it
-    return list(reversed(results))
+    return list(_RECENT_ALERTS)[-n_recent:]

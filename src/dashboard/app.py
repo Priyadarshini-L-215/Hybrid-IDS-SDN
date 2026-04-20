@@ -8,7 +8,7 @@ Anti-Gravity IDS – Flask Backend
 
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
-from integration import tail_eve_json
+from integration import tail_eve_json, EVE_LOG
 from nmap_runner import run_nmap, analyse_with_gemini, SCAN_PROFILES, NMAP_BIN
 import threading, time
 
@@ -22,13 +22,13 @@ _cache = {"alerts": [], "last_updated": "never"}
 #  Background IDS refresh                                              #
 # ------------------------------------------------------------------ #
 def background_refresh():
-    """Refresh ML predictions every 3 seconds."""
+    """Refresh ML predictions every 2 seconds."""
     while True:
         fresh_alerts = tail_eve_json(50)
         with _cache_lock:
             _cache["alerts"]       = fresh_alerts
             _cache["last_updated"] = time.strftime("%H:%M:%S")
-        time.sleep(1)
+        time.sleep(2)
 
 threading.Thread(target=background_refresh, daemon=True).start()
 
@@ -68,7 +68,7 @@ def api_alerts_clear():
     with _cache_lock:
         _cache["alerts"] = []
         _cache["last_updated"] = time.strftime("%H:%M:%S")
-    open(r"D:\projects\FYP\data\logs\eve.json", "w").close() # truncate file so they don't immediately reload
+    EVE_LOG.write_text("", encoding="utf-8")  # truncate file so they don't immediately reload
     return jsonify({"success": True})
 
 

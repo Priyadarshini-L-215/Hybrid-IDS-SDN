@@ -11,6 +11,8 @@ import {
 } from 'recharts';
 import './App.css';
 
+const ALERT_REFRESH_MS = 3000;
+
 // ─────────────────────────────────────────────────────────────────
 //  Severity Helpers
 // ─────────────────────────────────────────────────────────────────
@@ -646,7 +648,7 @@ function App() {
     };
     fetchData();
     if (systemState === 'ACTIVE') {
-      interval = setInterval(fetchData, 1000);
+      interval = setInterval(fetchData, ALERT_REFRESH_MS);
     }
     return () => clearInterval(interval);
   }, [systemState]);
