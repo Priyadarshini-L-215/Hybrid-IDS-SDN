@@ -461,12 +461,12 @@ function AlertsTable({ alerts }) {
     let list = [...alerts].reverse();
 
     // Filter
-    // Filter: Hybrid logic (ML prediction OR rule-based alert)
+    // Filter: Rely exclusively on the final ML prediction label
     if (filter === 'attack') {
-      list = list.filter(a => a.prediction?.toLowerCase() === 'attack' || a.event_type === 'alert');
+      list = list.filter(a => a.prediction?.toLowerCase() === 'attack');
     }
     if (filter === 'normal') {
-      list = list.filter(a => a.prediction?.toLowerCase() === 'normal' && a.event_type !== 'alert');
+      list = list.filter(a => a.prediction?.toLowerCase() === 'normal');
     }
 
     // Sort
@@ -653,7 +653,7 @@ function App() {
 
   const stats = useMemo(() => {
     const total   = data.alerts.length;
-    const attacks = data.alerts.filter(a => a.prediction?.toLowerCase() === 'attack' || a.event_type === 'alert').length;
+    const attacks = data.alerts.filter(a => a.prediction?.toLowerCase() === 'attack').length;
     const normal  = total - attacks;
     const attackPct = total > 0 ? ((attacks / total) * 100).toFixed(1) : '0.0';
     return { total, attacks, normal, attackPct };
@@ -668,7 +668,7 @@ function App() {
         time: timeStr || `T-${index}`,
         attackConfidence: alert.prediction?.toLowerCase() === 'attack' ? alert.confidence : 0,
         normalConfidence: alert.prediction?.toLowerCase() === 'normal' ? alert.confidence : 0,
-        severityScore: (alert.prediction?.toLowerCase() === 'attack' || alert.event_type === 'alert') ? sevScore : 0,
+        severityScore: (alert.prediction?.toLowerCase() === 'attack') ? sevScore : 0,
         severityRaw: alert.severity,
         signature: alert.alert_sig,
         ip: alert.src_ip,

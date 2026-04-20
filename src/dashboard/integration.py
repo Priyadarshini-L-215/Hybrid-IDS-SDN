@@ -61,8 +61,9 @@ def predict_alert(alert: dict) -> dict:
             
         prediction_label = "Attack" if label == 1 else "Normal"
         
-        # If Suricata generated a rule-based alert, override the ML prediction to prevent UX confusion
-        if alert.get("event_type") == "alert" and severity > 0:
+        # If Suricata generated a rule-based critical alert (severity 1 or 2), override the ML prediction
+        # Otherwise, trust the ML Engine for events like 'ICMP Ping' or 'Nmap Generic'
+        if alert.get("event_type") == "alert" and 0 < severity <= 2:
             prediction_label = "Attack"
             confidence = max(confidence, 99.0)
             
