@@ -14,12 +14,12 @@ start "Suricata Sensor" wsl bash -c "sed -i 's/\r$//' /mnt/d/projects/FYP/start_
 
 :: 2. Launch Flask Backend
 echo [+] Launching Flask Dashboard Backend...
-start "Backend" ".venv\Scripts\python.exe" "src\dashboard\app.py"
+start "Backend" cmd /k ".venv\Scripts\python.exe src\dashboard\app.py"
 
 :: 3. Launch Vite Frontend
 echo [+] Launching React Frontend...
 cd ui
-start "Frontend" cmd /c npm run dev
+start "Frontend" cmd /k npm run dev
 cd ..
 
 echo.

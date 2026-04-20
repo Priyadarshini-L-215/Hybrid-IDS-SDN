@@ -59,8 +59,15 @@ def predict_alert(alert: dict) -> dict:
         severity  = alert_info.get("severity", 0)
         category  = alert_info.get("category", "")
             
+        prediction_label = "Attack" if label == 1 else "Normal"
+        
+        # If Suricata generated a rule-based alert, override the ML prediction to prevent UX confusion
+        if alert.get("event_type") == "alert" and severity > 0:
+            prediction_label = "Attack"
+            confidence = max(confidence, 99.0)
+            
         return {
-            "prediction": "Attack" if label == 1 else "Normal",
+            "prediction": prediction_label,
             "confidence": confidence,
             "src_ip":    alert.get("src_ip", "Unknown"),
             "src_port":  alert.get("src_port", 0),
@@ -82,12 +89,18 @@ def tail_eve_json(n_recent=50) -> list:
     results = []
     try:
         lines = Path(EVE_LOG).read_text(encoding="utf-8").strip().splitlines()
-        for line in reversed(lines[-200:]):          # scan last 200 lines
+        for line in reversed(lines[-2000:]):          # scan last 2000 lines
             try:
                 evt = json.loads(line)
                 # We analyze both 'alert' and 'flow' events so you can see live normal traffic too
                 if evt.get("event_type") in ["alert", "flow"]:
-                    results.append(predict_alert(evt))
+                    pred_res = predict_alert(evt)
+                    
+                    # Prevent 'Normal' background flow connections from spamming the UI
+                    if evt.get("event_type") == "flow" and pred_res["prediction"].lower() == "normal":
+                        continue
+                        
+                    results.append(pred_res)
                     if len(results) >= n_recent:
                         break
             except json.JSONDecodeError:
