@@ -55,49 +55,46 @@ The system utilizes a high-performance split-host architecture:
 
 ---
 
-## 🛠️ Getting Started
+## 🚀 Fast Track (Recommended)
 
-### Prerequisites
+To install everything and start the system for the first time, simply run the unified launcher from Windows:
 
-*   **Windows 11** with **WSL2** (Ubuntu recommended).
-*   **Python 3.12+** installed on both Windows and WSL.
-*   **Suricata** installed in the WSL environment.
-*   **Node.js 18+** for the React Dashboard.
-
-### Setup & Installation
-
-1.  **Initialize Windows Backend**:
-    ```cmd
-    python -m venv .venv
-    .venv\Scripts\activate
-    pip install -r requirements.txt
-    ```
-
-2.  **Environment Sync**:
-    Ensure `.venv_wsl` is initialized or required packages are available in WSL:
-    ```bash
-    pip3 install websockets pandas scikit-learn requests
-    ```
-
-3.  **Frontend Build**:
-    ```cmd
-    cd ui
-    npm install
-    ```
-
-### Execution
-
-Launch the entire ecosystem with the unified controller:
 ```cmd
 start.bat
 ```
-This script automates the orchestration of the Suricata sensor, ML worker, Flask relay, and Vite frontend.
+
+**What this does automatically:**
+1.  Detects and prepares your **WSL** (Linux) environment.
+2.  Installs **Suricata** and ML dependencies.
+3.  Initializes the **Python venv** and **Node.js** UI.
+4.  Launches all components (Sensor, Backend, and Dashboard).
 
 ---
 
-## 🛡️ Cleanup
-To cleanly terminate all processes across both Windows and WSL hosts:
-```cmd
-stop.bat
-```
+## 🛠️ Manual Preparation (If needed)
+
+### Prerequisites
+*   **Windows 11** with **WSL2** (Ubuntu 22.04+).
+*   **Node.js** and **Python 3.12+**.
+*   **Nmap** (for the Attack Simulation Lab).
+
+### Custom Setup Scripts
+If you prefer to run setup steps manually:
+- `setup.bat`: Prepares the Windows backend and UI.
+- `setup_wsl.sh`: Run this inside WSL to prepare the Suricata sensor.
+
+---
+
+## 🛡️ Management
+
+| Action | Command |
+| :--- | :--- |
+| **Stop System** | `stop.bat` |
+| **View Logs** | `data/logs/consumer.log` |
+| **Dashboard** | `http://localhost:5173` |
+
+---
+
+## 🏗️ Technical Deep Dive
+For architecture diagrams and module details, see [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md).
 
