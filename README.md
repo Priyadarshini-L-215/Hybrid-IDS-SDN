@@ -93,7 +93,7 @@ If you prefer to run setup steps manually:
 | **View Logs** | `data/logs/consumer.log` |
 | **Dashboard** | `http://localhost:5173` |
 
----
+hi 
 
 ## 🏗️ Technical Deep Dive
 For architecture diagrams and module details, see [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md).
