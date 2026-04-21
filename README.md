@@ -1,4 +1,4 @@
-# Anti-Gravity Hybrid Intrusion Detection System (IDS)
+# Sentinel Core: Hybrid ML-Powered IPS/IDS
 
 ![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)
 ![Flask](https://img.shields.io/badge/Framework-Flask-black?logo=flask)
@@ -8,93 +8,96 @@
 
 ## Project Overview
 
-Anti-Gravity IDS is a high-performance, real-time Network Intrusion Detection System (NIDS). It integrates **Suricata** for standard signature-based detection with a **Machine Learning (ML)** inference engine for automated behavioral threat classification, providing zero-day detection capabilities.
+**Sentinel Core** is an enterprise-grade, high-performance **Hybrid Intrusion Prevention System (IPS)**. It combines the reliability of **Suricata**'s signature-based detection with the agility of a **Machine Learning (ML)** inference engine for behavioral threat classification.
 
-This project features a modern **WebSocket-based architecture**, enabling instantaneous threat visualization on a React dashboard with sub-millisecond relay latency.
+Unlike traditional IDS, Sentinel Core implements **Active Mitigation**—automatically triggering firewall rules to block high-confidence threats in real-time.
+
+---
+
+## 💻 Tech Stack
+
+| Layer | Technologies |
+| :--- | :--- |
+| **Security Engine** | Suricata (IDS/IPS), `nftables`/`iptables` (Mitigation) |
+| **Machine Learning** | Scikit-Learn (Random Forest), Pandas, NumPy |
+| **Backend Integration** | Python 3.12, Flask, Flask-Sock |
+| **Frontend UI** | React, Vite, Lucide React (Sentinel Core Design) |
+| **Communication** | Native WebSockets (`asyncio`/`websockets`) |
+| **Data Persistence** | SQLite3 (High-performance batch logging) |
+| **Analysis AI** | Google Gemini (External Scan Analysis) |
 
 ---
 
 ## 🏗️ Architecture
 
-The system utilizes a split-host architecture to maximize performance and compatibility:
+The system utilizes a high-performance split-host architecture:
 
-1.  **Core Sensor (WSL - Ubuntu/Linux)**: 
-    *   **Suricata**: Monitors raw network packets and generates EVE JSON logs.
-    *   **ML Consumer**: A high-performance Python service that tails logs, extracts 57 features, and executes inference. It broadcasts processed alerts via a native WebSocket server.
-2.  **Management Layer (Windows)**:
-    *   **Flask Backend**: Serves as a WebSocket relay and REST API. It maintains a persistent connection to the WSL sensor.
-    *   **React Dashboard**: A modern, glassmorphic UI that subscribes to the alert stream for real-time visualization.
+1.  **Detection & Mitigation Sensor (WSL - Ubuntu)**: 
+    *   **Suricata**: Signature-based packet inspection generating EVE JSON telemetry.
+    *   **ML Inference Engine**: A high-concurrency Python consumer that performs 57-feature extraction and Random Forest classification.
+    *   **Stateful Flow Correlator**: Tracks connection patterns to detect DoS and stealthy reconnaissance.
+    *   **Active IPS Module**: Interfaces with the system firewall to block malicious actors instantly.
+2.  **Telemetry & Management Layer (Windows)**:
+    *   **Flask Relay**: An asynchronous bridge that pipes telemetry from the Linux sensor to browser clients via WebSockets.
+    *   **Security Dashboard**: A "Sentinel Core" glassmorphic React interface for professional SOC monitoring.
 3.  **Data Layer**:
-    *   **SQLite (Persistent)**: Optimized database handler using batch-write logic to handle high-traffic bursts without locking.
+    *   **SQLite (Persistent)**: Optimized batch-write architecture handling thousands of events per second.
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Key Features
+
+*   **Zero-Day Detection**: ML behavioral analysis identifies novel threats that bypass signature rules.
+*   **Active Mitigation**: High-confidence threats (>95%) are automatically blocked by the IPS module.
+*   **Volumetric Analysis**: Detects DoS/DDoS patterns and aggressive port scans through stateful correlation.
+*   **Neural Telemetery**: Native WebSocket stream ensures sub-millisecond alert visibility.
+*   **Attack Simulation**: Integrated Lab with Nmap and **Gemini AI** for automated scan analysis.
+
+---
+
+## 🛠️ Getting Started
 
 ### Prerequisites
 
-*   **Windows 10/11** with **WSL2** installed.
-*   **Suricata** installed within the WSL distribution.
-*   **Python 3.12+** (Windows & WSL)
-*   **Node.js 18+** & NPM
+*   **Windows 11** with **WSL2** (Ubuntu recommended).
+*   **Python 3.12+** installed on both Windows and WSL.
+*   **Suricata** installed in the WSL environment.
+*   **Node.js 18+** for the React Dashboard.
 
 ### Setup & Installation
 
-1.  **Initialize the Environment**:
+1.  **Initialize Windows Backend**:
     ```cmd
-    :: On Windows
     python -m venv .venv
     .venv\Scripts\activate
     pip install -r requirements.txt
     ```
 
-2.  **WSL Setup**:
-    Ensure your WSL environment has the necessary libraries:
+2.  **Environment Sync**:
+    Ensure `.venv_wsl` is initialized or required packages are available in WSL:
     ```bash
-    sudo apt update && sudo apt install suricata python3-pip
-    pip3 install websockets pandas scikit-learn
+    pip3 install websockets pandas scikit-learn requests
     ```
 
-3.  **Frontend Setup**:
+3.  **Frontend Build**:
     ```cmd
     cd ui
     npm install
     ```
 
-### Operation
+### Execution
 
-**Quick Start**:
-Run the unified launcher from your Windows terminal:
+Launch the entire ecosystem with the unified controller:
 ```cmd
 start.bat
 ```
-This script orchestrates the entire pipeline:
-*   Starts Suricata and the ML Engine in **WSL**.
-*   Starts the Flask Relay in **Windows**.
-*   Starts the Vite Dev Server for the **React UI**.
+This script automates the orchestration of the Suricata sensor, ML worker, Flask relay, and Vite frontend.
 
 ---
 
-## 📂 Key Components
-
-*   **`src/ml_engine/consumer.py`**: The "Heart" of the system. Handles feature extraction, ML prediction, and WebSocket broadcasting.
-*   **`src/dashboard/app.py`**: The "Bridge". Relays data from the Linux sensor to the Windows browser.
-*   **`ui/src/App.jsx`**: The "Eyes". Real-time visualization with integrated attack simulation tools.
-*   **`src/common/database.py`**: High-performance logging subsystem.
-
----
-
-## 🛠️ Simulation & Testing
-
-The dashboard includes an **Attack Lab** (Nmap Integration) to test the system's responsiveness:
-1.  Navigate to the "Attack Lab" tab in the UI.
-2.  Enter a target IP and select a scan profile.
-3.  Monitor the "Monitor" tab to see real-time ML-classified alerts as the scan progresses.
-
----
-
-## 🛡️ Shutdown
-To cleanly close all project components (including background WSL processes):
+## 🛡️ Cleanup
+To cleanly terminate all processes across both Windows and WSL hosts:
 ```cmd
 stop.bat
 ```
+

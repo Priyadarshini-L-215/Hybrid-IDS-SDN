@@ -22,10 +22,6 @@ from common.config import EVE_LOG, ML_ALERTS_LOG, HEARTBEAT_LOG, ALERT_CACHE_SIZ
 import requests
 from common.database import query_alerts, get_stats
 
-def reset_ml_alert_state():
-    """No-op for database mode."""
-    pass
-
 def tail_ml_alerts(cache_size=ALERT_CACHE_SIZE):
     """
     Fetch alerts and stats from the internal Bridge (WSL) or local DB.

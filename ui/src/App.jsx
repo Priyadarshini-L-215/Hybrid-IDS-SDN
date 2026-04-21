@@ -1,11 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
-  ShieldAlert, ShieldCheck, Activity, Trash2, 
-  Shield, Target, Play, Loader,
-  AlertTriangle, Clock, Globe,
-  Server, Cpu, Zap, Search,
-  ChevronRight, BarChart3, Database,
-  Settings, User, Bell
+  ShieldAlert, ShieldCheck, Activity, 
+  Target, Loader, Search,
+  Clock, Cpu, Zap, BarChart3
 } from 'lucide-react';
 import { 
   ComposedChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -260,7 +257,7 @@ function App() {
     const seedData = async () => {
       try {
         console.log("[Pipeline] Fetching historical state...");
-        const response = await fetch('http://127.0.0.1:5000/api/alerts');
+        const response = await fetch('/api/alerts');
         const json = await response.json();
         
         setData(prev => {

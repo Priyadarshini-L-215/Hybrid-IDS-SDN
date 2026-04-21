@@ -1,28 +1,32 @@
-# Anti-Gravity IDS Dashboard (React)
+# Sentinel Core Dashboard (React)
 
-A high-performance, real-time security dashboard for the Hybrid IDS system. Built with **React**, **Vite**, and **Lucide React** for enterprise-grade network monitoring.
+A high-performance, real-time security telemetry interface for the **Sentinel Core IPS**. Engineered for professional SOC environments with a focus on data density, visual clarity, and reactive speed.
 
-## 🚀 Key Features
+## 🚀 Enterprise Features
 
-*   **Real-time WebSocket Stream**: Subscribes to `ws://localhost:5000/ws/alerts` for instantaneous threat visualization.
-*   **Attack Lab**: Integrated Nmap scanner interface to simulate network events and verify detector responsiveness.
-*   **Glassmorphic Design**: A premium, cybersecurity-focused aesthetic designed for low-light SOC environments.
-*   **Adaptive Fallback**: Gracefully falls back to polling if the WebSocket relay is interrupted.
+*   **Sentinel Neural Stream**: Low-latency WebSocket integration with the Flask relay for instantaneous threat visibility.
+*   **Active Mitigation Feedback**: Real-time status indicators for IPS blocking actions and stateful correlation alerts.
+*   **Professional SOC Aesthetic**: A premium "Sentinel Core" glassmorphic design system optimized for modern cybersecurity operations.
+*   **Attack Lab**: Integrated Nmap orchestration interface with automated analysis capabilities.
+*   **Resilient Architecture**: Automated reconnection logic and background status monitoring to ensure mission-critical availability.
 
 ## 🛠️ Development
 
+### Environment Setup
 ```bash
-# Install dependencies
+# Install core dependencies
 npm install
 
-# Start development server
+# Launch development environment (HMR enabled)
 npm run dev
 ```
 
-The Vite dev server is configured to proxy API requests to the Flask backend on `http://127.0.0.1:5000`.
+### Configuration
+The system uses **Vite** for optimized module bundling. API requests are automatically proxied to the Sentinel backend on `http://127.0.0.1:5000`.
 
-## 📜 Scripts
+## 📜 Repository Scripts
 
-- `npm run dev`: Starts the local development environment.
-- `npm run build`: Compiles optimized assets for the `/dist` folder.
-- `npm run lint`: Performs static analysis for code quality.
+- `npm run dev`: Executes the local development server.
+- `npm run build`: Generates production-ready, minified assets in the `/dist` directory.
+- `npm run lint`: Validates code quality and consistency across the React codebase.
+- `npm run preview`: Previews the production build locally.

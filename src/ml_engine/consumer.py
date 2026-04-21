@@ -17,10 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.feature_extractor import extract_features_from_eve, load_feature_names, validate_feature_vector
 from common.database import init_db, add_alert
 from common.config import (
-    EVE_LOG, ML_ALERTS_LOG, HEARTBEAT_LOG, 
+    EVE_LOG, HEARTBEAT_LOG, 
     MODEL_PATH, FEATURES_PATH, 
     POLL_INTERVAL_SEC, HEARTBEAT_INTERVAL_SEC,
-    WS_HOST, WS_PORT, DATA_SERVICE_PORT,
+    WS_HOST, WS_PORT,
     ensure_dirs
 )
 from ml_engine.data_service import start_data_service

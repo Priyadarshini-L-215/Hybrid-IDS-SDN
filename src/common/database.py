@@ -1,8 +1,7 @@
 import sqlite3
 import json
 import logging
-from datetime import datetime, timezone
-from common.config import BASE_DIR, DB_PATH
+from common.config import DB_PATH
 
 logger = logging.getLogger(__name__)
 

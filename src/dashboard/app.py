@@ -23,7 +23,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 try:
-    from integration import tail_ml_alerts, reset_ml_alert_state, get_consumer_heartbeat
+    from integration import tail_ml_alerts, get_consumer_heartbeat
     from common.config import (
         EVE_LOG, ML_ALERTS_LOG, WS_URI, 
         ALERT_CACHE_SIZE, ensure_dirs
@@ -105,17 +105,6 @@ def ws_alerts(ws):
         with _browser_lock:
             _browser_clients.discard(ws)
 
-# Cache for API fallbacks
-_cache = {
-    "alerts": [],
-    "total_processed": 0,
-    "displayed_total": 0,
-    "attack_total": 0,
-    "normal_total": 0,
-    "last_updated": "never",
-}
-_cache_lock = threading.Lock()
-
 # DEPRECATED: background_refresh removed in favor of Initial Seed + WebSocket Stream
 # This reduces DB load and prevents state clobbering in the UI
 
@@ -167,9 +156,6 @@ def api_health():
 @app.route("/api/alerts/clear", methods=["POST"])
 def api_alerts_clear():
     # In a real environment, you'd add _guard_sensitive_api() here
-    with _cache_lock:
-        _cache["alerts"] = []
-    reset_ml_alert_state()
     return jsonify({"success": True}), 200
 
 @app.route("/api/nmap/check", methods=["GET"])
