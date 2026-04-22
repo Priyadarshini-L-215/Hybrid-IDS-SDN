@@ -140,6 +140,19 @@ def _relay_worker():
                     })
                     
                     async for message in ws:
+                        relay_recv_ts = time.time()  # T5a: relay received from WSL
+                        
+                        # Stamp tracer events with T5 (relay timestamps)
+                        try:
+                            parsed = json.loads(message)
+                            if parsed.get("_tracer"):
+                                parsed["_relay_recv_ts"] = relay_recv_ts
+                                parsed["_relay_fwd_ts"] = time.time()  # T5b: about to forward
+                                message = json.dumps(parsed)
+                                logger.info(f"[TRACER] T5 Relay recv at {relay_recv_ts:.6f}")
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            pass
+                        
                         _relay_status["messages_relayed"] += 1
                         with _browser_lock:
                             if not _browser_clients:

@@ -1,141 +1,118 @@
-"""
-Async File Watcher
-Monitors EVE JSON file for changes and batches lines for processing.
-Replaces polling interval with instant file-change detection.
-"""
-
-import asyncio
 import os
-from pathlib import Path
-import logging
 import time
+import asyncio
+import logging
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger("SentinelML")
 
 class AsyncFileWatcher:
     """
-    Watch a file for changes and send batches to callback.
-    Handles file rotation via inode tracking.
+    High-performance file tailer designed for sub-10ms pipeline latency.
+    
+    Optimizations:
+    1. Replaces legacy fixed-size batching with immediate dynamic forwarding.
+    2. Uses a 5ms polling interval (adjustable via sleep).
+    3. Implements diagnostic tracer timestamping (T1) directly at the I/O layer.
+    4. Robust against log rotation and truncation.
     """
-
-    def __init__(self, filepath, batch_size=50, flush_timeout=0.2):
+    def __init__(self, filepath, batch_size=None, flush_timeout=None):
         """
-        Initialize watcher.
-        
         Args:
-            filepath: Path to file to watch (e.g., EVE JSON log)
-            batch_size: Number of lines per batch before triggering callback
-            flush_timeout: Time in seconds before forcibly sending a partial batch
+            filepath: Path to the log file to watch.
+            batch_size: (Deprecated) Maintained for API compatibility.
+            flush_timeout: (Deprecated) Maintained for API compatibility.
         """
         self.filepath = Path(filepath)
-        self.batch_size = batch_size
-        self.flush_timeout = flush_timeout
         self.last_position = 0
         self.last_inode = None
-        self.buffer = []
-        self.batch_count = 0
+        
+        # Performance metrics
         self.line_count = 0
+        self.batch_count = 0
         self.last_data_time = time.time()
 
     async def watch(self, callback):
         """
-        Watch file and call callback with batches.
-        
-        Args:
-            callback: async function(batch: list[str]) - receives batches of lines
-            
-        Runs indefinitely. Call await asyncio.sleep(0) to allow cancellation.
+        Main loop: poll for changes and execute callback.
         """
-        logger.info(f"[FileWatcher] Monitoring {self.filepath} (batch size: {self.batch_size})")
+        logger.info(f"[FileWatcher] Monitoring {self.filepath}")
         
+        # Initialize inode for rotation detection
+        if self.filepath.exists():
+            self.last_inode = os.stat(self.filepath).st_ino
+            # Optional: self.last_position = os.path.getsize(self.filepath)
+            # For testing, we start at 0 to ensure we don't miss tracers injected at startup
+
         while True:
             try:
-                # Check if file exists
-                if not self.filepath.exists():
-                    logger.warning(f"[FileWatcher] File not found: {self.filepath}")
+                # 1. Handle File Rotation/Truncation
+                if self.filepath.exists():
+                    current_stat = os.stat(self.filepath)
+                    current_inode = current_stat.st_ino
+                    current_size = current_stat.st_size
+                    
+                    # Truncation check
+                    if current_size < self.last_position:
+                        logger.info(f"[FileWatcher] File truncation detected, resetting position")
+                        self.last_position = 0
+                        
+                    # Rotation check
+                    if self.last_inode is not None and current_inode != self.last_inode:
+                        logger.info(f"[FileWatcher] File rotation detected, resetting position")
+                        self.last_position = 0
+                        self.last_inode = current_inode
+                else:
+                    # File disappeared - wait and retry
                     await asyncio.sleep(1)
                     continue
 
-                # Check for file rotation via inode
-                stat = os.stat(self.filepath)
-                current_inode = stat.st_ino
-                
-                if self.last_inode and current_inode != self.last_inode:
-                    logger.info(f"[FileWatcher] File rotated (old inode: {self.last_inode}, new: {current_inode})")
-                    self.last_position = 0
-                    self.buffer.clear()  # Clear partial batch on rotation
-                
-                self.last_inode = current_inode
-                
-                # Read new lines from file
+                # 2. Read new content
+                content = ""
                 try:
                     with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
                         f.seek(self.last_position)
-                        lines = f.readlines()
+                        content = f.read()
                         self.last_position = f.tell()
-                    
-                    if lines:
-                        self.line_count += len(lines)
-                        self.buffer.extend(lines)
-                        self.last_data_time = time.time()
-                        
-                        # Send batches
-                        while len(self.buffer) >= self.batch_size:
-                            batch = self.buffer[:self.batch_size]
-                            self.buffer = self.buffer[self.batch_size:]
-                            
-                            self.batch_count += 1
-                            
-                            # Invoke callback
-                            try:
-                                await callback(batch)
-                            except Exception as e:
-                                logger.error(f"[FileWatcher] Callback error: {e}")
-                    
-                    if self.buffer and (time.time() - self.last_data_time) > self.flush_timeout:
-                        batch = self.buffer
-                        self.buffer = []
-                        self.batch_count += 1
-                        try:
-                            await callback(batch)
-                        except Exception as e:
-                            logger.error(f"[FileWatcher] Timeout flush callback error: {e}")
-                        self.last_data_time = time.time()
-                
                 except IOError as e:
                     logger.error(f"[FileWatcher] Read error: {e}")
-                
-                # Sleep briefly to yield control
-                # Small sleep (10ms) to check for new data frequently but not busy-spin
-                await asyncio.sleep(0.01)
-                
+                    await asyncio.sleep(1)
+                    continue
+
+                # 3. Process lines and execute callback
+                if content:
+                    lines = content.splitlines()
+                    read_ts = time.time()  # T1: moment lines were read from file
+                    self.line_count += len(lines)
+                    
+                    stamped_lines = []
+                    for line in lines:
+                        if "SENTINEL_LATENCY_PROBE" in line:
+                            try:
+                                import json
+                                event = json.loads(line.strip())
+                                event["_watcher_read_ts"] = read_ts
+                                line = json.dumps(event)
+                                # Keep log for diagnostic visibility
+                                logger.info(f"[TRACER] T1 FileWatcher read at {read_ts:.6f}")
+                            except Exception:
+                                pass
+                        
+                        stamped_lines.append(line)
+                    
+                    if stamped_lines:
+                        # Forward immediately to Redis callback
+                        await callback(stamped_lines)
+                        self.batch_count += 1
+                        self.last_data_time = time.time()
+
+                # 4. Low-latency sleep (5ms)
+                await asyncio.sleep(0.005)
+
             except Exception as e:
                 logger.error(f"[FileWatcher] Unexpected error: {e}")
                 await asyncio.sleep(1)
 
     async def flush(self, callback):
-        """
-        Manually flush any remaining buffered lines.
-        Useful for graceful shutdown.
-        
-        Args:
-            callback: async function(batch: list[str])
-        """
-        if self.buffer:
-            try:
-                await callback(self.buffer)
-                logger.info(f"[FileWatcher] Flushed {len(self.buffer)} remaining lines")
-                self.buffer.clear()
-            except Exception as e:
-                logger.error(f"[FileWatcher] Flush error: {e}")
-
-    def get_stats(self):
-        """Return watcher statistics."""
-        return {
-            "batches_sent": self.batch_count,
-            "lines_read": self.line_count,
-            "buffered_lines": len(self.buffer),
-            "last_position": self.last_position,
-            "current_inode": self.last_inode
-        }
+        """No-op in dynamic mode, kept for API compatibility."""
+        pass

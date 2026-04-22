@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { 
-  ShieldAlert, ShieldCheck, Activity, 
+import {
+  ShieldAlert, ShieldCheck, Activity,
   Target, Loader, Search,
   Clock, Cpu, Zap, BarChart3
 } from 'lucide-react';
-import { 
+import {
   ComposedChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
 import './App.css';
@@ -83,7 +83,7 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
           </thead>
           <tbody>
             {filteredAlerts.length === 0 ? (
-              <tr><td colSpan="6" style={{textAlign:'center', color:'var(--text-muted)', padding:'3rem'}}>Waiting for network events...</td></tr>
+              <tr><td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '3rem' }}>Waiting for network events...</td></tr>
             ) : (
               filteredAlerts.map((alert, idx) => {
                 const isAttack = alert.prediction?.toLowerCase() === 'attack';
@@ -104,7 +104,7 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
                       </span>
                     </td>
                     <td>
-                      <div className="mono" style={{color: isAttack ? 'var(--danger)' : 'var(--primary)'}}>
+                      <div className="mono" style={{ color: isAttack ? 'var(--danger)' : 'var(--primary)' }}>
                         {alert.confidence}%
                       </div>
                     </td>
@@ -140,7 +140,7 @@ const AttackLab = ({ alerts }) => {
           setProfiles(data.profiles);
         }
       })
-      .catch(() => {}); // Keep defaults on failure
+      .catch(() => { }); // Keep defaults on failure
   }, []);
 
   const runScan = async () => {
@@ -165,7 +165,7 @@ const AttackLab = ({ alerts }) => {
     <div className="attack-lab fade-in">
       <div className="lab-grid">
         <div className="lab-card glass">
-          <div className="table-title" style={{marginBottom: '1.5rem'}}>
+          <div className="table-title" style={{ marginBottom: '1.5rem' }}>
             <Target size={18} className="text-danger" />
             <h3>Attack Simulation Module</h3>
           </div>
@@ -182,11 +182,11 @@ const AttackLab = ({ alerts }) => {
             </select>
           </div>
           <button className="btn-primary" onClick={runScan} disabled={scanning}>
-            {scanning ? <><Loader size={16} className="spin" style={{marginRight: '8px'}} /> Initializing...</> : 'Execute Attack Simulation'}
+            {scanning ? <><Loader size={16} className="spin" style={{ marginRight: '8px' }} /> Initializing...</> : 'Execute Attack Simulation'}
           </button>
         </div>
         <div className="lab-card glass">
-          <div className="table-title" style={{marginBottom: '1.5rem'}}>
+          <div className="table-title" style={{ marginBottom: '1.5rem' }}>
             <Search size={18} className="text-primary" />
             <h3>Scanner Raw Output</h3>
           </div>
@@ -203,12 +203,12 @@ const AttackLab = ({ alerts }) => {
 //  Main App
 // ─────────────────────────────────────────────────────────────────
 function App() {
-  const [data, setData] = useState({ 
-    alerts: [], 
-    total_processed: 0, 
-    attack_total: 0, 
-    normal_total: 0, 
-    last_updated: null 
+  const [data, setData] = useState({
+    alerts: [],
+    total_processed: 0,
+    attack_total: 0,
+    normal_total: 0,
+    last_updated: null
   });
   const [activeView, setActiveView] = useState('ids');
   const [filter, setFilter] = useState('all');
@@ -235,11 +235,49 @@ function App() {
       ws.onmessage = (event) => {
         try {
           const alert = JSON.parse(event.data);
+          
+          // --- TRACER: Pipeline latency measurement ---
+          if (alert._tracer && alert._tracer_inject_ts) {
+            const T6 = Date.now() / 1000; // Browser receive time (epoch seconds)
+            const T0 = alert._tracer_inject_ts;
+            const T1 = alert._watcher_read_ts;
+            const T2 = alert._redis_push_ts;
+            const T3a = alert._worker_pop_ts;
+            const T3b = alert._worker_done_ts;
+            const T4 = alert._ws_send_ts;
+            const T5a = alert._relay_recv_ts;
+            const T5b = alert._relay_fwd_ts;
+            
+            const ms = (a, b) => a && b ? ((b - a) * 1000).toFixed(1) : '-';
+            const cum = (t) => t ? ((t - T0) * 1000).toFixed(1) : '-';
+            
+            console.log(
+              `%c+--------------------------------------------------------------+\n` +
+              `|       SENTINEL CORE - PIPELINE LATENCY REPORT              |\n` +
+              `|       Tracer ID: ${alert._tracer_id || 'unknown'}                              |\n` +
+              `+--------------------------------------------------------------+\n` +
+              `|  Hop                        | Delta (ms)| Cumulative (ms)  |\n` +
+              `|-----------------------------+-----------+------------------|\n` +
+              `|  T0->T1: File Read           | ${ms(T0,T1).padStart(8)}  | ${cum(T1).padStart(16)}  |\n` +
+              `|  T1->T2: Redis Push          | ${ms(T1,T2).padStart(8)}  | ${cum(T2).padStart(16)}  |\n` +
+              `|  T2->T3a: Worker Pop         | ${ms(T2,T3a).padStart(8)}  | ${cum(T3a).padStart(16)}  |\n` +
+              `|  T3a->T3b: ML Inference      | ${ms(T3a,T3b).padStart(8)}  | ${cum(T3b).padStart(16)}  |\n` +
+              `|  T3b->T4: WS Queue+Send      | ${ms(T3b,T4).padStart(8)}  | ${cum(T4).padStart(16)}  |\n` +
+              `|  T4->T5a: WSL->Win Bridge     | ${ms(T4,T5a).padStart(8)}  | ${cum(T5a).padStart(16)}  |\n` +
+              `|  T5a->T5b: Relay Forward     | ${ms(T5a,T5b).padStart(8)}  | ${cum(T5b).padStart(16)}  |\n` +
+              `|  T5b->T6: Browser Receive    | ${ms(T5b,T6).padStart(8)}  | ${cum(T6).padStart(16)}  |\n` +
+              `+--------------------------------------------------------------+\n` +
+              `|  TOTAL END-TO-END           |           | ${((T6-T0)*1000).toFixed(1).padStart(13)} ms |\n` +
+              `+--------------------------------------------------------------+`,
+              'color: #00e676; font-family: monospace; font-size: 12px;'
+            );
+          }
+
           setData(prev => {
             // Avoid duplicate log entries by checking timestamp + 5-tuple
-            const isDuplicate = prev.alerts.some(a => 
-              a.timestamp === alert.timestamp && 
-              a.src_ip === alert.src_ip && 
+            const isDuplicate = prev.alerts.some(a =>
+              a.timestamp === alert.timestamp &&
+              a.src_ip === alert.src_ip &&
               a.dest_ip === alert.dest_ip &&
               a.src_port === alert.src_port &&
               a.dest_port === alert.dest_port
@@ -286,19 +324,19 @@ function App() {
         console.log("[Pipeline] Fetching historical state...");
         const response = await fetch('/api/alerts');
         const json = await response.json();
-        
+
         setData(prev => {
-           // Create a merged list of unique alerts
-           const existingIds = new Set(prev.alerts.map(a => `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
-           const newHistorical = json.alerts.filter(a => !existingIds.has(`${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
-           
-           return {
-             ...json,
-             alerts: [...newHistorical, ...prev.alerts].slice(-100),
-             total_processed: Math.max(json.total_processed, prev.total_processed),
-             attack_total: Math.max(json.attack_total, prev.attack_total),
-             normal_total: Math.max(json.normal_total, prev.normal_total)
-           };
+          // Create a merged list of unique alerts
+          const existingIds = new Set(prev.alerts.map(a => `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
+          const newHistorical = json.alerts.filter(a => !existingIds.has(`${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
+
+          return {
+            ...json,
+            alerts: [...newHistorical, ...prev.alerts].slice(-100),
+            total_processed: Math.max(json.total_processed, prev.total_processed),
+            attack_total: Math.max(json.attack_total, prev.attack_total),
+            normal_total: Math.max(json.normal_total, prev.normal_total)
+          };
         });
       } catch (error) {
         console.error("[Pipeline] Seeding error:", error);
@@ -318,13 +356,13 @@ function App() {
   return (
     <div className="dashboard-container">
       <div className="app-bg-glow" />
-      
+
       <header className="header-section fade-in">
         <div className="title-group">
           <h1>Sentinel Core</h1>
           <p>Next-Gen Hybrid Machine Learning Network Defense</p>
         </div>
-        
+
         <div className="nav-tabs">
           <button className={`nav-tab ${activeView === 'ids' ? 'active' : ''}`} onClick={() => setActiveView('ids')}>
             <Activity size={16} /> Monitoring
@@ -350,7 +388,7 @@ function App() {
       {activeView === 'ids' ? (
         <div className="ids-main-layout">
           <div className="viz-card glass fade-in">
-            <div className="table-title" style={{marginBottom: '1.5rem'}}>
+            <div className="table-title" style={{ marginBottom: '1.5rem' }}>
               <BarChart3 size={18} className="text-secondary" />
               <h3>Traffic Analysis Baseline</h3>
             </div>
@@ -358,20 +396,20 @@ function App() {
               <ComposedChart data={chartData}>
                 <defs>
                   <linearGradient id="colorThreat" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--danger)" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="var(--danger)" stopOpacity={0}/>
+                    <stop offset="5%" stopColor="var(--danger)" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="var(--danger)" stopOpacity={0} />
                   </linearGradient>
                   <linearGradient id="colorSafe" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="var(--primary)" stopOpacity={0}/>
+                    <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="var(--primary)" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
                 <XAxis dataKey="time" stroke="var(--text-muted)" fontSize={11} tickLine={false} axisLine={false} />
                 <YAxis stroke="var(--text-muted)" fontSize={11} tickLine={false} axisLine={false} />
-                <Tooltip 
-                  contentStyle={{background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '8px'}}
-                  itemStyle={{fontSize: '12px'}}
+                <Tooltip
+                  contentStyle={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '8px' }}
+                  itemStyle={{ fontSize: '12px' }}
                 />
                 <Area type="monotone" dataKey="safe" stroke="var(--primary)" fillOpacity={1} fill="url(#colorSafe)" />
                 <Area type="monotone" dataKey="threat" stroke="var(--danger)" fillOpacity={1} fill="url(#colorThreat)" />

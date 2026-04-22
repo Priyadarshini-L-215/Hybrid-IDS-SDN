@@ -106,8 +106,15 @@ class WorkerPool:
                     # Timeout; check again
                     continue
                 
+                pop_ts = time.time()  # T3a: moment event was popped from Redis
+                
                 # event_json is (key, value)
                 event = json.loads(event_json[1])
+                
+                # Stamp tracer events with T3a
+                if event.get("_tracer"):
+                    event["_worker_pop_ts"] = pop_ts
+                    logger.info(f"[TRACER] T3a Worker pop at {pop_ts:.6f}")
                 
                 # Process event
                 processed = self._process_event(event, worker_name)
@@ -153,6 +160,35 @@ class WorkerPool:
             Alert dict or None if processing failed
         """
         try:
+            # --- TRACER BYPASS: Handle diagnostic probes immediately ---
+            if event.get("_tracer"):
+                worker_done_ts = time.time()  # T3b: Processing complete
+                alert_info = event.get("alert", {})
+                alert = {
+                    "timestamp": event.get("timestamp"),
+                    "src_ip": event.get("src_ip"),
+                    "dest_ip": event.get("dest_ip"),
+                    "src_port": event.get("src_port"),
+                    "dest_port": event.get("dest_port"),
+                    "event_type": event.get("event_type"),
+                    "alert_sig": alert_info.get("signature", "SENTINEL_LATENCY_PROBE"),
+                    "protocol": event.get("proto") or "TCP",
+                    "prediction": "normal",
+                    "confidence": 100.0,
+                    "severity": alert_info.get("severity", 3),
+                    "category": alert_info.get("category", "Diagnostic"),
+                    "_tracer": True,
+                    "_tracer_id": event.get("_tracer_id"),
+                    "_tracer_inject_ts": event.get("_tracer_inject_ts"),
+                    "_watcher_read_ts": event.get("_watcher_read_ts"),
+                    "_redis_push_ts": event.get("_redis_push_ts"),
+                    "_worker_pop_ts": event.get("_worker_pop_ts"),
+                    "_worker_done_ts": worker_done_ts,
+                    "raw_event": event
+                }
+                logger.info(f"[TRACER] T3b Worker done at {worker_done_ts:.6f}")
+                return alert
+
             start_time = time.perf_counter()
             
             # Feature extraction

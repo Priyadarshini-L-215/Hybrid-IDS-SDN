@@ -78,8 +78,15 @@ async def _broadcast_worker():
             # Wait for at least one message
             message = await _ws_queue.get()
             
-            # Collect any other pending messages to send as a batch (optional, but let's just send)
-            # Actually, websockets send is already buffered.
+            # Stamp tracer events with T4 (WS send time)
+            try:
+                parsed = json.loads(message)
+                if parsed.get("_tracer"):
+                    parsed["_ws_send_ts"] = time.time()
+                    logger.info(f"[TRACER] T4 WS broadcast at {parsed['_ws_send_ts']:.6f}")
+                    message = json.dumps(parsed)
+            except (json.JSONDecodeError, TypeError):
+                pass
             
             clients = list(_ws_clients)
             if not clients:
@@ -191,6 +198,10 @@ async def eve_batch_to_redis(batch):
     for line in batch:
         try:
             event = json.loads(line.strip())
+            # Stamp tracer events with T2
+            if event.get("_tracer"):
+                event["_redis_push_ts"] = time.time()
+                logger.info(f"[TRACER] T2 Redis push at {event['_redis_push_ts']:.6f}")
             # Push to Redis queue
             redis_client.rpush(REDIS_QUEUE_NAME, json.dumps(event))
         except Exception as e:
