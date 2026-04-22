@@ -62,13 +62,11 @@ data/logs/ml_alerts.json
 Thumbs.db
 
 # Documentation
+# Ignore documentation except specific files
 *.md
 !README.md
+!SYSTEM_ARCHITECTURE.md
+!STARTUP_GUIDE.md
+!TROUBLESHOOTING_INDEX.md
+!WEBSOCKET_TROUBLESHOOTING.md
 
-# AI Context Files
-GEMINI.md
-.github/copilot-instructions.md
-
-# Jupyter / Output
-.ipynb_checkpoints
-*.log

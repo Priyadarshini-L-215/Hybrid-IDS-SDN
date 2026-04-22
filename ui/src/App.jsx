@@ -120,10 +120,28 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
 };
 
 const AttackLab = ({ alerts }) => {
-  const [target, setTarget] = useState("12.0.0.12");
+  const [target, setTarget] = useState("127.0.0.1");
   const [profile, setProfile] = useState("quick");
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState(null);
+  const [profiles, setProfiles] = useState([
+    { id: 'quick', label: 'Quick Identification' },
+    { id: 'stealth_syn', label: 'Stealth SYN Scan' },
+    { id: 'aggressive', label: 'Full Aggressive Scan' },
+    { id: 'vuln', label: 'Vulnerability Audit' },
+  ]);
+
+  // Fetch profiles from backend for accurate sync
+  useEffect(() => {
+    fetch('/api/nmap/profiles')
+      .then(r => r.json())
+      .then(data => {
+        if (data.profiles && data.profiles.length) {
+          setProfiles(data.profiles);
+        }
+      })
+      .catch(() => {}); // Keep defaults on failure
+  }, []);
 
   const runScan = async () => {
     setScanning(true);
@@ -158,10 +176,9 @@ const AttackLab = ({ alerts }) => {
           <div className="form-group">
             <label className="form-label">Scan Profile</label>
             <select className="form-select" value={profile} onChange={e => setProfile(e.target.value)}>
-              <option value="quick">Quick Identification</option>
-              <option value="stealth_syn">Stealth SYN Scan</option>
-              <option value="aggressive">Full Aggressive Scan</option>
-              <option value="vuln">Vulnerability Audit</option>
+              {profiles.map(p => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
             </select>
           </div>
           <button className="btn-primary" onClick={runScan} disabled={scanning}>
@@ -199,16 +216,20 @@ function App() {
 
   // Data Pipeline: WebSocket logic
   useEffect(() => {
-    const wsUrl = `ws://127.0.0.1:5000/ws/alerts`;
-    
+    let retryCount = 0;
+    let ws = null;
+    let retryTimeout = null;
+
     const connectWS = () => {
-      console.log("[Pipeline] Establishing direct WebSocket connection to backend...");
-      const ws = new WebSocket(wsUrl);
+      // Use relative URL so Vite proxy routes it correctly
+      const wsUrl = `ws://${window.location.host}/ws/alerts`;
+      console.log(`[Pipeline] Connecting to ${wsUrl} (attempt ${retryCount + 1})`);
+      ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log("[Pipeline] WebSocket connection established successfully");
-        // Update a dummy field to trigger a re-render or status update
+        console.log('[Pipeline] WebSocket connection established');
+        retryCount = 0; // Reset backoff on success
       };
 
       ws.onmessage = (event) => {
@@ -228,7 +249,7 @@ function App() {
             const isAttack = alert.prediction?.toLowerCase() === 'attack';
             return {
               ...prev,
-              alerts: [...prev.alerts, alert].slice(-100), // Append new and cap
+              alerts: [...prev.alerts, alert].slice(-100),
               total_processed: prev.total_processed + 1,
               attack_total: isAttack ? prev.attack_total + 1 : prev.attack_total,
               normal_total: isAttack ? prev.normal_total : prev.normal_total + 1,
@@ -236,20 +257,26 @@ function App() {
             };
           });
         } catch (e) {
-          console.error("[Pipeline] WebSocket parse error:", e);
+          console.error('[Pipeline] WebSocket parse error:', e);
         }
       };
 
       ws.onclose = () => {
-        console.warn("[Pipeline] WebSocket closed. Re-syncing in 5s...");
-        setTimeout(connectWS, 5000);
+        // Exponential backoff: 0.5s, 1s, 2s, 4s, 8s, 16s, 30s max
+        const delay = Math.min(500 * Math.pow(2, retryCount), 30000);
+        retryCount++;
+        console.warn(`[Pipeline] WebSocket closed. Reconnecting in ${delay}ms (attempt ${retryCount})...`);
+        retryTimeout = setTimeout(connectWS, delay);
       };
 
-      ws.onerror = (err) => console.error("[Pipeline] WebSocket error:", err);
+      ws.onerror = (err) => console.error('[Pipeline] WebSocket error:', err);
     };
 
     connectWS();
-    return () => wsRef.current?.close();
+    return () => {
+      clearTimeout(retryTimeout);
+      ws?.close();
+    };
   }, []);
 
   // Data Pipeline: Initial Seeding
@@ -294,7 +321,7 @@ function App() {
       
       <header className="header-section fade-in">
         <div className="title-group">
-          <h1>Enterprise IDS</h1>
+          <h1>Sentinel Core</h1>
           <p>Next-Gen Hybrid Machine Learning Network Defense</p>
         </div>
         

@@ -15,13 +15,12 @@ Flask-Sock>=0.6.0
 requests>=2.31.0
 websockets>=11.0
 
+# Redis Message Queue & Caching
+redis>=4.5.0
+
 # Utilities
 python-dotenv>=1.0.0
 pyarrow>=12.0.0
-python-nmap>=0.7.1
-
-# AI Integration
-google-generativeai>=0.3.0
 
 # Development (optional)
 pytest>=7.0.0

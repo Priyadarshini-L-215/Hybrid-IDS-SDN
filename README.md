@@ -71,12 +71,13 @@ start.bat
 
 ---
 
-## 🛠️ Manual Preparation (If needed)
+## 🛠️ Project Maintenance
 
-### Prerequisites
-*   **Windows 11** with **WSL2** (Ubuntu 22.04+).
-*   **Node.js** and **Python 3.12+**.
-*   **Nmap** (for the Attack Simulation Lab).
+The project structure has been streamlined:
+
+*   **`src/`**: Core logic (ML Engine, Dashboard, Shared).
+*   **`tests/`**: Consolidated test suite for verification.
+*   **`scratch/`**: Minimal diagnostic scripts.
 
 ### Custom Setup Scripts
 If you prefer to run setup steps manually:
@@ -90,11 +91,8 @@ If you prefer to run setup steps manually:
 | Action | Command |
 | :--- | :--- |
 | **Stop System** | `stop.bat` |
-| **View Logs** | `data/logs/consumer.log` |
+| **Run Tests** | `pytest tests/` |
 | **Dashboard** | `http://localhost:5173` |
-
-hi 
 
 ## 🏗️ Technical Deep Dive
 For architecture diagrams and module details, see [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md).
-

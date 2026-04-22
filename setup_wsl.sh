@@ -29,12 +29,34 @@ echo "[+] Configuring Suricata for EVE JSON output..."
 sudo mkdir -p /var/log/suricata
 sudo chmod 777 /var/log/suricata
 
-# 3. Setup Python Environment
+# 3. Install & Configure Redis
+echo "[+] Installing Redis..."
+sudo apt-get install -y redis-server redis-tools
+
+echo "[+] Configuring Redis..."
+sudo mkdir -p /etc/redis
+sudo tee /etc/redis/sentinel-core.conf > /dev/null <<EOF
+port 6379
+bind 127.0.0.1
+maxmemory 512mb
+maxmemory-policy allkeys-lru
+appendonly yes
+appendfilename "redis-aof.aof"
+daemonize yes
+logfile /var/log/redis/redis-server.log
+EOF
+
+sudo mkdir -p /var/log/redis
+sudo chown redis:redis /var/log/redis
+sudo systemctl restart redis-server
+echo "[OK] Redis configured and started"
+
+# 4. Setup Python Environment
 echo "[+] Installing Python ML dependencies..."
 pip3 install --upgrade pip
-pip3 install websockets pandas scikit-learn requests numpy
+pip3 install websockets pandas scikit-learn requests numpy redis
 
-# 4. Configure Firewall (IPS Mode)
+# 5. Configure Firewall (IPS Mode)
 echo "[+] Checking firewall (nftables/iptables)..."
 if command -v nft >/dev/null; then
     echo "[OK] nftables present for active mitigation."
@@ -43,7 +65,7 @@ else
     sudo apt-get install -y nftables
 fi
 
-# 5. Finalize
+# 6. Finalize
 echo "-----------------------------------------------------------------"
 echo "[SUCCESS] WSL Sensor environment is ready."
 echo "-----------------------------------------------------------------"

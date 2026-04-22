@@ -1,0 +1,90 @@
+"""
+Redis Client & Connection Pool
+Handles connection to Redis for message queuing and caching.
+"""
+
+import redis
+import logging
+import sys
+from pathlib import Path
+
+# Add src directory to path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.config import REDIS_HOST, REDIS_PORT, REDIS_DB
+
+logger = logging.getLogger(__name__)
+
+# Connection pool for efficiency
+try:
+    redis_pool = redis.ConnectionPool(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        decode_responses=True,
+        max_connections=10,
+        socket_connect_timeout=5,
+        socket_keepalive=True,
+        retry_on_timeout=True
+    )
+    redis_client = redis.Redis(connection_pool=redis_pool)
+except Exception as e:
+    logger.error(f"[Redis] Failed to create connection pool: {e}")
+    redis_client = None
+
+
+def test_redis():
+    """Test Redis connection; return True if OK, False otherwise."""
+    if redis_client is None:
+        logger.error("[Redis] Client not initialized")
+        return False
+    
+    try:
+        result = redis_client.ping()
+        logger.info(f"[Redis] Connection OK (PING response: {result})")
+        return True
+    except Exception as e:
+        logger.error(f"[Redis] Connection test failed: {e}")
+        return False
+
+
+def get_queue_depth(queue_name):
+    """Get current depth of a queue."""
+    if redis_client is None:
+        return -1
+    try:
+        depth = redis_client.llen(queue_name)
+        return depth
+    except Exception as e:
+        logger.error(f"[Redis] Failed to get queue depth: {e}")
+        return -1
+
+
+def flush_queue(queue_name):
+    """Clear all items from a queue (debug only)."""
+    if redis_client is None:
+        return False
+    try:
+        redis_client.delete(queue_name)
+        logger.info(f"[Redis] Queue '{queue_name}' flushed")
+        return True
+    except Exception as e:
+        logger.error(f"[Redis] Failed to flush queue: {e}")
+        return False
+
+
+def get_redis_info():
+    """Get Redis server info (for monitoring)."""
+    if redis_client is None:
+        return {}
+    try:
+        info = redis_client.info()
+        return {
+            "version": info.get("redis_version", "unknown"),
+            "used_memory_mb": info.get("used_memory", 0) / (1024 * 1024),
+            "connected_clients": info.get("connected_clients", 0),
+            "total_commands_processed": info.get("total_commands_processed", 0)
+        }
+    except Exception as e:
+        logger.error(f"[Redis] Failed to get info: {e}")
+        return {}

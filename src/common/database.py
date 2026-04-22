@@ -77,6 +77,38 @@ class DatabaseHandler:
         except Exception as e:
             logger.error(f"Failed to add alert: {e}")
 
+    def batch_add_alerts(self, alerts_data_list):
+        """Insert a batch of alerts in a single transaction."""
+        if not alerts_data_list: return
+        try:
+            cursor = self.conn.cursor()
+            params = []
+            for alert_data in alerts_data_list:
+                params.append((
+                    alert_data.get('timestamp'),
+                    alert_data.get('event_type'),
+                    alert_data.get('src_ip'),
+                    alert_data.get('src_port'),
+                    alert_data.get('dest_ip'),
+                    alert_data.get('dest_port'),
+                    alert_data.get('protocol'),
+                    alert_data.get('alert_sig'),
+                    alert_data.get('prediction'),
+                    alert_data.get('confidence'),
+                    alert_data.get('severity'),
+                    alert_data.get('category'),
+                    json.dumps(alert_data.get('raw_event'))
+                ))
+            cursor.executemany('''
+            INSERT INTO alerts (
+                timestamp, event_type, src_ip, src_port, dest_ip, dest_port,
+                protocol, alert_sig, prediction, confidence, severity, category, raw_event
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', params)
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to batch add alerts: {e}")
+
     def query_alerts(self, limit=100, filter_type=None):
         cursor = self.conn.cursor()
         query = "SELECT * FROM alerts"
@@ -93,7 +125,10 @@ class DatabaseHandler:
         alerts = []
         for row in rows:
             alert = dict(row)
-            alert['raw_event'] = json.loads(alert['raw_event'])
+            try:
+                alert['raw_event'] = json.loads(alert['raw_event']) if alert['raw_event'] else {}
+            except (json.JSONDecodeError, TypeError):
+                alert['raw_event'] = {}
             alerts.append(alert)
         return alerts
 
@@ -126,5 +161,6 @@ def _get_handler():
 
 def init_db(): _get_handler().init_db()
 def add_alert(data): _get_handler().add_alert(data)
+def batch_add_alerts(data_list): _get_handler().batch_add_alerts(data_list)
 def query_alerts(limit=100, filter_type=None): return _get_handler().query_alerts(limit, filter_type)
 def get_stats(): return _get_handler().get_stats()

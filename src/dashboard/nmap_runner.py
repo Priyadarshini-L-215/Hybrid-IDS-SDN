@@ -22,16 +22,16 @@ NMAP_INSTALL_URL = "https://nmap.org/download.html"
 # Scan profiles exposed to the UI
 # We optimize these to be more likely to trigger IDS alerts for testing
 SCAN_PROFILES = {
-    "ping":          {"flags": ["-sn", "-Pn", "--unprivileged"],                 "label": "Ping Sweep",         "danger": "low"},
-    "quick":         {"flags": ["-T4", "-F", "-Pn", "--unprivileged"],           "label": "Quick Scan",         "danger": "low"},
-    "service":       {"flags": ["-sV", "-T4", "-Pn", "--unprivileged"],          "label": "Service Detection",  "danger": "medium"},
-    "os_detect":     {"flags": ["-O", "-T4", "-Pn", "--unprivileged"],           "label": "OS Detection",       "danger": "medium"},
-    "vuln":          {"flags": ["--script=vuln", "-T4", "-Pn", "--unprivileged"], "label": "Vuln Scripts",      "danger": "high"},
-    "aggressive":    {"flags": ["-A", "-T4", "-Pn", "--unprivileged"],           "label": "Aggressive (-A)",    "danger": "high"},
-    "stealth_syn":   {"flags": ["-sS", "-T2", "--unprivileged"],                 "label": "Stealth SYN",        "danger": "medium"},
-    "udp":           {"flags": ["-sU", "-T3", "--top-ports=50", "--unprivileged"], "label": "UDP Top-50",       "danger": "medium"},
-    "full_ports":    {"flags": ["-p-", "-T4", "--unprivileged"],                 "label": "Full Port Scan",     "danger": "medium"},
-    "custom":        {"flags": ["--unprivileged"],                               "label": "Custom Flags",       "danger": "custom"},
+    "ping":          {"flags": ["-sn", "-Pn", "--unprivileged"],                 "label": "Ping Sweep",         "danger": "low",    "requires_root": False},
+    "quick":         {"flags": ["-T4", "-F", "-Pn", "--unprivileged"],           "label": "Quick Scan",         "danger": "low",    "requires_root": False},
+    "service":       {"flags": ["-sV", "-T4", "-Pn", "--unprivileged"],          "label": "Service Detection",  "danger": "medium", "requires_root": False},
+    "os_detect":     {"flags": ["-O", "-T4", "-Pn"],                             "label": "OS Detection",       "danger": "medium", "requires_root": True},
+    "vuln":          {"flags": ["--script=vuln", "-T4", "-Pn", "--unprivileged"], "label": "Vuln Scripts",      "danger": "high",   "requires_root": False},
+    "aggressive":    {"flags": ["-A", "-T4", "-Pn", "--unprivileged"],           "label": "Aggressive (-A)",    "danger": "high",   "requires_root": False},
+    "stealth_syn":   {"flags": ["-sS", "-T2"],                                   "label": "Stealth SYN",        "danger": "medium", "requires_root": True},
+    "udp":           {"flags": ["-sU", "-T3", "--top-ports=50"],                 "label": "UDP Top-50",         "danger": "medium", "requires_root": True},
+    "full_ports":    {"flags": ["-p-", "-T4", "--unprivileged"],                 "label": "Full Port Scan",     "danger": "medium", "requires_root": False},
+    "custom":        {"flags": ["--unprivileged"],                               "label": "Custom Flags",       "danger": "custom", "requires_root": False},
 }
 
 # Hard cap – prevent runaway scans

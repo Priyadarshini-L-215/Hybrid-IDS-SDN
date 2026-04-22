@@ -21,10 +21,15 @@ from common.config import (
     MODEL_PATH, FEATURES_PATH, 
     POLL_INTERVAL_SEC, HEARTBEAT_INTERVAL_SEC,
     WS_HOST, WS_PORT,
-    ensure_dirs
+    ensure_dirs,
+    USE_REDIS_QUEUE, WORKER_COUNT, BATCH_SIZE, WATCHER_FLUSH_TIMEOUT,
+    REDIS_QUEUE_NAME, REDIS_HOST, REDIS_PORT
 )
 from ml_engine.data_service import start_data_service
 from ml_engine.firewall import ActiveFirewall
+from ml_engine.redis_client import test_redis, redis_client
+from ml_engine.file_watcher import AsyncFileWatcher
+from ml_engine.worker_pool import WorkerPool
 import collections
 
 # Initialize
@@ -33,7 +38,7 @@ init_db()
 
 # WebSocket broadcast state
 _ws_clients = set()
-_ws_lock = asyncio.Lock()
+_ws_queue = asyncio.Queue()  # Queue for outbound messages
 _RUNNING = True
 
 # Setup logging
@@ -45,37 +50,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def _ws_handler(websocket):
-    """
-    Handle new WebSocket connections.
-    Updated signature for websockets 14.0+ compatibility.
-    """
-    async with _ws_lock:
-        _ws_clients.add(websocket)
-        logger.info(f"[WS] New client connected. Total: {len(_ws_clients)}")
+    """Handle new WebSocket connections."""
+    logger.info(f"[WS] Connection attempt from {websocket.remote_address}")
+    _ws_clients.add(websocket)
+    logger.info(f"[WS] Client connected. Total: {len(_ws_clients)}")
     try:
-        await websocket.wait_closed()
+        # websockets 14+ requires consuming the stream to process ping/pong/close frames
+        async for _ in websocket:
+            pass
+    except Exception as e:
+        logger.debug(f"[WS] Connection error: {e}")
     finally:
-        async with _ws_lock:
-            if websocket in _ws_clients:
-                _ws_clients.discard(websocket)
-                logger.info(f"[WS] Client disconnected. Total: {len(_ws_clients)}")
+        if websocket in _ws_clients:
+            _ws_clients.discard(websocket)
+            logger.info(f"[WS] Client disconnected. Total: {len(_ws_clients)}")
 
 async def _broadcast(message: str):
-    """Broadcast message to all connected clients."""
-    async with _ws_lock:
-        if not _ws_clients:
-            return
-        # Copy set to avoid mutation issues during iteration
-        clients = list(_ws_clients)
-    
-    # Use gather to send to all clients in parallel
-    if clients:
-        tasks = []
-        for client in clients:
-            tasks.append(client.send(message))
-        
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    """Adds message to the broadcast queue."""
+    if _ws_queue:
+        await _ws_queue.put(message)
+
+async def _broadcast_worker():
+    """Background task to pull from queue and send to all clients in batches."""
+    logger.info("[WS] Broadcast worker started")
+    while _RUNNING:
+        try:
+            # Wait for at least one message
+            message = await _ws_queue.get()
+            
+            # Collect any other pending messages to send as a batch (optional, but let's just send)
+            # Actually, websockets send is already buffered.
+            
+            clients = list(_ws_clients)
+            if not clients:
+                _ws_queue.task_done()
+                continue
+            
+            # Send to all clients
+            if clients:
+                tasks = [client.send(message) for client in clients]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            
+            _ws_queue.task_done()
+        except Exception as e:
+            logger.error(f"[WS] Broadcast error: {e}")
+            await asyncio.sleep(0.1)
 
 class MLEngine:
     def __init__(self):
@@ -158,6 +177,108 @@ class MLEngine:
         confidence = min(60 + score, 99)
         return classification, confidence
 
+
+# ========== REDIS-BACKED PIPELINE (NEW - Option B) ==========
+
+async def eve_batch_to_redis(batch):
+    """
+    Callback: batch of EVE JSON lines → parse → push to Redis queue.
+    Used by AsyncFileWatcher.
+    """
+    if not batch or redis_client is None:
+        return
+    
+    for line in batch:
+        try:
+            event = json.loads(line.strip())
+            # Push to Redis queue
+            redis_client.rpush(REDIS_QUEUE_NAME, json.dumps(event))
+        except Exception as e:
+            logger.debug(f"[Redis] Malformed JSON: {e}")
+
+
+async def redis_reader_task():
+    """
+    Reader task: watch EVE file and feed Redis queue with batches.
+    Replaces polling-based reading with async file watching.
+    """
+    logger.info(f"[Redis] Waiting for EVE log: {EVE_LOG}")
+    while not EVE_LOG.exists():
+        await asyncio.sleep(1)
+    
+    logger.info(f"[Redis] Monitoring {EVE_LOG} for events (batching {BATCH_SIZE} per push)")
+    
+    watcher = AsyncFileWatcher(EVE_LOG, batch_size=BATCH_SIZE, flush_timeout=WATCHER_FLUSH_TIMEOUT)
+    await watcher.watch(eve_batch_to_redis)
+
+
+async def redis_pipeline_main():
+    """
+    Main entry point for Redis-backed pipeline.
+    
+    Startup sequence is strictly sequential to avoid race conditions:
+    1. Bind WebSocket server (prevents hang)
+    2. Start Worker Pool
+    3. Start File Watcher/Reader
+    """
+    global _RUNNING
+    
+    # Check Redis connectivity
+    if not test_redis():
+        logger.error(f"[Redis] Cannot connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
+        logger.error("[Redis] Falling back to legacy polling mode")
+        return await log_tailer()
+    
+    # Initialize ML engine for workers
+    engine = MLEngine()
+    
+    # Initialize worker pool with current event loop for thread-safe broadcasting
+    loop = asyncio.get_running_loop()
+    worker_pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=_broadcast, loop=loop)
+    
+    # 1. Start WebSocket server and maintain pipeline within its context
+    bind_host = "0.0.0.0" # Bind to all interfaces for bridge accessibility
+    logger.info(f"[WS] Starting WebSocket server on {bind_host}:{WS_PORT}...")
+    try:
+        async with websockets.serve(_ws_handler, bind_host, WS_PORT, ping_interval=30, ping_timeout=15) as ws_server:
+            logger.info(f"[WS] WebSocket server online on {bind_host}:{WS_PORT}")
+            
+            # 2. Start workers and broadcast worker after WS is confirmed listening
+            logger.info("[Redis] Starting worker pool and broadcast worker...")
+            worker_pool.start()
+            asyncio.create_task(_broadcast_worker())
+            
+            # 3. Start reader coroutine
+            async def reader():
+                logger.info(f"[Redis] Waiting for EVE log: {EVE_LOG}")
+                while not EVE_LOG.exists() and _RUNNING:
+                    await asyncio.sleep(1)
+                
+                if not _RUNNING: return
+                
+                logger.info(f"[Redis] Monitoring {EVE_LOG} for events")
+                watcher = AsyncFileWatcher(EVE_LOG, batch_size=BATCH_SIZE, flush_timeout=WATCHER_FLUSH_TIMEOUT)
+                await watcher.watch(eve_batch_to_redis)
+
+            # Run reader and keep-alive loop
+            # Create reader as a background task
+            reader_task = asyncio.create_task(reader())
+            
+            logger.info("[Main] Pipeline fully initialized and running")
+            while _RUNNING:
+                await asyncio.sleep(1)
+                
+    except Exception as e:
+        logger.error(f"[Main] Pipeline runtime error: {e}")
+    finally:
+        logger.info("[Redis] Shutting down pipeline...")
+        _RUNNING = False
+        worker_pool.stop()
+        logger.info("[Redis] Pipeline stopped")
+
+
+# ========== LEGACY PIPELINE (Old - backward compatible) ==========
+
 async def log_tailer():
     """Main loop for tailing EVE log and processing alerts."""
     global _RUNNING
@@ -183,6 +304,8 @@ async def log_tailer():
     current_inode = os.fstat(f.fileno()).st_ino
     
     last_hb = 0.0
+    events_in_session = 0
+    last_activity = time.time()
 
     while _RUNNING:
         line = f.readline()
@@ -194,10 +317,6 @@ async def log_tailer():
                 with open(HEARTBEAT_LOG, "w") as hb:
                     hb.write(datetime.now(timezone.utc).isoformat())
                 
-                # Periodic summary log for visibility
-                if 'events_in_session' not in locals(): events_in_session = 0
-                if 'last_activity' not in locals(): last_activity = now
-                
                 status_msg = f"[STATUS] Session events: {events_in_session} | "
                 if events_in_session == 0:
                     status_msg += "Watching /var/log/suricata/eve.json..."
@@ -206,10 +325,10 @@ async def log_tailer():
                 logger.info(status_msg)
                 
                 last_hb = now
-            except: pass
+            except Exception:
+                pass
 
         if line:
-            if 'events_in_session' not in locals(): events_in_session = 0
             events_in_session += 1
             last_activity = now
             try:
@@ -250,7 +369,8 @@ async def log_tailer():
                         port = event.get("dest_port", "")
                         sig = f"{proto} Potential Probe (Port {port})" if final_classification == "attack" else f"{proto} Flow"
 
-                    db_payload = {
+                # Build db_payload OUTSIDE the if-not-sig block so it always exists
+                db_payload = {
                     "timestamp": event.get("timestamp"),
                     "event_type": event.get("event_type"),
                     "src_ip": event.get("src_ip"),
@@ -307,7 +427,7 @@ async def log_tailer():
                 # 4. WebSocket Broadcast
                 await _broadcast(json.dumps(db_payload))
                 
-                logger.info(f"[{prediction['classification'].upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({prediction['confidence']}%)")
+                logger.info(f"[{final_classification.upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({final_confidence}%)")  # use final_ not original prediction
 
             except Exception as e:
                 logger.error(f"Processing error: {e}")
@@ -337,19 +457,31 @@ async def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: setattr(sys.modules[__name__], '_RUNNING', False))
 
-    logger.info(f"Starting Anti-Gravity IDS Consumer (WS: {WS_HOST}:{WS_PORT})")
+    logger.info(f"Starting Sentinel Core IDS Consumer (WS: {WS_HOST}:{WS_PORT})")
+    
+    # (No lock needed — broadcast uses a queue)
+    
+    # Log pipeline mode
+    if USE_REDIS_QUEUE:
+        logger.info("[Main] Using Redis-backed pipeline (Option B - experimental)")
+        logger.info(f"[Main] Redis: {REDIS_HOST}:{REDIS_PORT}, Workers: {WORKER_COUNT}, Batch: {BATCH_SIZE}")
+    else:
+        logger.info("[Main] Using legacy polling pipeline")
     
     # Start the native bridge data service for Windows bypass
     start_data_service()
     
     try:
-        # Start WebSocket server and log tailer concurrently
-        async with websockets.serve(_ws_handler, WS_HOST, WS_PORT):
-            logger.info(f"[WS] WebSocket server online at ws://{WS_HOST}:{WS_PORT}")
-            await log_tailer()
+        # Choose pipeline based on config
+        if USE_REDIS_QUEUE:
+            await redis_pipeline_main()
+        else:
+            # Legacy path: WebSocket server + polling log tailer
+            async with websockets.serve(_ws_handler, WS_HOST, WS_PORT):
+                logger.info(f"[WS] WebSocket server online at ws://{WS_HOST}:{WS_PORT}")
+                await log_tailer()
     except Exception as e:
         logger.critical(f"FATAL ERROR in main loop: {e}")
-        # Ensure we exit so start_ids.sh notices
         sys.exit(1)
 
 if __name__ == "__main__":

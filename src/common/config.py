@@ -34,10 +34,24 @@ HEARTBEAT_INTERVAL_SEC = 10
 ALERT_CACHE_SIZE = 100
 
 # --- WEBSOCKET & DATA SERVICE ---
-WS_HOST = "0.0.0.0"
-WS_PORT = 8765
-DATA_SERVICE_PORT = 5001
-WS_URI = f"ws://127.0.0.1:{WS_PORT}"
+WS_HOST = os.environ.get("WS_HOST", "0.0.0.0")
+WS_PORT = int(os.environ.get("WS_PORT", "8999"))
+DATA_SERVICE_PORT = int(os.environ.get("DATA_SERVICE_PORT", "5001"))
+WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{WS_PORT}")
+
+# --- REDIS QUEUE & CACHING ---
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
+REDIS_QUEUE_NAME = "sentinel_alerts_queue"
+REDIS_ALERT_STREAM = "sentinel_alerts_stream"
+USE_REDIS_QUEUE = os.environ.get("USE_REDIS_QUEUE", "1") == "1"
+
+# --- WORKER POOL & BATCHING ---
+BATCH_SIZE = 5  # events to batch before processing
+BATCH_FLUSH_INTERVAL = 0.25  # seconds
+WATCHER_FLUSH_TIMEOUT = 0.2  # seconds
+WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))  # parallel workers
 
 def ensure_dirs():
     """Ensure all required directories exist."""
