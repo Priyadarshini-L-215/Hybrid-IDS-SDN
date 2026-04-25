@@ -212,6 +212,7 @@ function App() {
   });
   const [activeView, setActiveView] = useState('ids');
   const [filter, setFilter] = useState('all');
+  const [connectionState, setConnectionState] = useState('connecting');
   const wsRef = useRef(null);
 
   // Data Pipeline: WebSocket logic
@@ -219,17 +220,31 @@ function App() {
     let retryCount = 0;
     let ws = null;
     let retryTimeout = null;
+    let shouldReconnect = true;
+    const retryDelays = [2000, 5000, 10000];
+
+    const getWebSocketUrl = () => {
+      // In Vite dev (port 3000), connect directly to Flask backend to avoid
+      // proxy-level socket abort noise and reconnection churn.
+      if (window.location.port === '3000') {
+        return 'ws://127.0.0.1:5000/ws/alerts';
+      }
+
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${proto}//${window.location.host}/ws/alerts`;
+    };
 
     const connectWS = () => {
-      // Use relative URL so Vite proxy routes it correctly
-      const wsUrl = `ws://${window.location.host}/ws/alerts`;
+      const wsUrl = getWebSocketUrl();
       console.log(`[Pipeline] Connecting to ${wsUrl} (attempt ${retryCount + 1})`);
+      setConnectionState(retryCount === 0 ? 'connecting' : 'retrying');
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         console.log('[Pipeline] WebSocket connection established');
         retryCount = 0; // Reset backoff on success
+        setConnectionState('connected');
       };
 
       ws.onmessage = (event) => {
@@ -300,18 +315,25 @@ function App() {
       };
 
       ws.onclose = () => {
-        // Exponential backoff: 0.5s, 1s, 2s, 4s, 8s, 16s, 30s max
-        const delay = Math.min(500 * Math.pow(2, retryCount), 30000);
+        if (!shouldReconnect) {
+          return;
+        }
+        const delay = retryDelays[Math.min(retryCount, retryDelays.length - 1)];
+        setConnectionState(retryCount >= retryDelays.length ? 'reconnecting' : 'retrying');
         retryCount++;
         console.warn(`[Pipeline] WebSocket closed. Reconnecting in ${delay}ms (attempt ${retryCount})...`);
         retryTimeout = setTimeout(connectWS, delay);
       };
 
-      ws.onerror = (err) => console.error('[Pipeline] WebSocket error:', err);
+      ws.onerror = (err) => {
+        setConnectionState('error');
+        console.error('[Pipeline] WebSocket error:', err);
+      };
     };
 
     connectWS();
     return () => {
+      shouldReconnect = false;
       clearTimeout(retryTimeout);
       ws?.close();
     };
@@ -373,8 +395,26 @@ function App() {
         </div>
 
         <div className="status-indicator">
-          <div className={`status-dot ${data.attack_total > 0 ? 'error' : ''}`} />
-          <span>{data.last_updated ? `LIVE: ${data.last_updated}` : 'SYNCING...'}</span>
+          <div
+            className="status-dot"
+            style={{
+              backgroundColor:
+                connectionState === 'connected'
+                  ? (data.attack_total > 0 ? 'var(--danger)' : 'var(--primary)')
+                  : connectionState === 'error'
+                    ? 'var(--danger)'
+                    : 'var(--warning)',
+            }}
+          />
+          <span>
+            {connectionState === 'connected'
+              ? (data.last_updated ? `LIVE: ${data.last_updated}` : 'CONNECTED')
+              : connectionState === 'error'
+                ? 'CONNECTION ERROR'
+                : connectionState === 'reconnecting'
+                  ? 'RECONNECTING...'
+                  : 'CONNECTING...'}
+          </span>
         </div>
       </header>
 

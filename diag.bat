@@ -76,14 +76,14 @@ if defined CONS_PID (
 echo.
 
 :: -- 6. WebSocket Deep Probe --
-echo  [CHECK 6/8] WebSocket Handshake (Port 8999)
+echo  [CHECK 6/8] WebSocket Handshake (Port 8765)
 (
 echo import asyncio
 echo import websockets
 echo import sys
 echo async def check^(^):
 echo     try:
-echo         async with websockets.connect^('ws://127.0.0.1:8999', open_timeout=5^):
+echo         async with websockets.connect^('ws://127.0.0.1:8765', open_timeout=5^):
 echo             print^('OK'^)
 echo     except Exception as e:
 echo         print^(f'FAIL: {e}'^)
@@ -92,10 +92,10 @@ echo asyncio.run^(check^(^)^)
 
 "%PYTHON_EXE%" "%CHECK_SCRIPT%" 2>nul | find "OK" >nul
 if not errorlevel 1 (
-    echo    [PASS] Handshake successful on 127.0.0.1:8999
+    echo    [PASS] Handshake successful on 127.0.0.1:8765
     set /a PASS+=1
 ) else (
-    echo    [FAIL] Port 8999 WS handshake failed
+    echo    [FAIL] Port 8765 WS handshake failed
     echo    [INFO] Error details:
     "%PYTHON_EXE%" "%CHECK_SCRIPT%"
     set /a FAIL+=1

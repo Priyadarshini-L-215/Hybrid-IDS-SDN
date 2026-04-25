@@ -13,6 +13,7 @@ set "WSL_SETUP_SH=%ROOT%\setup_wsl.sh"
 set "SETUP_STAMP=%ROOT%\.sentinel_setup_complete"
 set "FORCE_SETUP=0"
 set "USE_REDIS_QUEUE=1"
+set "WS_PORT=8765"
 
 if /I "%~1"=="--force-setup" set "FORCE_SETUP=1"
 if /I "%~1"=="--legacy" set "USE_REDIS_QUEUE=0"
@@ -43,10 +44,14 @@ if errorlevel 1 (
 
 :: Check for Python venv (Redis client required)
 if not exist "%PYTHON_EXE%" (
-    echo [ERROR] Python virtual environment not found.
-    echo Please run: python -m venv .venv
-    pause
-    exit /b 1
+    echo [!] Python virtual environment not found.
+    echo [+] Running setup.bat to bootstrap Windows environment...
+    call "%ROOT%\setup.bat" --no-pause
+    if not exist "%PYTHON_EXE%" (
+        echo [ERROR] Python virtual environment setup failed.
+        pause
+        exit /b 1
+    )
 )
 
 if "%FORCE_SETUP%"=="1" (
@@ -67,9 +72,13 @@ echo [+] Running first-time/full setup verification...
 :: Check for UI Dependencies
 if not exist "%UI_DIR%\node_modules" (
     echo [!] UI dependencies not found.
-    echo [+] Running npm install...
+    echo [+] Running UI dependency install...
     cd /d "%UI_DIR%"
-    call npm install
+    if exist package-lock.json (
+        call npm ci
+    ) else (
+        call npm install
+    )
     if errorlevel 1 (
         echo [ERROR] npm install failed. Fix UI dependencies and re-run start.bat.
         cd /d "%ROOT%"
@@ -155,16 +164,16 @@ if not defined WSL_IP set "WSL_IP=127.0.0.1"
 for /L %%i in (1,1,30) do (
     if "!WSL_READY!"=="0" (
         :: Try proper WebSocket handshake instead of raw TCP to avoid server errors
-        "%PYTHON_EXE%" "%ROOT%\scratch\check_ws_ready.py" ws://!WSL_IP!:8999 >nul 2>&1
+        "%PYTHON_EXE%" "%ROOT%\scratch\check_ws_ready.py" ws://!WSL_IP!:!WS_PORT! >nul 2>&1
         if not errorlevel 1 (
             set "WSL_READY=1"
-            echo [+] WSL Consumer is ONLINE on !WSL_IP!:8999
+            echo [+] WSL Consumer is ONLINE on !WSL_IP!:!WS_PORT!
         ) else (
             :: Fallback attempt on localhost in case WSL IP is unroutable
-            "%PYTHON_EXE%" "%ROOT%\scratch\check_ws_ready.py" ws://127.0.0.1:8999 >nul 2>&1
+            "%PYTHON_EXE%" "%ROOT%\scratch\check_ws_ready.py" ws://127.0.0.1:!WS_PORT! >nul 2>&1
             if not errorlevel 1 (
                 set "WSL_READY=1"
-                echo [+] WSL Consumer is ONLINE on 127.0.0.1:8999
+                echo [+] WSL Consumer is ONLINE on 127.0.0.1:!WS_PORT!
             ) else (
                 <nul set /p=.
                 ping -n 2 127.0.0.1 >nul
@@ -184,7 +193,7 @@ start "Backend (Relay)" /D "%ROOT%" cmd /k "echo [BACKEND] Initializing AI Relay
 :: 4. Deploy Redis Validation
 if "%USE_REDIS_QUEUE%"=="1" (
     echo [+] Validating Redis pipeline...
-    "%PYTHON_EXE%" "%ROOT%\validate_redis_pipeline.py" >nul 2>&1
+    "%PYTHON_EXE%" "%ROOT%\tests\validate_redis_pipeline.py" >nul 2>&1
     if errorlevel 1 (
         echo [!] Redis pipeline validation failed. Check logs.
     ) else (
@@ -215,7 +224,7 @@ if "%USE_REDIS_QUEUE%"=="1" (
 echo.
 echo [SERVICES]
 echo - Dashboard:      http://localhost:3000
-echo - WebSocket API:  ws://127.0.0.1:8999
+echo - WebSocket API:  ws://127.0.0.1:!WS_PORT!
 echo - Flask Relay:    http://localhost:5000
 echo - Core Logs:      tail -f data/logs/consumer.log
 echo.

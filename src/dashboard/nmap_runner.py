@@ -12,6 +12,8 @@ import textwrap
 import time
 from typing import Optional
 
+from common.wsl_utils import get_wsl_ip
+
 # ------------------------------------------------------------------ #
 #  Configuration                                                       #
 # ------------------------------------------------------------------ #
@@ -61,22 +63,6 @@ def get_nmap_path() -> str:
             return path
             
     return NMAP_BIN # Fallback to default
-
-def get_wsl_ip() -> Optional[str]:
-    """
-    Retrieves the IP address of the WSL environment.
-    This is necessary because Nmap scanning Windows 'localhost' bypasses WSL's virtual network interface,
-    preventing Suricata (running in WSL) from detecting the traffic.
-    """
-    try:
-        result = subprocess.run(["wsl", "hostname", "-I"], capture_output=True, text=True, timeout=2)
-        if result.returncode == 0 and result.stdout:
-            # Usually returns a space-separated list of IPs, take the first one
-            return result.stdout.split()[0].strip()
-    except Exception:
-        pass
-    return None
-
 
 def get_nmap_status() -> dict:
     """Return a lightweight availability summary for UI health checks."""

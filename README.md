@@ -4,7 +4,7 @@
 ![Flask](https://img.shields.io/badge/Framework-Flask-black?logo=flask)
 ![React](https://img.shields.io/badge/Frontend-React-blue?logo=react)
 ![Suricata](https://img.shields.io/badge/Security-Suricata-red)
-![Scikit-Learn](https://img.shields.io/badge/Machine%20Learning-Scikit--Learn-F7931E?logo=scikit-learn)
+![Redis](https://img.shields.io/badge/Pipeline-Redis-red?logo=redis)
 
 ## Project Overview
 
@@ -19,11 +19,12 @@ Unlike traditional IDS, Sentinel Core implements **Active Mitigation**—automat
 | Layer | Technologies |
 | :--- | :--- |
 | **Security Engine** | Suricata (IDS/IPS), `nftables`/`iptables` (Mitigation) |
+| **Data Pipeline** | Redis (Queueing), `AsyncFileWatcher` (Low-latency ingestion) |
 | **Machine Learning** | Scikit-Learn (Random Forest), Pandas, NumPy |
 | **Backend Integration** | Python 3.12, Flask, Flask-Sock |
-| **Frontend UI** | React, Vite, Lucide React (Sentinel Core Design) |
+| **Frontend UI** | React 19, Vite, Lucide React (Sentinel Core Design) |
 | **Communication** | Native WebSockets (`asyncio`/`websockets`) |
-| **Data Persistence** | SQLite3 (High-performance batch logging) |
+| **Data Persistence** | SQLite3 (WAL Mode, High-performance batch logging) |
 | **Analysis AI** | Google Gemini (External Scan Analysis) |
 
 ---
@@ -34,24 +35,25 @@ The system utilizes a high-performance split-host architecture:
 
 1.  **Detection & Mitigation Sensor (WSL - Ubuntu)**: 
     *   **Suricata**: Signature-based packet inspection generating EVE JSON telemetry.
-    *   **ML Inference Engine**: A high-concurrency Python consumer that performs 57-feature extraction and Random Forest classification.
+    *   **Redis-Backed Pipeline**: A high-concurrency 4-worker pool that performs 57-feature extraction and Random Forest classification.
     *   **Stateful Flow Correlator**: Tracks connection patterns to detect DoS and stealthy reconnaissance.
     *   **Active IPS Module**: Interfaces with the system firewall to block malicious actors instantly.
 2.  **Telemetry & Management Layer (Windows)**:
-    *   **Flask Relay**: An asynchronous bridge that pipes telemetry from the Linux sensor to browser clients via WebSockets.
-    *   **Security Dashboard**: A "Sentinel Core" glassmorphic React interface for professional SOC monitoring.
+    *   **Flask Relay**: An asynchronous bridge with auto-reconnect that pipes telemetry from Linux to browser clients.
+    *   **Security Dashboard**: A glassmorphic React interface for professional SOC monitoring.
 3.  **Data Layer**:
-    *   **SQLite (Persistent)**: Optimized batch-write architecture handling thousands of events per second.
+    *   **SQLite (Persistent)**: Optimized batch-write architecture using **WAL mode** for concurrent access.
 
 ---
 
 ## 🚀 Key Features
 
+*   **High-Throughput Pipeline**: Redis-backed parallel processing handling 1000+ events/sec.
 *   **Zero-Day Detection**: ML behavioral analysis identifies novel threats that bypass signature rules.
 *   **Active Mitigation**: High-confidence threats (>95%) are automatically blocked by the IPS module.
 *   **Volumetric Analysis**: Detects DoS/DDoS patterns and aggressive port scans through stateful correlation.
-*   **Neural Telemetery**: Native WebSocket stream ensures sub-millisecond alert visibility.
-*   **Attack Simulation**: Integrated Lab with Nmap and **Gemini AI** for automated scan analysis.
+*   **Neural Telemetery**: Native WebSocket stream ensures sub-10ms alert visibility.
+*   **Integrated Diagnostics**: Built-in tools for pipeline health, tracer probes, and connection testing.
 
 ---
 
@@ -63,21 +65,25 @@ To install everything and start the system for the first time, simply run the un
 start.bat
 ```
 
+For a full dependency recheck and refresh:
+
+```cmd
+start.bat --force-setup
+```
+
 **What this does automatically:**
 1.  Detects and prepares your **WSL** (Linux) environment.
-2.  Installs **Suricata** and ML dependencies.
+2.  Installs **Suricata**, **Redis**, and ML dependencies.
 3.  Initializes the **Python venv** and **Node.js** UI.
-4.  Launches all components (Sensor, Backend, and Dashboard).
+4.  Launches all components (Sensor, Backend, and Dashboard) in separate terminals.
 
 ---
 
 ## 🛠️ Project Maintenance
 
-The project structure has been streamlined:
-
 *   **`src/`**: Core logic (ML Engine, Dashboard, Shared).
-*   **`tests/`**: Consolidated test suite for verification.
-*   **`scratch/`**: Minimal diagnostic scripts.
+*   **`tests/`**: Consolidated validation suite.
+*   **`data/logs/`**: Centralized logging and heartbeats.
 
 ### Custom Setup Scripts
 If you prefer to run setup steps manually:
@@ -92,7 +98,8 @@ If you prefer to run setup steps manually:
 | :--- | :--- |
 | **Stop System** | `stop.bat` |
 | **Run Tests** | `pytest tests/` |
-| **Dashboard** | `http://localhost:5173` |
+| **Health Check** | `wsl bash check_system_status.sh` |
+| **Dashboard** | `http://localhost:3000` |
 
 ## 🏗️ Technical Deep Dive
 For architecture diagrams and module details, see [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md).

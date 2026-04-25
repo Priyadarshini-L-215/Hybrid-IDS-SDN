@@ -24,13 +24,13 @@ try {
 }
 Write-Host ""
 
-# 2. Check if localhost:8999 is reachable
-Write-Host "[2] WebSocket Port (127.0.0.1:8999) Connectivity" -ForegroundColor Yellow
-$tcp_test = Test-NetConnection -ComputerName 127.0.0.1 -Port 8999 -WarningAction SilentlyContinue
+# 2. Check if localhost:8765 is reachable
+Write-Host "[2] WebSocket Port (127.0.0.1:8765) Connectivity" -ForegroundColor Yellow
+$tcp_test = Test-NetConnection -ComputerName 127.0.0.1 -Port 8765 -WarningAction SilentlyContinue
 if ($tcp_test.TcpTestSucceeded) {
-    Write-Host "  ✓ Port 8999 is reachable from Windows" -ForegroundColor Green
+    Write-Host "  ✓ Port 8765 is reachable from Windows" -ForegroundColor Green
 } else {
-    Write-Host "  ✗ Port 8999 is NOT reachable from Windows" -ForegroundColor Red
+    Write-Host "  ✗ Port 8765 is NOT reachable from Windows" -ForegroundColor Red
     Write-Host "    This means WSL consumer isn't listening yet" -ForegroundColor Gray
 }
 Write-Host ""
@@ -66,12 +66,12 @@ Write-Host ""
 # 5. Check WSL port listening
 Write-Host "[5] WSL Port Listening Check" -ForegroundColor Yellow
 try {
-    $port_check = & wsl netstat -tlnp 2>&1 | Select-String "8999"
+    $port_check = & wsl netstat -tlnp 2>&1 | Select-String "8765"
     if ($port_check) {
-        Write-Host "  ✓ Port 8999 is listening in WSL" -ForegroundColor Green
+        Write-Host "  ✓ Port 8765 is listening in WSL" -ForegroundColor Green
         Write-Host "    $port_check" -ForegroundColor Gray
     } else {
-        Write-Host "  ✗ Port 8999 NOT listening in WSL" -ForegroundColor Red
+        Write-Host "  ✗ Port 8765 NOT listening in WSL" -ForegroundColor Red
     }
 } catch {
     Write-Host "  ✗ Error checking WSL ports" -ForegroundColor Red
@@ -107,7 +107,7 @@ Write-Host ""
 $all_good = $true
 
 if (-not ($tcp_test.TcpTestSucceeded)) {
-    Write-Host "[FIX] Port 8999 not reachable:" -ForegroundColor Yellow
+    Write-Host "[FIX] Port 8765 not reachable:" -ForegroundColor Yellow
     Write-Host "  1. Check if consumer is running in WSL:" -ForegroundColor White
     Write-Host "     wsl bash diagnose_websocket.sh" -ForegroundColor Cyan
     Write-Host "  2. If not running, start it:" -ForegroundColor White
@@ -141,7 +141,7 @@ if ($all_good) {
     Write-Host "✓ All systems appear healthy!" -ForegroundColor Green
     Write-Host ""
     Write-Host "If Flask relay still can't connect:" -ForegroundColor Yellow
-    Write-Host "  1. Check Windows Firewall for port 8999" -ForegroundColor White
+    Write-Host "  1. Check Windows Firewall for port 8765" -ForegroundColor White
     Write-Host "  2. Try WSL IP instead of localhost:" -ForegroundColor White
     Write-Host "     wsl hostname -I" -ForegroundColor Cyan
     Write-Host "  3. Restart WSL: wsl --shutdown" -ForegroundColor Cyan

@@ -14,12 +14,18 @@ class DatabaseHandler:
 
     def _connect(self):
         try:
-            # Allow multi-threaded access and enable WAL mode for high concurrency performance
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            # Allow multi-threaded access, set busy timeout, and enable WAL mode for high concurrency performance
+            self.conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+            
+            # Optimization Pragmas
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA cache_size=-10000")  # Use 10MB of memory for caching
+            self.conn.execute("PRAGMA busy_timeout=30000") # Redundant with connect timeout but good for clarity
+            
             self.conn.row_factory = sqlite3.Row
-        except Exception as e:
+            logger.info(f"Database connection established: {self.db_path} (WAL mode enabled)")
+        except sqlite3.Error as e:
             logger.error(f"Database connection failed: {e}")
             raise
 
@@ -74,7 +80,7 @@ class DatabaseHandler:
                 json.dumps(alert_data.get('raw_event'))
             ))
             self.conn.commit()
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.error(f"Failed to add alert: {e}")
 
     def batch_add_alerts(self, alerts_data_list):
@@ -106,18 +112,19 @@ class DatabaseHandler:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', params)
             self.conn.commit()
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.error(f"Failed to batch add alerts: {e}")
 
-    def query_alerts(self, limit=100, filter_type=None):
+    def query_alerts(self, limit=100, filter_type=None, offset=0):
         cursor = self.conn.cursor()
         query = "SELECT * FROM alerts"
         params = []
         if filter_type and filter_type.lower() != 'all':
             query += " WHERE lower(prediction) = ?"
             params.append(filter_type.lower())
-        query += " ORDER BY timestamp DESC LIMIT ?"
+        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.append(limit)
+        params.append(offset)
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -162,5 +169,5 @@ def _get_handler():
 def init_db(): _get_handler().init_db()
 def add_alert(data): _get_handler().add_alert(data)
 def batch_add_alerts(data_list): _get_handler().batch_add_alerts(data_list)
-def query_alerts(limit=100, filter_type=None): return _get_handler().query_alerts(limit, filter_type)
+def query_alerts(limit=100, filter_type=None, offset=0): return _get_handler().query_alerts(limit, filter_type, offset)
 def get_stats(): return _get_handler().get_stats()

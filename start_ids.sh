@@ -4,6 +4,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$SCRIPT_DIR}"
 USE_REDIS_QUEUE="${USE_REDIS_QUEUE:-1}"
+LOG_DIR="data/logs"
+CONSUMER_LOG="$LOG_DIR/consumer.log"
+CONSUMER_READY="$LOG_DIR/.consumer_ready"
+PIPELINE_BANNER_MODE="Legacy Polling (Compatibility)"
+PIPELINE_LOG_MODE="Legacy Polling"
+
+if [ "$USE_REDIS_QUEUE" = "1" ]; then
+    PIPELINE_BANNER_MODE="Redis Queue Pipeline (Optimized)"
+    PIPELINE_LOG_MODE="Redis Queue"
+fi
 
 if [ ! -d "$PROJECT_ROOT" ]; then
     echo "[IDS] ERROR: PROJECT_ROOT '$PROJECT_ROOT' does not exist."
@@ -15,11 +25,7 @@ cd "$PROJECT_ROOT"
 echo "================================================"
 echo "  Sentinel Core IDS - WSL Pipeline Launcher"
 echo "================================================"
-if [ "$USE_REDIS_QUEUE" = "1" ]; then
-    echo "  Mode: Redis Queue Pipeline (Optimized)"
-else
-    echo "  Mode: Legacy Polling (Compatibility)"
-fi
+echo "  Mode: $PIPELINE_BANNER_MODE"
 echo "================================================"
 echo
 
@@ -59,35 +65,31 @@ redis-cli ping >/dev/null 2>&1 || {
 }
 
 echo "[IDS] Ensuring Suricata is active..."
-systemctl is-active --quiet suricata || systemctl start suricata
-chmod 666 /var/log/suricata/eve.json 2>/dev/null || true
+(service suricata status >/dev/null 2>&1) || sudo service suricata start
+sudo chmod 666 /var/log/suricata/eve.json 2>/dev/null || true
 
 echo "[IDS] Cleaning up old processes..."
 pkill -f "consumer.py" 2>/dev/null || true
 # Kill anything explicitly holding our ports
 if command -v fuser >/dev/null 2>&1; then
-    fuser -k 8999/tcp 5001/tcp 2>/dev/null || true
+    fuser -k 8765/tcp 5001/tcp 2>/dev/null || true
 fi
 sleep 1
 
 echo "[IDS] Truncating old logs for fresh start..."
-mkdir -p data/logs
-rm -f data/logs/.consumer_ready 2>/dev/null || true
-> data/logs/consumer.log
+mkdir -p "$LOG_DIR"
+rm -f "$CONSUMER_READY" 2>/dev/null || true
+> "$CONSUMER_LOG"
 
 echo "[IDS] Starting ML consumer..."
-if [ "$USE_REDIS_QUEUE" = "1" ]; then
-    echo "[IDS] Pipeline: Redis Queue"
-else
-    echo "[IDS] Pipeline: Legacy Polling"
-fi
+echo "[IDS] Pipeline: $PIPELINE_LOG_MODE"
 echo
 
 # PYTHONUNBUFFERED=1 ensures we see logs in consumer.log immediately
 # Export mode for consumer to pick up
 export USE_REDIS_QUEUE="$USE_REDIS_QUEUE"
 
-PYTHONUNBUFFERED=1 nohup python3 src/ml_engine/consumer.py >> data/logs/consumer.log 2>&1 &
+PYTHONUNBUFFERED=1 nohup python3 src/ml_engine/consumer.py >> "$CONSUMER_LOG" 2>&1 &
 CPID=$!
 
 echo "[IDS] Waiting for consumer to initialize..."
@@ -97,7 +99,7 @@ sleep 3
 if ! ps -p $CPID > /dev/null 2>&1; then
     echo "[IDS] ERROR: Consumer process died immediately (PID $CPID not found)"
     echo "[IDS] Last 50 lines of log:"
-    tail -n 50 data/logs/consumer.log
+    tail -n 50 "$CONSUMER_LOG"
     exit 1
 fi
 
@@ -111,8 +113,8 @@ WS_READY=0
 
 while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
     # Try to connect to WebSocket port
-    if ss -tlnp 2>/dev/null | grep -q ":8999"; then
-        echo "[IDS] WebSocket server is listening on port 8999"
+    if ss -tlnp 2>/dev/null | grep -q ":8765"; then
+        echo "[IDS] WebSocket server is listening on port 8765"
         WS_READY=1
         break
     fi
@@ -127,32 +129,32 @@ done
 if [ $WS_READY -eq 0 ]; then
     echo "[IDS] WARNING: WebSocket server not listening after $MAX_ATTEMPTS seconds"
     echo "[IDS] [DIAG] Netstat check:"
-    ss -tlnp | grep -E "8999|5001" || echo "  (not listening)"
+    ss -tlnp | grep -E "8765|5001" || echo "  (not listening)"
     echo "[IDS] [DIAG] Consumer log tail (last 30 lines):"
-    tail -n 30 data/logs/consumer.log
+    tail -n 30 "$CONSUMER_LOG"
     echo "[IDS] [DIAG] Checking for specific errors:"
-    grep -iE "error|exception|traceback|failed|critical" data/logs/consumer.log | tail -n 10
+    grep -iE "error|exception|traceback|failed|critical" "$CONSUMER_LOG" | tail -n 10
 fi
 
 # Final status
 if ps -p $CPID > /dev/null 2>&1; then
     echo "[IDS] Consumer running (PID $CPID)"
-    echo "[IDS] WebSocket: ws://0.0.0.0:8999"
-    echo "[IDS] Logs: $PROJECT_ROOT/data/logs/consumer.log"
+    echo "[IDS] WebSocket: ws://0.0.0.0:8765"
+    echo "[IDS] Logs: $PROJECT_ROOT/$CONSUMER_LOG"
     echo
     if [ $WS_READY -eq 1 ]; then
         echo "[SUCCESS] IDS Pipeline Online and Ready"
-        touch data/logs/.consumer_ready
+        touch "$CONSUMER_READY"
     else
         echo "[WARNING] IDS Pipeline Online but WebSocket not responding yet"
         echo "[WARNING] Flask relay may fail - check consumer logs"
-        rm -f data/logs/.consumer_ready 2>/dev/null || true
+        rm -f "$CONSUMER_READY" 2>/dev/null || true
     fi
     echo
 else
-    rm -f data/logs/.consumer_ready 2>/dev/null || true
+    rm -f "$CONSUMER_READY" 2>/dev/null || true
     echo "[IDS] ERROR: Consumer process died after initialization"
     echo "[IDS] Last 50 lines of log:"
-    tail -n 50 data/logs/consumer.log
+    tail -n 50 "$CONSUMER_LOG"
     exit 1
 fi

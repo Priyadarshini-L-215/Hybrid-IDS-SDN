@@ -16,12 +16,18 @@ export default defineConfig({
       '/ws': {
         target: 'ws://127.0.0.1:5000',
         ws: true,
-        changeOrigin: true,
+        timeout: 30000,
+        proxyTimeout: 30000,
         configure: (proxy, _options) => {
           proxy.on('error', (err, _req, _res) => {
-            // Suppress harmless ECONNABORTED noise during React Fast Refresh (HMR)
-            if (err.code !== 'ECONNABORTED') {
-              console.log('proxy error', err);
+            // Suppress harmless socket reset errors during HMR/Page Reloads
+            const codes = ['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT'];
+            if (codes.includes(err.code) || err.message.includes('ECONNABORTED')) {
+              return; 
+            }
+            // Only log genuine errors that aren't socket aborts
+            if (!err.message.includes('socket hang up')) {
+              console.error('[Vite Proxy Error]:', err);
             }
           });
         }

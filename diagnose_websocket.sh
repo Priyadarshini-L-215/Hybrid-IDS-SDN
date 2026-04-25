@@ -25,12 +25,12 @@ fi
 echo
 
 # 2. Check if WebSocket port is listening
-echo "[2] WebSocket Port (8999) Status"
-if ss -tlnp 2>/dev/null | grep -q ":8999"; then
-    echo "  ✓ Port 8999 is listening"
-    ss -tlnp 2>/dev/null | grep 8999
+echo "[2] WebSocket Port (8765) Status"
+if ss -tlnp 2>/dev/null | grep -q ":8765"; then
+    echo "  ✓ Port 8765 is listening"
+    ss -tlnp 2>/dev/null | grep 8765
 else
-    echo "  ✗ Port 8999 is NOT listening"
+    echo "  ✗ Port 8765 is NOT listening"
     if pgrep -f "consumer.py" > /dev/null; then
         echo "  → Consumer running but port not responding"
         echo "  → Check consumer logs for startup errors"
@@ -101,11 +101,11 @@ echo
 
 # 8. Network connectivity
 echo "[8] Network Connectivity"
-echo "  Checking localhost:8999 accessibility..."
-if timeout 2 python3 -c "import socket; s=socket.socket(); s.connect(('127.0.0.1', 8999)); s.close()" 2>/dev/null; then
-    echo "  ✓ localhost:8999 is reachable"
+echo "  Checking localhost:8765 accessibility..."
+if timeout 2 python3 -c "import socket; s=socket.socket(); s.connect(('127.0.0.1', 8765)); s.close()" 2>/dev/null; then
+    echo "  ✓ localhost:8765 is reachable"
 else
-    echo "  ✗ localhost:8999 is NOT reachable"
+    echo "  ✗ localhost:8765 is NOT reachable"
 fi
 echo
 
@@ -121,7 +121,7 @@ if ! pgrep -f "consumer.py" > /dev/null; then
     ISSUES=$((ISSUES + 1))
 fi
 
-if ! ss -tlnp 2>/dev/null | grep -q ":8999"; then
+if ! ss -tlnp 2>/dev/null | grep -q ":8765"; then
     echo "[!] WebSocket port not listening"
     ISSUES=$((ISSUES + 1))
 fi
@@ -142,7 +142,7 @@ if [ $ISSUES -eq 0 ]; then
     echo "If Flask relay still can't connect:"
     echo "  1. Check Windows firewall settings"
     echo "  2. Verify WSL networking configuration"
-    echo "  3. Run: wsl netstat -tlnp | grep 8999"
+    echo "  3. Run: wsl netstat -tlnp | grep 8765"
     echo "  4. Check Flask logs for connection errors"
 else
     echo "Found $ISSUES issue(s) to resolve."

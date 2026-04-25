@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import sys
 
 # --- BASE DIRECTORY RESOLUTION ---
 # This file is at src/common/config.py, so level 2 is project root
@@ -7,7 +8,6 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 # --- LOG PATHS ---
 LOG_DIR = BASE_DIR / "data" / "logs"
-import sys
 if sys.platform == "linux":
     EVE_LOG = Path("/var/log/suricata/eve.json")
 else:
@@ -35,9 +35,12 @@ ALERT_CACHE_SIZE = 100
 
 # --- WEBSOCKET & DATA SERVICE ---
 WS_HOST = os.environ.get("WS_HOST", "0.0.0.0")
-WS_PORT = int(os.environ.get("WS_PORT", "8999"))
+WS_PORT = int(os.environ.get("WS_PORT", "8765"))
 DATA_SERVICE_PORT = int(os.environ.get("DATA_SERVICE_PORT", "5001"))
 WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{WS_PORT}")
+
+# --- LOGGING ---
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING").upper()
 
 # --- REDIS QUEUE & CACHING ---
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")

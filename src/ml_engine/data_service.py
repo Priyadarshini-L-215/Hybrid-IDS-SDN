@@ -1,6 +1,8 @@
 import json
 import logging
+import sqlite3
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 from threading import Thread
 from common.database import query_alerts, get_stats
 from common.config import DATA_SERVICE_PORT
@@ -11,16 +13,21 @@ class DataServiceHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path.startswith('/api/alerts'):
-                data = query_alerts(limit=100)
+                params = parse_qs(urlparse(self.path).query)
+                limit = int(params.get('limit', ['500'])[0])
+                offset = int(params.get('offset', ['0'])[0])
+                limit = max(limit, 1)
+                offset = max(offset, 0)
+                data = query_alerts(limit=limit, offset=offset)
                 self._send_response(data)
             elif self.path == '/api/stats':
                 data = get_stats()
                 self._send_response(data)
             else:
                 self.send_error(404, "Not Found")
-        except Exception as e:
-            logger.error(f"Data Service Error: {e}")
-            self.send_error(500, str(e))
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            logger.error(f"Data Service Error: {exc}")
+            self.send_error(500, str(exc))
 
     def _send_response(self, data):
         self.send_response(200)

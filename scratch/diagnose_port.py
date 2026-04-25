@@ -17,5 +17,5 @@ def test_connection(host, port):
 
 if __name__ == "__main__":
     wsl_ip = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-    test_connection("127.0.0.1", 8999)
-    test_connection(wsl_ip, 8999)
+    test_connection("127.0.0.1", 8765)
+    test_connection(wsl_ip, 8765)

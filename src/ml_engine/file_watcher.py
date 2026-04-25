@@ -113,6 +113,16 @@ class AsyncFileWatcher:
                 logger.error(f"[FileWatcher] Unexpected error: {e}")
                 await asyncio.sleep(1)
 
+    def get_stats(self):
+        """Return runtime performance metrics."""
+        return {
+            "filepath": str(self.filepath),
+            "lines_read": self.line_count,
+            "batches_sent": self.batch_count,
+            "last_position": self.last_position,
+            "seconds_since_activity": int(time.time() - self.last_data_time)
+        }
+
     async def flush(self, callback):
         """No-op in dynamic mode, kept for API compatibility."""
         pass

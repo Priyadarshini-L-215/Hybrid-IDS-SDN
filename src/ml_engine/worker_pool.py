@@ -4,9 +4,11 @@ import logging
 import time
 import asyncio
 import collections
+import sqlite3
 import sys
 from typing import Optional
 from pathlib import Path
+from redis.exceptions import RedisError
 
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -54,8 +56,8 @@ class WorkerPool:
         # --- Stateful Flow Correlation (IPS) ---
         # Tracks flow timestamps per source IP: {ip: [ts1, ts2, ...]}
         self.flow_history = collections.defaultdict(list)
-        # Tracks unique destination ports per source IP: {ip: set(...)}
-        self.port_history = collections.defaultdict(set)
+        # Tracks latest destination-port timestamps per source IP: {ip: {port: ts}}
+        self.port_history = collections.defaultdict(dict)
         self.correlation_lock = threading.RLock()
         self.WINDOW_SIZE = 10.0  # seconds
         self.PORT_SCAN_THRESHOLD = 25   # unique ports within window
@@ -127,8 +129,8 @@ class WorkerPool:
                                 self.broadcast_func(json.dumps(processed)), 
                                 self.loop
                             )
-                        except Exception as e:
-                            logger.error(f"[{worker_name}] Broadcast schedule error: {e}")
+                        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+                            logger.error(f"[{worker_name}] Broadcast schedule error: {exc}")
 
                     # Add to batch buffer
                     with self.batch_lock:
@@ -142,11 +144,29 @@ class WorkerPool:
                         if len(self.batch_buffer) >= 10:
                             self._flush_batch()
                 
-            except Exception as e:
-                logger.error(f"[{worker_name}] Error: {e}")
+            except (RedisError, json.JSONDecodeError, OSError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
+                logger.error(f"[{worker_name}] Error: {exc}")
                 with self.metrics_lock:
                     self.errors += 1
                 time.sleep(0.1)
+
+    def _prune_stateful_history_locked(self, now):
+        """Drop correlation state outside the sliding window."""
+        cutoff = now - self.WINDOW_SIZE
+
+        for src_ip, timestamps in list(self.flow_history.items()):
+            recent_timestamps = [ts for ts in timestamps if ts >= cutoff]
+            if recent_timestamps:
+                self.flow_history[src_ip] = recent_timestamps
+            else:
+                self.flow_history.pop(src_ip, None)
+
+        for src_ip, port_map in list(self.port_history.items()):
+            stale_ports = [port for port, seen_ts in port_map.items() if seen_ts < cutoff]
+            for port in stale_ports:
+                port_map.pop(port, None)
+            if not port_map:
+                self.port_history.pop(src_ip, None)
 
     def _process_event(self, event, worker_name):
         """
@@ -262,13 +282,10 @@ class WorkerPool:
                 with self.correlation_lock:
                     self.flow_history[src_ip].append(now)
                     if alert.get("dest_port"):
-                        self.port_history[src_ip].add(alert["dest_port"])
+                        self.port_history[src_ip][str(alert["dest_port"])] = now
                     
                     # Prune stale entries outside window
-                    self.flow_history[src_ip] = [
-                        ts for ts in self.flow_history[src_ip]
-                        if now - ts < self.WINDOW_SIZE
-                    ]
+                    self._prune_stateful_history_locked(now)
                     
                     detected = False
                     if len(self.port_history[src_ip]) > self.PORT_SCAN_THRESHOLD:
@@ -297,8 +314,8 @@ class WorkerPool:
             
             return alert
             
-        except Exception as e:
-            logger.error(f"[{worker_name}] Process error: {e}")
+        except (ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError, OSError) as exc:
+            logger.error(f"[{worker_name}] Process error: {exc}")
             with self.metrics_lock:
                 self.errors += 1
             return None
@@ -333,8 +350,8 @@ class WorkerPool:
             logger.debug(f"[BatchFlusher] Flushed {batch_size} alerts to database")
             self.batch_buffer.clear()
             
-        except Exception as e:
-            logger.error(f"[BatchFlusher] Flush error: {e}")
+        except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
+            logger.error(f"[BatchFlusher] Flush error: {exc}")
             with self.metrics_lock:
                 self.errors += 1
 

@@ -46,8 +46,8 @@ else
 fi
 
 # 4. WebSocket Port (Test from Windows)
-echo -n "  WebSocket 127.0.0.1:8999: "
-if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8999" 2>/dev/null; then
+echo -n "  WebSocket 127.0.0.1:8765: "
+if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8765" 2>/dev/null; then
     echo -e "${GREEN}✓${NC}"
 else
     echo -e "${RED}✗${NC} (Consumer may not be listening)"
@@ -94,7 +94,7 @@ fi
 
 # 4. WebSocket Port in WSL
 echo -n "  WebSocket listening: "
-if wsl netstat -tlnp 2>/dev/null | grep -q ":8999"; then
+if wsl netstat -tlnp 2>/dev/null | grep -q ":8765"; then
     echo -e "${GREEN}✓${NC}"
 else
     echo -e "${RED}✗${NC}"
@@ -159,7 +159,7 @@ fi
 
 # 2. Consumer → WebSocket
 echo -n "  Consumer → WebSocket: "
-if [ -n "$CONSUMER_PID" ] && wsl netstat -tlnp 2>/dev/null | grep -q ":8999"; then
+if [ -n "$CONSUMER_PID" ] && wsl netstat -tlnp 2>/dev/null | grep -q ":8765"; then
     echo -e "${GREEN}✓${NC}"
 else
     echo -e "${RED}✗${NC}"
@@ -167,7 +167,7 @@ fi
 
 # 3. Flask → Consumer WebSocket
 echo -n "  Flask → Consumer WS: "
-if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8999" 2>/dev/null; then
+if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8765" 2>/dev/null; then
     echo -e "${GREEN}✓${NC}"
 else
     echo -e "${RED}✗${NC}"
@@ -198,8 +198,8 @@ echo -e "${BLUE}═════════════════════�
 # Count issues
 ISSUES=0
 [ ! -n "$CONSUMER_PID" ] && ISSUES=$((ISSUES+1))
-! wsl netstat -tlnp 2>/dev/null | grep -q ":8999" && ISSUES=$((ISSUES+1))
-! timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8999" 2>/dev/null && ISSUES=$((ISSUES+1))
+! wsl netstat -tlnp 2>/dev/null | grep -q ":8765" && ISSUES=$((ISSUES+1))
+! timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8765" 2>/dev/null && ISSUES=$((ISSUES+1))
 ! wsl -u root systemctl is-active suricata &>/dev/null && ISSUES=$((ISSUES+1))
 
 if [ $ISSUES -eq 0 ]; then

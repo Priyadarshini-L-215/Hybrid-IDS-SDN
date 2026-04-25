@@ -2,7 +2,6 @@
 Sentinel Core IPS – Flask WebSocket Relay & API Backend
 """
 
-import ipaddress
 import logging
 import sys
 import os
@@ -27,8 +26,9 @@ try:
     from integration import tail_ml_alerts, get_consumer_heartbeat
     from common.config import (
         EVE_LOG, ML_ALERTS_LOG, WS_URI, WS_PORT,
-        ALERT_CACHE_SIZE, ensure_dirs
+        ALERT_CACHE_SIZE, ensure_dirs, LOG_LEVEL
     )
+    from common.wsl_utils import get_wsl_ip as resolve_wsl_ip
     from nmap_runner import run_nmap, analyse_with_gemini, SCAN_PROFILES, get_nmap_status
     ensure_dirs()
 except ImportError as e:
@@ -43,7 +43,11 @@ DEFAULT_BIND_PORT = int(os.environ.get("IDS_PORT", "5000"))
 REMOTE_CONTROL_ENABLED = os.environ.get("IDS_ALLOW_REMOTE_CONTROL") == "1"
 REMOTE_CONTROL_TOKEN = os.environ.get("IDS_API_TOKEN", "").strip()
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.WARNING),
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -90,12 +94,10 @@ def _build_relay_candidates(seed_uri: str):
 def _get_wsl_ip():
     """Resolve WSL2 IP address by querying `wsl hostname -I`."""
     try:
-        import subprocess
-        output = subprocess.check_output(["wsl", "hostname", "-I"], text=True, timeout=3)
-        ip = output.strip().split()[0]
+        ip = resolve_wsl_ip()
         _relay_status["wsl_ip"] = ip
         return ip
-    except Exception as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         logger.warning(f"[Relay] Could not resolve WSL IP: {exc}")
         _relay_status["wsl_ip"] = None
         return None
@@ -160,12 +162,14 @@ def _relay_worker():
                             dead = set()
                             for client in list(_browser_clients):
                                 try:
+                                    # Use a short timeout for sending to prevent a slow browser from lagging the entire relay
                                     client.send(message)
-                                except Exception:
+                                except (OSError, RuntimeError, ws_client.exceptions.WebSocketException) as send_err:
+                                    logger.debug(f"[Relay] Send failed to browser client: {send_err}")
                                     dead.add(client)
                             if dead:
                                 _browser_clients -= dead
-                                logger.debug(f"[Relay] Pruned {len(dead)} dead browser connections")
+                                logger.info(f"[Relay] Pruned {len(dead)} dead/stalled browser connections (Total: {len(_browser_clients)})")
 
             except (ConnectionRefusedError, socket.error,
                     ws_client.exceptions.InvalidMessage,
@@ -224,7 +228,7 @@ def _relay_worker():
                         break
                     await asyncio.sleep(1.0)
 
-            except Exception as e:
+            except (OSError, RuntimeError, ValueError, TypeError, ws_client.exceptions.WebSocketException) as e:
                 consecutive_failures += 1
                 err_msg = f"{type(e).__name__}: {e}"
                 _relay_status.update({
@@ -245,6 +249,7 @@ def _relay_worker():
     try:
         asyncio.run(_relay())
     except Exception as fatal:
+        # Top-level crash guard: keep the relay thread from dying silently.
         _relay_status["state"] = "failed"
         logger.critical(f"[Relay] Fatal worker crash: {fatal}")
 
@@ -257,10 +262,24 @@ def ws_alerts(ws):
         _browser_clients.add(ws)
     try:
         while True:
-            # Keep the socket open for up to 1 hour of silence before cycling.
-            # The relay worker will push data whenever it arrives.
-            ws.receive(timeout=3600)
-    except Exception:
+            # Keep the socket alive on idle clients. Some ws implementations raise
+            # TimeoutError for silent periods; treat that as a heartbeat tick.
+            try:
+                message = ws.receive(timeout=30)
+            except TypeError:
+                # Compatibility path for ws objects that don't accept timeout kwarg.
+                message = ws.receive()
+            except TimeoutError:
+                continue
+
+            # None indicates client-initiated close.
+            if message is None:
+                break
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        logger.debug(f"[WS] Browser socket closed: {exc}")
+    except Exception as exc:
+        # Guard against framework-specific websocket close exceptions.
+        logger.debug(f"[WS] Browser socket terminated: {exc}")
         pass
     finally:
         with _browser_lock:
@@ -285,7 +304,7 @@ def api_alerts():
             "normal_total": normal,
             "last_updated": time.strftime("%H:%M:%S")
         }), 200
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as e:
         logger.error(f"API Error (alerts): {e}")
         return jsonify({"error": str(e)}), 500
 
@@ -303,7 +322,7 @@ def api_stats():
             "normal": normal,
             "last_updated": time.strftime("%H:%M:%S")
         }), 200
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as e:
         logger.error(f"API Error (stats): {e}")
         return jsonify({"error": str(e)}), 500
 
@@ -326,7 +345,7 @@ def api_pipeline_status():
         out = subprocess.check_output(["wsl", "hostname", "-I"], text=True, timeout=3).strip()
         wsl_ip = out.split()[0] if out.strip() else None
         wsl_running = bool(wsl_ip)
-    except Exception as e:
+    except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError, ValueError, TypeError) as e:
         wsl_ip = None
         wsl_running = False
     
@@ -338,7 +357,7 @@ def api_pipeline_status():
             capture_output=True, text=True, timeout=4
         )
         consumer_running = r.returncode == 0
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
     
     # Check Redis in WSL
@@ -349,7 +368,7 @@ def api_pipeline_status():
             capture_output=True, text=True, timeout=4
         )
         redis_ok = r.stdout.strip() == "PONG"
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
     
     # Try to reach the WS port from Windows (TCP connect test)
@@ -362,7 +381,7 @@ def api_pipeline_status():
         s.connect((test_host, WS_PORT))
         s.close()
         ws_port_open = True
-    except Exception:
+    except (OSError, socket.error):
         pass
     
     # Get tail of consumer log from WSL
@@ -374,7 +393,7 @@ def api_pipeline_status():
             cwd=None  # wsl resolves paths relative to Windows CWD
         )
         consumer_log_tail = r.stdout.strip().splitlines() if r.returncode == 0 else [r.stderr.strip()]
-    except Exception as e:
+    except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError) as e:
         consumer_log_tail = [f"(could not read log: {e})"]
     
     # Build diagnosis

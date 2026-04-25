@@ -13,6 +13,18 @@
 
 ---
 
+## 🚀 Advanced Resilience Features
+
+The Sentinel Core relay now includes **Automated Resilience**:
+1. **Multi-Candidate Resolution**: The relay automatically tries multiple IP/Port combinations:
+   - `127.0.0.1:8765` (Localhost bridge)
+   - `127.0.0.1:8999` (Secondary bridge)
+   - `WSL_IP:8765` (Direct WSL internal IP)
+2. **Exponential Backoff**: If a connection fails, the relay waits longer between each attempt to avoid resource exhaustion.
+3. **Live Diagnostic Endpoint**: Visit `http://localhost:5000/api/pipeline/status` to see exactly which IP/Port the relay is currently attempting.
+
+---
+
 ## Diagnosis Steps
 
 ### Step 1: Run Diagnostics

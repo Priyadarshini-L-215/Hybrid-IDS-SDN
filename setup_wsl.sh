@@ -7,7 +7,10 @@
 # RUN THIS INSIDE WSL (UBUNTU) AS ROOT OR WITH SUDO.
 # =================================================================
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$SCRIPT_DIR}"
 
 echo "-----------------------------------------------------------------"
 echo "         SENTINEL CORE - WSL SENSOR SETUP"
@@ -16,7 +19,7 @@ echo "-----------------------------------------------------------------"
 # 1. Update & Install System Dependencies
 echo "[+] Updating system packages..."
 sudo apt-get update -y
-sudo apt-get install -y software-properties-common curl git python3-pip python3-venv
+sudo apt-get install -y software-properties-common curl git python3-pip python3-venv net-tools iproute2 sqlite3
 
 # 2. Install Suricata
 echo "[+] Installing Suricata IDS/IPS..."
@@ -27,7 +30,7 @@ sudo apt-get install -y suricata
 echo "[+] Configuring Suricata for EVE JSON output..."
 # Ensure log directory exists
 sudo mkdir -p /var/log/suricata
-sudo chmod 777 /var/log/suricata
+sudo chmod 775 /var/log/suricata || true
 
 # 3. Install & Configure Redis
 echo "[+] Installing Redis..."
@@ -48,13 +51,23 @@ EOF
 
 sudo mkdir -p /var/log/redis
 sudo chown redis:redis /var/log/redis
-sudo systemctl restart redis-server
+sudo service redis-server restart || sudo /etc/init.d/redis-server restart
 echo "[OK] Redis configured and started"
 
 # 4. Setup Python Environment
 echo "[+] Installing Python ML dependencies..."
-pip3 install --upgrade pip
-pip3 install websockets pandas scikit-learn requests numpy redis
+python3 -m pip install --upgrade pip
+
+if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
+    echo "[+] Installing Python dependencies from requirements.txt..."
+    if ! python3 -m pip install -r "$PROJECT_ROOT/requirements.txt"; then
+        echo "[!] Standard pip install failed. Retrying with --break-system-packages..."
+        python3 -m pip install --break-system-packages -r "$PROJECT_ROOT/requirements.txt"
+    fi
+else
+    echo "[WARNING] requirements.txt not found at $PROJECT_ROOT; installing minimal fallback set"
+    python3 -m pip install websockets pandas scikit-learn requests numpy redis
+fi
 
 # 5. Configure Firewall (IPS Mode)
 echo "[+] Checking firewall (nftables/iptables)..."

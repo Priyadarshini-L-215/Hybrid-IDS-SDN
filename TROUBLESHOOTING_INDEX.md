@@ -34,11 +34,9 @@ powershell -NoProfile .\diagnose_connection.ps1
 ```
 ↳ Windows-side connectivity test, Flask status, WSL communication
 
-**System Health Dashboard**:
-```bash
-bash check_system_status.sh
-```
-↳ Real-time overview of all components and connection chain
+**Live System Status (Browser)**:
+- **URL**: `http://localhost:5000/api/pipeline/status`
+- ↳ Instant feedback on the health of WSL sensor, Redis, and Relay connectivity.
 
 ---
 
