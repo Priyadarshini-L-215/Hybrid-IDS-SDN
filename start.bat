@@ -47,7 +47,27 @@ echo =================================================================
 echo.
 
 :: 0. Integrity Check / First-Time Setup
-echo [+] Preparing startup...
+echo [+] Preparing environment verification...
+
+:: Check for Node.js (Required for Dashboard)
+where node >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Node.js not found. It is required for the React Dashboard.
+    echo Please install Node.js (v20+) from https://nodejs.org/
+    pause
+    exit /b 1
+)
+
+:: Check for Python (Required for Backend)
+where python >nul 2>&1
+if errorlevel 1 (
+    where py >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Python not found. Please install Python 3.12+ 
+        pause
+        exit /b 1
+    )
+)
 
 :: Check for WSL (always quick-check this)
 where wsl >nul 2>&1
@@ -76,25 +96,21 @@ if "%FORCE_SETUP%"=="1" (
 
 if exist "%SETUP_STAMP%" if not "%FORCE_SETUP%"=="1" (
     if exist "%PYTHON_EXE%" if exist "%UI_DIR%\node_modules" (
-        echo [OK] Setup stamp found. skipping dependency checks.
+        echo [OK] Core dependencies verified.
         goto :model_sync
     )
     echo [!] Setup stamp exists but required dependencies are missing.
     echo [+] Falling back to full setup verification.
 )
 
-echo [+] Running first-time/full setup verification...
+echo [+] Running full dependency audit...
 
 :: Check for UI Dependencies
 if not exist "%UI_DIR%\node_modules" (
-    echo [!] UI dependencies not found.
-    echo [+] Running UI dependency install...
+    echo [!] UI dependencies not found in %UI_DIR%
+    echo [+] Running npm install...
     cd /d "%UI_DIR%"
-    if exist package-lock.json (
-        call npm ci
-    ) else (
-        call npm install
-    )
+    call npm install
     if errorlevel 1 (
         echo [ERROR] npm install failed. Fix UI dependencies and re-run start.bat.
         cd /d "%ROOT%"
@@ -123,21 +139,14 @@ if "%USE_REDIS_QUEUE%"=="1" (
     echo [+] Checking Redis availability...
     wsl -u root bash -c "redis-cli ping >/dev/null 2>&1"
     if errorlevel 1 (
-        echo [!] Redis not running. Installing and starting Redis...
-        for /f "delims=" %%I in ('wsl wslpath "%WSL_SETUP_SH%"') do set "WSL_SETUP_SCRIPT=%%I"
-        wsl -u root bash -lc "apt-get update -qq && apt-get install -y redis-server redis-tools 2>&1 | tail -3"
+        echo [!] Redis not running. Attempting auto-start...
+        wsl -u root service redis-server start >nul 2>&1
+        wsl -u root bash -c "redis-cli ping >/dev/null 2>&1"
         if errorlevel 1 (
-            echo [WARNING] Redis install failed. Falling back to legacy mode.
+            echo [WARNING] Redis could not be started. Falling back to legacy mode.
             set "USE_REDIS_QUEUE=0"
         ) else (
-            wsl -u root bash -c "redis-server --daemonize yes --logfile /var/log/redis/redis-server.log"
-            wsl -u root bash -c "sleep 1 && redis-cli ping"
-            if errorlevel 1 (
-                echo [ERROR] Failed to start Redis. Falling back to legacy mode.
-                set "USE_REDIS_QUEUE=0"
-            ) else (
-                echo [+] Redis started successfully.
-            )
+            echo [+] Redis started successfully.
         )
     ) else (
         echo [+] Redis is running.

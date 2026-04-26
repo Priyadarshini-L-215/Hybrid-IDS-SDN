@@ -1,140 +1,103 @@
-# Sentinel Core - Startup Guide
+# Sentinel Core - Installation & Startup Guide
 
-## Quick Start
+## 🛠️ Prerequisites
 
-### Option 1: Full System (Recommended)
+Before starting, ensure you have the following installed on your **Windows** host:
+1. **WSL2 (Ubuntu 22.04+)**: Required for the high-performance ML Sensor.
+2. **Python 3.12+**: Required for both Windows (Relay) and WSL (Engine).
+3. **Node.js 20+**: Required for the React SOC Dashboard.
+4. **Suricata**: Automated install provided, but requires administrative privileges.
+
+---
+
+## 🚀 Installation Procedure
+
+### 1. Unified Setup (Recommended)
+The fastest way to install all dependencies across both Windows and WSL is the automated launcher:
+```powershell
+# Open PowerShell in the project root
+.\start.bat --force-setup
+```
+This script will:
+- Initialize the Windows virtual environment (`.venv`).
+- Install all Python dependencies from `requirements.txt`.
+- Provision WSL with Suricata, Redis, and PyTorch.
+- Install Node.js packages for the dashboard.
+
+### 2. Manual Step-by-Step
+If you prefer granular control:
+
+**A. Windows Backend & UI**
+```powershell
+.\setup.bat
+```
+
+**B. WSL Sensor (Linux)**
 ```bash
-cd D:\projects\FYP
+# Inside WSL
+chmod +x setup_wsl.sh
+./setup_wsl.sh
+```
+
+---
+
+## 🚦 Starting the System
+
+To launch the full stack (Sensor, Relay, and Dashboard):
+```powershell
 .\start.bat
 ```
-This launches:
-- **IDS Core (WSL)**: Suricata + Redis + ML Consumer
-- **Backend (Relay)**: Flask Bridge
-- **Frontend (SOC)**: React Dashboard
-- **Redis**: Automated initialization in WSL
 
-### Option 2: Legacy Mode (Polling)
+### Startup Options
+- `--legacy`: Disables Redis and uses the low-latency direct polling pipeline (not recommended for production).
+- `--no-ui`: Starts the backend and sensor only (useful for headless servers).
+
+---
+
+## 📊 Access & Monitoring
+
+| Service | URL / Access | Description |
+|---------|--------------|-------------|
+| **SOC Dashboard** | `http://localhost:3000` | Real-time threat visualization |
+| **Pipeline Health** | `http://localhost:5000/api/pipeline/status` | Real-time diagnostic JSON |
+| **ML Logs** | `wsl tail -f data/logs/consumer.log` | Raw inference results |
+| **Relay Logs** | `data/logs/relay.log` | Windows-to-WSL bridge logs |
+
+---
+
+## 🛡️ Requirements & Dependencies
+
+The system is optimized for the following stack:
+
+### ML Pipeline (Engine)
+- **PyTorch 2.11+**: Dense Autoencoder for Zero-Day detection.
+- **Scikit-Learn 1.6+**: Random Forest classification & Scaling.
+- **Redis 5.0+**: High-throughput event queueing.
+
+### Backend (Relay)
+- **Flask 3.1+**: Async REST API.
+- **Flask-Sock 0.7+**: High-concurrency WebSocket bridge.
+
+### Security (Sensor)
+- **Suricata 7.0+**: Signature-based IDS/IPS.
+- **Scapy 2.6+**: Packet reconstruction and feature extraction.
+
+---
+
+## 🔍 Troubleshooting Installation
+
+### "ModuleNotFoundError: No module named 'torch' in WSL"
+The Autoencoder requires PyTorch in the Linux environment. Run:
 ```bash
-.\start.bat --legacy
+wsl python3 -m pip install --break-system-packages torch
 ```
-Uses single-threaded polling instead of the high-performance Redis queue.
+
+### "WSL IP Resolution Failed"
+If `start.bat` cannot find your WSL IP, ensure the `vEthernet (WSL)` adapter is enabled in Windows Network Connections and that WSL is running.
+
+### "Suricata Permission Denied"
+Suricata requires access to your network interfaces. Ensure you have accepted the UAC prompt or run your terminal as Administrator.
 
 ---
 
-## Pipeline Modes
-
-### Redis Queue (Optimized) - Default
-**When**: `USE_REDIS_QUEUE=1` (default)
-**Features**:
-- **Async File Watching**: Sub-10ms event detection.
-- **Worker Pool**: 4 parallel threads for feature extraction and ML inference.
-- **Redis Ingestion**: Decouples packet capture from analysis.
-- **Tri-Layer ML**: StandardScaler + Random Forest + Autoencoder inference path.
-
-**Expected Performance**:
-- **Latency**: 10-30ms end-to-end.
-- **Throughput**: 1000+ events/sec.
-
-### Legacy Polling (Compatibility)
-**When**: `USE_REDIS_QUEUE=0`
-**Features**:
-- 100ms polling interval.
-- Single-threaded processing.
-- No Redis dependency.
-
----
-
-## What start.bat Does
-
-1. **System Check**: Verifies WSL2, Python venv, and Node.js.
-2. **Auto-Provisioning**: Installs Suricata, Redis, and dependencies if missing.
-3. **Synchronization**: Ensures WSL is ready before launching the Windows relay.
-4. **Multi-Terminal Orchestration**: Spawns independent windows for each component for easier debugging.
-5. **Model Artifact Sync**: Copies `new/sentinel_*.pkl|pth` into `models/rf_model.pkl`, `models/scaler.pkl`, and `models/autoencoder.pth` if missing.
-
-### Tri-Layer Runtime Tuning
-`start.bat` exports these variables into the WSL ML runtime:
-- `AUTOENCODER_THRESHOLD` (default `0`, means percentile-based dynamic threshold)
-- `AUTOENCODER_THRESHOLD_PERCENTILE` (default `95`)
-
----
-
-## Access & Diagnostics
-
-| Service | URL / Path | Notes |
-|---------|------------|-------|
-| **Dashboard** | http://localhost:3000 | Primary SOC Interface |
-| **Relay Status** | http://localhost:5000/api/pipeline/status | **Live Diagnostics** |
-| **Flask API** | http://localhost:5000 | Backend REST Root |
-| **Consumer Logs** | `wsl tail -f data/logs/consumer.log` | Real-time sensor logs |
-
----
-
-## Troubleshooting
-
-### Issue: Pipeline Interruption (Relay Failure)
-**Solution**: 
-1. Check the live diagnostic endpoint: http://localhost:5000/api/pipeline/status
-2. It will tell you exactly which component (WSL, Redis, Consumer) is failing.
-3. Use the **Reconnect** button in the dashboard or call:
-   `Invoke-RestMethod -Method Post http://localhost:5000/api/relay/reconnect`
-
-### Issue: "WSL2 is required but not found"
-**Solution**:
-```powershell
-wsl --install
-wsl --install -d Ubuntu-22.04
-```
-
-### Issue: Redis Connection Refused
-**Solution**:
-```bash
-wsl -u root redis-server --daemonize yes
-wsl redis-cli ping  # Should return PONG
-```
-
-### Issue: Database Locking (SQLite)
-**Solution**:
-The system now uses **WAL (Write-Ahead Logging)** mode. If locks persist, ensure no stale Python processes are holding the file:
-```bash
-wsl fuser data/alerts.db
-```
-
----
-
-## Performance Validation
-
-### Run Validation Suite
-```bash
-pytest tests/
-```
-
-Expected output:
-```
-✓ PASS: Redis Connection
-✓ PASS: AsyncFileWatcher Initialization
-✓ PASS: WorkerPool Concurrency
-✓ PASS: WAL Mode Verification
-✓ PASS: WebSocket Bridge Integrity
-
-Result: 5/5 tests passed
-```
-
-### Measure Latency
-The system includes **Tracer Probes**. Check `consumer.log` for T1-T5 timestamps to measure precision latency across the WSL↔Windows bridge.
-
----
-
-## Quick Reference
-
-| Command | Purpose |
-|---------|---------|
-| `.\start.bat` | Start full system (Optimized) |
-| `.\stop.bat` | Graceful shutdown |
-| `wsl bash check_system_status.sh` | Full system health check |
-| `wsl tail -f data/logs/consumer.log` | View sensor activity |
-| `wsl redis-cli LLEN sentinel_alerts_queue` | Check queue depth |
-
----
-
-**Happy Monitoring!** 🛡️
+**Happy Hunting!** 🛡️
