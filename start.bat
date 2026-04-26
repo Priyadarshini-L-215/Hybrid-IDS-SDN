@@ -22,9 +22,44 @@ set "AE_MODEL_FALLBACK=%NEW_MODELS_DIR%\sentinel_autoencoder.pth"
 set "FORCE_SETUP=0"
 set "USE_REDIS_QUEUE=1"
 set "WS_PORT=8765"
+set "BACKEND_PORT=5000"
+set "UI_PORT=3000"
+set "DATA_PORT=5001"
+set "REDIS_PORT=6379"
 set "AUTOENCODER_THRESHOLD=0"
 set "AUTOENCODER_THRESHOLD_PERCENTILE=95"
 set "NO_PAUSE=0"
+
+:: --- PORT SCANNER (DYNAMIC PORT ALLOCATION) ---
+echo [+] Detecting free ports...
+
+:check_ports
+set "PORT_CONFLICT=0"
+
+:: Check Backend (5000)
+netstat -ano | findstr ":%BACKEND_PORT% " >nul 2>&1
+if not errorlevel 1 (
+    set /a BACKEND_PORT+=1
+    set "PORT_CONFLICT=1"
+)
+
+:: Check UI (3000)
+netstat -ano | findstr ":%UI_PORT% " >nul 2>&1
+if not errorlevel 1 (
+    set /a UI_PORT+=1
+    set "PORT_CONFLICT=1"
+)
+
+:: Check WebSocket (8765)
+netstat -ano | findstr ":%WS_PORT% " >nul 2>&1
+if not errorlevel 1 (
+    set /a WS_PORT+=1
+    set "PORT_CONFLICT=1"
+)
+
+if "%PORT_CONFLICT%"=="1" goto :check_ports
+
+echo [OK] Dynamic Ports: Dashboard:%UI_PORT% Relay:%BACKEND_PORT% WebSocket:%WS_PORT%
 
 :parse_args
 if "%~1"=="" goto :args_done
@@ -237,29 +272,8 @@ if "%FEAT_COUNT%"=="77" (
     echo [WARNING] Model uses %FEAT_COUNT% features. Ensure feature_extractor.py is synced.
 )
 
-echo [+] Waiting for WSL consumer to be ready...
-set "WSL_READY=0"
-set "WS_READY_MAX_ATTEMPTS=20"
-for /L %%i in (1,1,!WS_READY_MAX_ATTEMPTS!) do (
-    if "!WSL_READY!"=="0" (
-        "%PYTHON_EXE%" "%ROOT%\scratch\check_ws_ready.py" ws://!WSL_IP!:!WS_PORT! 1 >nul 2>&1
-        if not errorlevel 1 (
-            set "WSL_READY=1"
-            echo [+] WSL Consumer is ONLINE on !WSL_IP!:!WS_PORT!
-        ) else (
-            <nul set /p=.
-            ping -n 2 127.0.0.1 >nul
-        )
-    )
-)
-echo.
-
-if "!WSL_READY!"=="0" (
-    echo [WARNING] WSL Consumer took too long to start. Launching backend anyway...
-)
-
 echo [+] Launching Flask Dashboard Backend...
-start "Backend (Relay)" /D "%ROOT%" cmd /k "echo [BACKEND] Initializing AI Relay... && .venv\Scripts\python.exe src\dashboard\app.py"
+start "Backend (Relay)" /D "%ROOT%" cmd /k "echo [BACKEND] Initializing AI Relay... && set IDS_PORT=%BACKEND_PORT%&& set WS_PORT=%WS_PORT%&& .venv\Scripts\python.exe src\dashboard\app.py"
 
 :: 4. Deploy Redis Validation
 if "%USE_REDIS_QUEUE%"=="1" (
@@ -275,7 +289,7 @@ echo.
 
 :: 5. Launch React Frontend
 echo [+] Launching Sentinel Core Dashboard (React)...
-start "Frontend (SOC)" /D "%UI_DIR%" cmd /k "echo [UI] Starting Dashboard... && npm run dev"
+start "Frontend (SOC)" /D "%UI_DIR%" cmd /k "echo [UI] Starting Dashboard... && set VITE_PORT=%UI_PORT%&& set VITE_BACKEND_PORT=%BACKEND_PORT%&& npm run dev"
 
 echo.
 echo =================================================================
@@ -296,9 +310,9 @@ echo - Autoencoder:    models\autoencoder.pth
 echo - AE threshold:   %AUTOENCODER_THRESHOLD% ^(percentile fallback %AUTOENCODER_THRESHOLD_PERCENTILE% pct^)
 echo.
 echo [SERVICES]
-echo - Dashboard:      http://localhost:3000
+echo - Dashboard:      http://localhost:%UI_PORT%
 echo - WebSocket API:  ws://%WSL_IP%:%WS_PORT%
-echo - Flask Relay:    http://localhost:5000
+echo - Flask Relay:    http://localhost:%BACKEND_PORT%
 echo - Core Logs:      tail -f data/logs/consumer.log
 echo.
 if "%USE_REDIS_QUEUE%"=="1" (
