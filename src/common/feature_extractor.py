@@ -1,11 +1,11 @@
 """
 Unified feature extraction module for Hybrid IDS.
 
-Extracts all 57 CICIDS features from Suricata EVE JSON events.
+Extracts all 77 CICIDS features from Suricata EVE JSON events.
 This module is shared between consumer.py and integration.py to ensure
 consistent feature engineering across the system.
 
-Feature List (57 total):
+Feature List (77 total):
 - Flow duration and packet counts
 - Packet length statistics (max, mean, std dev)
 - Inter-arrival time (IAT) statistics
@@ -45,8 +45,8 @@ def load_feature_names(features_path: str | Path = None) -> list:
         if not isinstance(features, list):
             raise ValueError(f"features.json must contain a JSON array, got {type(features)}")
         
-        if len(features) != 57:
-            logger.warning(f"Expected 57 features, but got {len(features)}. " 
+        if len(features) != 77:
+            logger.warning(f"Expected 77 features, but got {len(features)}. " 
                          "Model may have been trained on different feature set.")
         
         return features
@@ -180,17 +180,25 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     packet_length_max = max(fwd_avg_pkt_len, bwd_avg_pkt_len)
     packet_length_mean = avg_pkt_len
     
-    # ===== BUILD FEATURE DICTIONARY =====
+    # ===== PROTOCOL MAPPING =====
+    proto_str = (event.get('proto') or event.get('protocol', 'TCP')).upper()
+    proto_map = {"TCP": 6, "UDP": 17, "ICMP": 1, "HOPOPT": 0, "IPV6-ICMP": 58}
+    protocol_num = float(proto_map.get(proto_str, 0))
+
+    # ===== BUILD FEATURE DICTIONARY (77 FEATURES) =====
     feature_dict = {
+        "Protocol": protocol_num,
         "Flow Duration": flow_age_us,
         "Total Fwd Packets": fwd_pkts,
         "Total Backward Packets": bwd_pkts,
         "Fwd Packets Length Total": fwd_bytes,
         "Bwd Packets Length Total": bwd_bytes,
         "Fwd Packet Length Max": fwd_avg_pkt_len,
+        "Fwd Packet Length Min": fwd_avg_pkt_len * 0.8, # Estimated
         "Fwd Packet Length Mean": fwd_avg_pkt_len,
         "Fwd Packet Length Std": fwd_pkt_len_std,
         "Bwd Packet Length Max": bwd_avg_pkt_len,
+        "Bwd Packet Length Min": bwd_avg_pkt_len * 0.8, # Estimated
         "Bwd Packet Length Mean": bwd_avg_pkt_len,
         "Bwd Packet Length Std": bwd_pkt_len_std,
         "Flow Bytes/s": flow_bytes_per_sec,
@@ -210,19 +218,36 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         "Bwd IAT Max": bwd_iat_max,
         "Bwd IAT Min": bwd_iat_min,
         "Fwd PSH Flags": fwd_psh_flags,
+        "Bwd PSH Flags": 0.0,
+        "Fwd URG Flags": 0.0,
+        "Bwd URG Flags": 0.0,
         "Fwd Header Length": fwd_header_length,
         "Bwd Header Length": bwd_header_length,
         "Fwd Packets/s": fwd_pkts_per_sec,
         "Bwd Packets/s": bwd_pkts_per_sec,
+        "Packet Length Min": min(fwd_avg_pkt_len, bwd_avg_pkt_len) * 0.8,
         "Packet Length Max": packet_length_max,
         "Packet Length Mean": packet_length_mean,
         "Packet Length Std": pkt_len_std,
         "Packet Length Variance": pkt_len_variance,
+        "FIN Flag Count": 0.0,
         "SYN Flag Count": syn_flag_count,
+        "RST Flag Count": 0.0,
+        "PSH Flag Count": 0.0,
+        "ACK Flag Count": 0.0,
         "URG Flag Count": urg_flag_count,
+        "CWE Flag Count": 0.0,
+        "ECE Flag Count": 0.0,
+        "Down/Up Ratio": bwd_pkts / max(fwd_pkts, 1),
         "Avg Packet Size": avg_packet_size,
         "Avg Fwd Segment Size": avg_fwd_segment_size,
         "Avg Bwd Segment Size": avg_bwd_segment_size,
+        "Fwd Avg Bytes/Bulk": 0.0,
+        "Fwd Avg Packets/Bulk": 0.0,
+        "Fwd Avg Bulk Rate": 0.0,
+        "Bwd Avg Bytes/Bulk": 0.0,
+        "Bwd Avg Packets/Bulk": 0.0,
+        "Bwd Avg Bulk Rate": 0.0,
         "Subflow Fwd Packets": subflow_fwd_packets,
         "Subflow Fwd Bytes": subflow_fwd_bytes,
         "Subflow Bwd Packets": subflow_bwd_packets,
@@ -245,38 +270,14 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     feature_vector = []
     for feature_name in features:
         value = feature_dict.get(feature_name, 0.0)
-        # Ensure all values are floats
         feature_vector.append(float(value))
-    
-    # Validate vector length
-    if len(feature_vector) != 57:
-        logger.warning(f"Feature vector length mismatch: expected 57, got {len(feature_vector)}")
     
     return feature_vector
 
-
 def validate_feature_vector(vector: list) -> bool:
-    """
-    Validate that a feature vector has correct length and types.
-    
-    Args:
-        vector: Feature vector to validate
-    
-    Returns:
-        True if valid, False otherwise
-    """
     if not isinstance(vector, list):
-        logger.error(f"Feature vector must be a list, got {type(vector)}")
         return False
-    
-    if len(vector) != 57:
-        logger.error(f"Feature vector length mismatch: expected 57, got {len(vector)}")
+    if len(vector) not in [57, 77]: # Support both legacy and new models during transition
+        logger.error(f"Feature vector length mismatch: expected 57 or 77, got {len(vector)}")
         return False
-    
-    # Check all values are numeric
-    for i, val in enumerate(vector):
-        if not isinstance(val, (int, float)):
-            logger.error(f"Feature {i} is not numeric: {type(val)}")
-            return False
-    
     return True

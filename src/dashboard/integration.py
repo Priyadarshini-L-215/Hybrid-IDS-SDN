@@ -39,7 +39,7 @@ def _get_data_service_hosts():
     return hosts
 
 
-def _fetch_bridge_payload(path, params=None, attempts=3, timeout_sec=1.2):
+def _fetch_bridge_payload(path, params=None, attempts=3, timeout_sec=5.0):
     """Fetch JSON payload from WSL bridge with short retries and host fallback."""
     last_exc = None
     for attempt_idx in range(attempts):

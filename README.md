@@ -20,7 +20,7 @@ Unlike traditional IDS, Sentinel Core implements **Active Mitigation**—automat
 | :--- | :--- |
 | **Security Engine** | Suricata (IDS/IPS), `nftables`/`iptables` (Mitigation) |
 | **Data Pipeline** | Redis (Queueing), `AsyncFileWatcher` (Low-latency ingestion) |
-| **Machine Learning** | Scikit-Learn (Random Forest), Pandas, NumPy |
+| **Machine Learning** | Scikit-Learn (Random Forest + StandardScaler), PyTorch (Dense Autoencoder), Pandas, NumPy |
 | **Backend Integration** | Python 3.12, Flask, Flask-Sock |
 | **Frontend UI** | React 19, Vite, Lucide React (Sentinel Core Design) |
 | **Communication** | Native WebSockets (`asyncio`/`websockets`) |
@@ -49,7 +49,8 @@ The system utilizes a high-performance split-host architecture:
 ## 🚀 Key Features
 
 *   **High-Throughput Pipeline**: Redis-backed parallel processing handling 1000+ events/sec.
-*   **Zero-Day Detection**: ML behavioral analysis identifies novel threats that bypass signature rules.
+*   **Tri-Layer ML Pipeline**: Scaler -> Random Forest (known attacks) -> Autoencoder (zero-day anomalies).
+*   **Zero-Day Detection**: Autoencoder reconstruction loss identifies novel threats that bypass signature rules.
 *   **Active Mitigation**: High-confidence threats (>95%) are automatically blocked by the IPS module.
 *   **Volumetric Analysis**: Detects DoS/DDoS patterns and aggressive port scans through stateful correlation.
 *   **Neural Telemetery**: Native WebSocket stream ensures sub-10ms alert visibility.
@@ -76,6 +77,7 @@ start.bat --force-setup
 2.  Installs **Suricata**, **Redis**, and ML dependencies.
 3.  Initializes the **Python venv** and **Node.js** UI.
 4.  Launches all components (Sensor, Backend, and Dashboard) in separate terminals.
+5.  Synchronizes tri-layer model artifacts from `new/` into `models/` when needed.
 
 ---
 

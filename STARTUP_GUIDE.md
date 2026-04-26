@@ -29,6 +29,7 @@ Uses single-threaded polling instead of the high-performance Redis queue.
 - **Async File Watching**: Sub-10ms event detection.
 - **Worker Pool**: 4 parallel threads for feature extraction and ML inference.
 - **Redis Ingestion**: Decouples packet capture from analysis.
+- **Tri-Layer ML**: StandardScaler + Random Forest + Autoencoder inference path.
 
 **Expected Performance**:
 - **Latency**: 10-30ms end-to-end.
@@ -49,6 +50,12 @@ Uses single-threaded polling instead of the high-performance Redis queue.
 2. **Auto-Provisioning**: Installs Suricata, Redis, and dependencies if missing.
 3. **Synchronization**: Ensures WSL is ready before launching the Windows relay.
 4. **Multi-Terminal Orchestration**: Spawns independent windows for each component for easier debugging.
+5. **Model Artifact Sync**: Copies `new/sentinel_*.pkl|pth` into `models/rf_model.pkl`, `models/scaler.pkl`, and `models/autoencoder.pth` if missing.
+
+### Tri-Layer Runtime Tuning
+`start.bat` exports these variables into the WSL ML runtime:
+- `AUTOENCODER_THRESHOLD` (default `0`, means percentile-based dynamic threshold)
+- `AUTOENCODER_THRESHOLD_PERCENTILE` (default `95`)
 
 ---
 

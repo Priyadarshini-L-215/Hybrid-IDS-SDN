@@ -17,13 +17,20 @@ async def check_ws_ready(uri, timeout=3):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python check_ws_ready.py <ws_uri>")
+        print("Usage: python check_ws_ready.py <ws_uri> [timeout_seconds]")
         sys.exit(1)
         
     uri = sys.argv[1]
+    timeout = 3
+    if len(sys.argv) >= 3:
+        try:
+            timeout = float(sys.argv[2])
+        except ValueError:
+            print("Invalid timeout. Expected numeric seconds.")
+            sys.exit(1)
     
     # Run the check
-    success = asyncio.run(check_ws_ready(uri))
+    success = asyncio.run(check_ws_ready(uri, timeout=timeout))
     
     if success:
         sys.exit(0)

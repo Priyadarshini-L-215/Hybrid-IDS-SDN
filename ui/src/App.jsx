@@ -85,11 +85,13 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
             {filteredAlerts.length === 0 ? (
               <tr><td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '3rem' }}>Waiting for network events...</td></tr>
             ) : (
-              filteredAlerts.map((alert, idx) => {
+              filteredAlerts.map((alert) => {
                 const isAttack = alert.prediction?.toLowerCase() === 'attack';
-                const sev = SEVERITY_MAP[alert.severity] || SEVERITY_MAP[0];
+                // Robust unique key for real-time table updates
+                const rowKey = `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${alert.src_port || ''}-${alert.dest_port || ''}`;
+                
                 return (
-                  <tr key={idx} className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
+                  <tr key={rowKey} className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
                     <td>
                       <div className="cell-time">
                         <Clock size={12} /> {formatTimestamp(alert.timestamp)}
@@ -120,7 +122,7 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
 };
 
 const AttackLab = ({ alerts }) => {
-  const [target, setTarget] = useState("127.0.0.1");
+  const [target, setTarget] = useState("172.25.24.205");
   const [profile, setProfile] = useState("quick");
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState(null);
@@ -214,6 +216,7 @@ function App() {
   const [filter, setFilter] = useState('all');
   const [connectionState, setConnectionState] = useState('connecting');
   const wsRef = useRef(null);
+  const pendingAlertsRef = useRef([]); // Batching queue for high-frequency events
 
   // Data Pipeline: WebSocket logic
   useEffect(() => {
@@ -222,6 +225,45 @@ function App() {
     let retryTimeout = null;
     let shouldReconnect = true;
     const retryDelays = [2000, 5000, 10000];
+
+    // Batch processor: updates state every 250ms to prevent UI lockup during bursts
+    const flushInterval = setInterval(() => {
+      if (pendingAlertsRef.current.length === 0) return;
+
+      const batch = [...pendingAlertsRef.current];
+      pendingAlertsRef.current = [];
+
+      setData(prev => {
+        let nextAlerts = [...prev.alerts];
+        let nextAttacks = prev.attack_total;
+        let nextNormal = prev.normal_total;
+
+        batch.forEach(alert => {
+          // Avoid duplicate log entries
+          const isDuplicate = nextAlerts.some(a =>
+            a.timestamp === alert.timestamp &&
+            a.src_ip === alert.src_ip &&
+            a.dest_ip === alert.dest_ip &&
+            a.src_port === alert.src_port &&
+            a.dest_port === alert.dest_port
+          );
+          if (isDuplicate) return;
+
+          const isAttack = alert.prediction?.toLowerCase() === 'attack';
+          nextAlerts.push(alert);
+          if (isAttack) nextAttacks++; else nextNormal++;
+        });
+
+        return {
+          ...prev,
+          alerts: nextAlerts.slice(-100),
+          total_processed: prev.total_processed + batch.length,
+          attack_total: nextAttacks,
+          normal_total: nextNormal,
+          last_updated: new Date().toLocaleTimeString('en-GB')
+        };
+      });
+    }, 250);
 
     const getWebSocketUrl = () => {
       // In Vite dev (port 3000), connect directly to Flask backend to avoid
@@ -236,13 +278,11 @@ function App() {
 
     const connectWS = () => {
       const wsUrl = getWebSocketUrl();
-      console.log(`[Pipeline] Connecting to ${wsUrl} (attempt ${retryCount + 1})`);
       setConnectionState(retryCount === 0 ? 'connecting' : 'retrying');
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('[Pipeline] WebSocket connection established');
         retryCount = 0; // Reset backoff on success
         setConnectionState('connected');
       };
@@ -253,62 +293,22 @@ function App() {
           
           // --- TRACER: Pipeline latency measurement ---
           if (alert._tracer && alert._tracer_inject_ts) {
-            const T6 = Date.now() / 1000; // Browser receive time (epoch seconds)
+            const T6 = Date.now() / 1000;
             const T0 = alert._tracer_inject_ts;
             const T1 = alert._watcher_read_ts;
-            const T2 = alert._redis_push_ts;
-            const T3a = alert._worker_pop_ts;
-            const T3b = alert._worker_done_ts;
             const T4 = alert._ws_send_ts;
-            const T5a = alert._relay_recv_ts;
             const T5b = alert._relay_fwd_ts;
-            
             const ms = (a, b) => a && b ? ((b - a) * 1000).toFixed(1) : '-';
             const cum = (t) => t ? ((t - T0) * 1000).toFixed(1) : '-';
             
             console.log(
-              `%c+--------------------------------------------------------------+\n` +
-              `|       SENTINEL CORE - PIPELINE LATENCY REPORT              |\n` +
-              `|       Tracer ID: ${alert._tracer_id || 'unknown'}                              |\n` +
-              `+--------------------------------------------------------------+\n` +
-              `|  Hop                        | Delta (ms)| Cumulative (ms)  |\n` +
-              `|-----------------------------+-----------+------------------|\n` +
-              `|  T0->T1: File Read           | ${ms(T0,T1).padStart(8)}  | ${cum(T1).padStart(16)}  |\n` +
-              `|  T1->T2: Redis Push          | ${ms(T1,T2).padStart(8)}  | ${cum(T2).padStart(16)}  |\n` +
-              `|  T2->T3a: Worker Pop         | ${ms(T2,T3a).padStart(8)}  | ${cum(T3a).padStart(16)}  |\n` +
-              `|  T3a->T3b: ML Inference      | ${ms(T3a,T3b).padStart(8)}  | ${cum(T3b).padStart(16)}  |\n` +
-              `|  T3b->T4: WS Queue+Send      | ${ms(T3b,T4).padStart(8)}  | ${cum(T4).padStart(16)}  |\n` +
-              `|  T4->T5a: WSL->Win Bridge     | ${ms(T4,T5a).padStart(8)}  | ${cum(T5a).padStart(16)}  |\n` +
-              `|  T5a->T5b: Relay Forward     | ${ms(T5a,T5b).padStart(8)}  | ${cum(T5b).padStart(16)}  |\n` +
-              `|  T5b->T6: Browser Receive    | ${ms(T5b,T6).padStart(8)}  | ${cum(T6).padStart(16)}  |\n` +
-              `+--------------------------------------------------------------+\n` +
-              `|  TOTAL END-TO-END           |           | ${((T6-T0)*1000).toFixed(1).padStart(13)} ms |\n` +
-              `+--------------------------------------------------------------+`,
-              'color: #00e676; font-family: monospace; font-size: 12px;'
+              `%c[PIPELINE] Latency: ${((T6-T0)*1000).toFixed(1)}ms | Read: +${ms(T0,T1)}ms | Relay: +${ms(T4,T5b)}ms | Net: +${ms(T5b,T6)}ms`,
+              'color: #00e676; font-family: monospace;'
             );
           }
 
-          setData(prev => {
-            // Avoid duplicate log entries by checking timestamp + 5-tuple
-            const isDuplicate = prev.alerts.some(a =>
-              a.timestamp === alert.timestamp &&
-              a.src_ip === alert.src_ip &&
-              a.dest_ip === alert.dest_ip &&
-              a.src_port === alert.src_port &&
-              a.dest_port === alert.dest_port
-            );
-            if (isDuplicate) return prev;
-
-            const isAttack = alert.prediction?.toLowerCase() === 'attack';
-            return {
-              ...prev,
-              alerts: [...prev.alerts, alert].slice(-100),
-              total_processed: prev.total_processed + 1,
-              attack_total: isAttack ? prev.attack_total + 1 : prev.attack_total,
-              normal_total: isAttack ? prev.normal_total : prev.normal_total + 1,
-              last_updated: new Date().toLocaleTimeString('en-GB')
-            };
-          });
+          // Queue for batching instead of immediate state update
+          pendingAlertsRef.current.push(alert);
         } catch (e) {
           console.error('[Pipeline] WebSocket parse error:', e);
         }
@@ -319,9 +319,8 @@ function App() {
           return;
         }
         const delay = retryDelays[Math.min(retryCount, retryDelays.length - 1)];
-        setConnectionState(retryCount >= retryDelays.length ? 'reconnecting' : 'retrying');
+        setConnectionState('retrying');
         retryCount++;
-        console.warn(`[Pipeline] WebSocket closed. Reconnecting in ${delay}ms (attempt ${retryCount})...`);
         retryTimeout = setTimeout(connectWS, delay);
       };
 
@@ -335,6 +334,7 @@ function App() {
     return () => {
       shouldReconnect = false;
       clearTimeout(retryTimeout);
+      clearInterval(flushInterval);
       ws?.close();
     };
   }, []);

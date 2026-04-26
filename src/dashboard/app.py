@@ -81,13 +81,13 @@ def _build_relay_candidates(seed_uri: str):
         if uri and uri not in candidates:
             candidates.append(uri)
 
-    _add(seed_uri)
-    _add(f"ws://127.0.0.1:{WS_PORT}")
-
     # Fallback to WSL IP if 127.0.0.1 fails
     wsl_ip = _get_wsl_ip()
     if wsl_ip:
         _add(f"ws://{wsl_ip}:{WS_PORT}")
+
+    _add(seed_uri)
+    _add(f"ws://127.0.0.1:{WS_PORT}")
 
     return candidates
 
@@ -126,7 +126,7 @@ def _relay_worker():
                 
                 async with ws_client.connect(
                     current_uri,
-                    open_timeout=15,  # Increased from 5 to 15 to handle WSL startup lag
+                    open_timeout=30,  # Increased from 15 to 30 to handle WSL handshake lag
                     ping_interval=20,
                     ping_timeout=20,
                     close_timeout=10
@@ -156,20 +156,27 @@ def _relay_worker():
                             pass
                         
                         _relay_status["messages_relayed"] += 1
+                        # --- Fan-out broadcast to all browser clients ---
                         with _browser_lock:
-                            if not _browser_clients:
-                                continue
-                            dead = set()
-                            for client in list(_browser_clients):
-                                try:
-                                    # Use a short timeout for sending to prevent a slow browser from lagging the entire relay
-                                    client.send(message)
-                                except (OSError, RuntimeError, ws_client.exceptions.WebSocketException) as send_err:
-                                    logger.debug(f"[Relay] Send failed to browser client: {send_err}")
-                                    dead.add(client)
-                            if dead:
-                                _browser_clients -= dead
-                                logger.info(f"[Relay] Pruned {len(dead)} dead/stalled browser connections (Total: {len(_browser_clients)})")
+                            if _browser_clients:
+                                dead = set()
+                                for client in list(_browser_clients):
+                                    try:
+                                        # Non-blocking send logic:
+                                        # flask_sock doesn't expose a timeout on send easily,
+                                        # but we can check if the socket is writable or use a try-block.
+                                        # For now, we keep it simple but handle the case where the client is gone.
+                                        client.send(message)
+                                    except (OSError, RuntimeError, TimeoutError) as send_err:
+                                        logger.debug(f"[Relay] Send failed (dead client): {send_err}")
+                                        dead.add(client)
+                                    except Exception as exc:
+                                        logger.warning(f"[Relay] Unexpected error broadcasting to client: {exc}")
+                                        dead.add(client)
+                                
+                                if dead:
+                                    _browser_clients -= dead
+                                    logger.info(f"[Relay] Pruned {len(dead)} stalled connections. Active: {len(_browser_clients)}")
 
             except (ConnectionRefusedError, socket.error,
                     ws_client.exceptions.InvalidMessage,

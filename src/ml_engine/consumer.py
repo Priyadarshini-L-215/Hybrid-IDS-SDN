@@ -1,9 +1,11 @@
 import json
 import os
 import time
-import pickle
 import logging
 import signal
+import warnings
+import joblib
+import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
@@ -11,6 +13,14 @@ from datetime import datetime, timezone
 import asyncio
 import threading
 import websockets
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    nn = None
+    TORCH_AVAILABLE = False
 from redis.exceptions import RedisError
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
@@ -21,7 +31,8 @@ from common.feature_extractor import extract_features_from_eve, load_feature_nam
 from common.database import init_db, add_alert
 from common.config import (
     EVE_LOG, HEARTBEAT_LOG, 
-    MODEL_PATH, FEATURES_PATH, 
+    RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, FEATURES_PATH,
+    AUTOENCODER_THRESHOLD, AUTOENCODER_THRESHOLD_PERCENTILE,
     POLL_INTERVAL_SEC, HEARTBEAT_INTERVAL_SEC,
     WS_HOST, WS_PORT,
     ensure_dirs, LOG_LEVEL,
@@ -53,6 +64,81 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress repetitive sklearn metadata warning spam in production logs.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but StandardScaler was fitted with feature names",
+    category=UserWarning,
+)
+
+# Model artifacts may be trained with a different sklearn minor version.
+# Keep runtime logs actionable by suppressing this known persistence warning.
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+except Exception:
+    pass
+
+
+if TORCH_AVAILABLE:
+    class DenseAutoencoder(nn.Module):
+        """Configurable dense autoencoder with default 57 -> 32 -> 16 -> 8 bottleneck."""
+
+        def __init__(self, input_dim=57, hidden_dims=(32, 16), bottleneck_dim=8):
+            super().__init__()
+            self.input_dim = int(input_dim)
+            self.hidden_dims = tuple(int(v) for v in hidden_dims)
+            self.bottleneck_dim = int(bottleneck_dim)
+
+            encoder_layers = []
+            encoder_dims = [self.input_dim, *self.hidden_dims, self.bottleneck_dim]
+            for idx in range(len(encoder_dims) - 1):
+                encoder_layers.append(nn.Linear(encoder_dims[idx], encoder_dims[idx + 1]))
+                if idx < len(encoder_dims) - 2:
+                    encoder_layers.append(nn.ReLU())
+
+            decoder_layers = []
+            decoder_dims = [self.bottleneck_dim, *reversed(self.hidden_dims), self.input_dim]
+            for idx in range(len(decoder_dims) - 1):
+                decoder_layers.append(nn.Linear(decoder_dims[idx], decoder_dims[idx + 1]))
+                if idx < len(decoder_dims) - 2:
+                    decoder_layers.append(nn.ReLU())
+
+            self.encoder = nn.Sequential(*encoder_layers)
+            self.decoder = nn.Sequential(*decoder_layers)
+
+        @staticmethod
+        def from_state_dict(state_dict):
+            """Infer layer dimensions from checkpoint keys when architecture differs."""
+            encoder_weight_keys = [
+                key for key in state_dict.keys()
+                if key.startswith("encoder.") and key.endswith(".weight")
+            ]
+            if not encoder_weight_keys:
+                return DenseAutoencoder()
+
+            encoder_weight_keys = sorted(
+                encoder_weight_keys,
+                key=lambda key: int(key.split(".")[1])
+            )
+
+            first_weight = state_dict[encoder_weight_keys[0]]
+            dims = [int(first_weight.shape[1])]
+            for key in encoder_weight_keys:
+                dims.append(int(state_dict[key].shape[0]))
+
+            if len(dims) < 2:
+                return DenseAutoencoder()
+
+            input_dim = dims[0]
+            bottleneck_dim = dims[-1]
+            hidden_dims = tuple(dims[1:-1])
+            return DenseAutoencoder(input_dim=input_dim, hidden_dims=hidden_dims, bottleneck_dim=bottleneck_dim)
+
+        def forward(self, x):
+            latent = self.encoder(x)
+            return self.decoder(latent)
 
 
 def _sanitize_tracer_fields(payload: dict) -> dict:
@@ -127,27 +213,87 @@ async def _broadcast_worker():
 
 class MLEngine:
     def __init__(self):
-        logger.info("Initializing Machine Learning Model...")
-        self.use_sklearn = False
-        self.model = None
-        
+        logger.info("Initializing Tri-Layer ML pipeline...")
+        self.rf_model = None
+        self.scaler = None
+        self.autoencoder = None
+        self.autoencoder_enabled = os.environ.get("USE_AUTOENCODER", "1") == "1"
+        if self.autoencoder_enabled and not TORCH_AVAILABLE:
+            logger.warning("PyTorch is not installed in WSL. Autoencoder layer disabled; running RF-only mode.")
+            self.autoencoder_enabled = False
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if TORCH_AVAILABLE else None
+        self._mse_history = []
+        self._calibration_window = 500
+        self._ae_dimension_warning_emitted = False
+        self._feature_align_warning_emitted = False
+
+        rf_candidates = [
+            RF_MODEL_PATH,
+            RF_MODEL_PATH.parent / "sentinel_rf.pkl",
+            RF_MODEL_PATH.parents[1] / "new" / "rf_model.pkl",
+            RF_MODEL_PATH.parents[1] / "new" / "sentinel_rf.pkl",
+        ]
+        scaler_candidates = [
+            SCALER_PATH,
+            SCALER_PATH.parent / "sentinel_scaler.pkl",
+            SCALER_PATH.parents[1] / "new" / "scaler.pkl",
+            SCALER_PATH.parents[1] / "new" / "sentinel_scaler.pkl",
+        ]
+        ae_candidates = [
+            AUTOENCODER_PATH,
+            AUTOENCODER_PATH.parent / "sentinel_autoencoder.pth",
+            AUTOENCODER_PATH.parents[1] / "new" / "autoencoder.pth",
+            AUTOENCODER_PATH.parents[1] / "new" / "sentinel_autoencoder.pth",
+        ]
+
+        self.rf_model_path = self._resolve_first_existing_path(rf_candidates)
+        self.scaler_path = self._resolve_first_existing_path(scaler_candidates)
+        self.autoencoder_path = self._resolve_first_existing_path(ae_candidates)
+
         try:
-            with open(MODEL_PATH, "rb") as f:
-                content = f.read(10)
-                f.seek(0)
-                # Simple check for pickle format
-                if content.startswith(b'\x80') or content.startswith(b'('):
-                    self.model = pickle.load(f)
-                    self.use_sklearn = True
-                    logger.info("[OK] Sklearn Random Forest model loaded")
-                else:
-                    logger.info("Model file is placeholder - using heuristic classifier")
+            self.rf_model = joblib.load(self.rf_model_path)
+            logger.info(f"[OK] Random Forest loaded from {self.rf_model_path}")
         except FileNotFoundError as exc:
-            logger.error(f"Model file not found at {MODEL_PATH}: {exc}")
+            logger.error(f"RF model file not found: {exc}")
             raise SystemExit(1)
-        except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ValueError) as exc:
-            logger.error(f"Could not load sklearn model from {MODEL_PATH}: {exc}")
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error(f"Could not load RF model from {self.rf_model_path}: {exc}")
             raise SystemExit(1)
+
+        try:
+            self.scaler = joblib.load(self.scaler_path)
+            logger.info(f"[OK] Scaler loaded from {self.scaler_path}")
+        except FileNotFoundError as exc:
+            logger.error(f"Scaler file not found: {exc}")
+            raise SystemExit(1)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error(f"Could not load scaler from {self.scaler_path}: {exc}")
+            raise SystemExit(1)
+
+        if self.autoencoder_enabled:
+            try:
+                state_dict = torch.load(self.autoencoder_path, map_location=self.device)
+                inferred_autoencoder = DenseAutoencoder.from_state_dict(state_dict).to(self.device)
+                inferred_autoencoder.load_state_dict(state_dict, strict=True)
+                self.autoencoder = inferred_autoencoder
+                self.autoencoder.eval()
+                logger.info(
+                    f"[OK] Autoencoder loaded from {self.autoencoder_path} on {self.device} "
+                    f"(input_dim={self.autoencoder.input_dim}, bottleneck={self.autoencoder.bottleneck_dim})"
+                )
+            except FileNotFoundError as exc:
+                logger.warning(f"Autoencoder file not found: {exc}. Autoencoder layer disabled.")
+                self.autoencoder_enabled = False
+            except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                logger.warning(
+                    f"Could not load autoencoder from {self.autoencoder_path}: {exc}. "
+                    "Using untrained 57-feature fallback architecture."
+                )
+                self.autoencoder = DenseAutoencoder(input_dim=57, hidden_dims=(32, 16), bottleneck_dim=8).to(self.device)
+                self.autoencoder.eval()
+
+        self.autoencoder_threshold = AUTOENCODER_THRESHOLD
+        self.autoencoder_threshold_percentile = AUTOENCODER_THRESHOLD_PERCENTILE
         
         try:
             self.features = load_feature_names(FEATURES_PATH)
@@ -155,6 +301,61 @@ class MLEngine:
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as exc:
             logger.error(f"Failed to load features: {exc}")
             raise
+
+    @staticmethod
+    def _resolve_first_existing_path(path_candidates):
+        for candidate in path_candidates:
+            if Path(candidate).exists():
+                return Path(candidate)
+        return Path(path_candidates[0])
+
+    @staticmethod
+    def _is_attack_prediction(prediction_value):
+        if isinstance(prediction_value, str):
+            normalized = prediction_value.strip().lower()
+            return normalized in {"attack", "anomaly", "malicious", "dos", "ddos", "intrusion", "1"}
+
+        try:
+            return int(prediction_value) == 1
+        except (TypeError, ValueError):
+            return bool(prediction_value)
+
+    @staticmethod
+    def _estimate_rf_confidence(rf_model, scaled_input):
+        try:
+            proba = rf_model.predict_proba(scaled_input)[0]
+            return float(np.max(proba)) * 100.0
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return 100.0
+
+    def _effective_autoencoder_threshold(self):
+        if self.autoencoder_threshold > 0:
+            return self.autoencoder_threshold
+
+        if not self._mse_history:
+            return float("inf")
+
+        return float(np.percentile(self._mse_history, self.autoencoder_threshold_percentile))
+
+    def _align_to_expected_dim(self, vector_2d, expected_dim, label):
+        current_dim = vector_2d.shape[1]
+        if current_dim == expected_dim:
+            return vector_2d
+
+        if not self._feature_align_warning_emitted:
+            logger.warning(
+                "Feature dimension mismatch for %s: got %s, expected %s. Applying zero-pad/truncate alignment.",
+                label,
+                current_dim,
+                expected_dim,
+            )
+            self._feature_align_warning_emitted = True
+
+        if current_dim < expected_dim:
+            pad = np.zeros((vector_2d.shape[0], expected_dim - current_dim), dtype=vector_2d.dtype)
+            return np.concatenate([vector_2d, pad], axis=1)
+
+        return vector_2d[:, :expected_dim]
 
     def extract_features(self, event):
         try:
@@ -169,44 +370,96 @@ class MLEngine:
 
     def predict(self, feature_vector):
         try:
-            if self.use_sklearn and self.model is not None:
-                # Prepare data for model
-                df = pd.DataFrame([feature_vector], columns=self.features)
-                prediction = self.model.predict(df)[0]
-                try:
-                    proba = self.model.predict_proba(df)[0]
-                    confidence = float(max(proba)) * 100
-                except (AttributeError, IndexError, TypeError, ValueError):
-                    confidence = 100.0
-                classification = "attack" if int(prediction) == 1 else "normal"
+            features_np = np.asarray(feature_vector, dtype=np.float32).reshape(1, -1)
+            expected_dim = len(self.features)
+            if features_np.shape[1] != expected_dim:
+                raise ValueError(f"Expected {expected_dim} features, got {features_np.shape[1]}")
+
+            scaler_expected = int(getattr(self.scaler, "n_features_in_", features_np.shape[1]))
+            aligned_for_scaler = self._align_to_expected_dim(features_np, scaler_expected, "scaler")
+
+            # Layer 1: input normalization for downstream models.
+            if hasattr(self.scaler, "feature_names_in_") and len(self.scaler.feature_names_in_) == aligned_for_scaler.shape[1]:
+                scaler_input = pd.DataFrame(aligned_for_scaler, columns=list(self.scaler.feature_names_in_))
             else:
-                classification, confidence = self._heuristic_predict(feature_vector)
-            
+                scaler_input = aligned_for_scaler
+            scaled_vector = self.scaler.transform(scaler_input)
+
+            rf_expected = int(getattr(self.rf_model, "n_features_in_", scaled_vector.shape[1]))
+            scaled_vector = self._align_to_expected_dim(scaled_vector, rf_expected, "random_forest")
+
+            # Layer 2: known attack detection (Random Forest).
+            rf_pred = self.rf_model.predict(scaled_vector)[0]
+            rf_confidence = self._estimate_rf_confidence(self.rf_model, scaled_vector)
+            if self._is_attack_prediction(rf_pred):
+                return {
+                    "classification": "attack",
+                    "raw_prediction": 1,
+                    "confidence": round(rf_confidence, 2),
+                    "layer": "random_forest",
+                    "reconstruction_mse": None,
+                }
+
+            if not self.autoencoder_enabled or self.autoencoder is None:
+                return {
+                    "classification": "normal",
+                    "raw_prediction": 0,
+                    "confidence": round(max(100.0 - rf_confidence, 50.0), 2),
+                    "layer": "random_forest_only",
+                    "reconstruction_mse": None,
+                    "threshold": None,
+                }
+
+            # Layer 3: zero-day anomaly detection (Autoencoder reconstruction error).
+            if scaled_vector.shape[1] != self.autoencoder.input_dim:
+                if not self._ae_dimension_warning_emitted:
+                    logger.warning(
+                        "Autoencoder input dimension mismatch: expected %s, got %s. "
+                        "Skipping zero-day layer until compatible model is deployed.",
+                        self.autoencoder.input_dim,
+                        scaled_vector.shape[1],
+                    )
+                    self._ae_dimension_warning_emitted = True
+                return {
+                    "classification": "normal",
+                    "raw_prediction": 0,
+                    "confidence": round(max(100.0 - rf_confidence, 50.0), 2),
+                    "layer": "autoencoder_skipped",
+                    "reconstruction_mse": None,
+                    "threshold": None,
+                }
+
+            input_tensor = torch.tensor(scaled_vector, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                reconstructed = self.autoencoder(input_tensor)
+
+            mse = float(torch.mean((reconstructed - input_tensor) ** 2).item())
+            active_threshold = self._effective_autoencoder_threshold()
+            if mse > active_threshold:
+                return {
+                    "classification": "zero-day anomaly",
+                    "raw_prediction": 2,
+                    "confidence": 99.0,
+                    "layer": "autoencoder",
+                    "reconstruction_mse": round(mse, 8),
+                    "threshold": round(active_threshold, 8) if np.isfinite(active_threshold) else "warming_up",
+                }
+
+            self._mse_history.append(mse)
+            if len(self._mse_history) > self._calibration_window:
+                self._mse_history = self._mse_history[-self._calibration_window:]
+
             return {
-                "classification": classification,
-                "raw_prediction": 1 if classification == "attack" else 0,
-                "confidence": round(confidence, 2)
+                "classification": "normal",
+                "raw_prediction": 0,
+                "confidence": round(max(100.0 - rf_confidence, 50.0), 2),
+                "layer": "autoencoder",
+                "reconstruction_mse": round(mse, 8),
+                "threshold": round(active_threshold, 8) if np.isfinite(active_threshold) else "warming_up",
             }
-        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError, RuntimeError) as exc:
             logger.error(f"Prediction error: {exc}")
             return {"classification": "error", "error": str(exc)}
-
-    def _heuristic_predict(self, feature_vector):
-        """Fallback heuristics if ML model is unavailable."""
-        feature_dict = {name: val for name, val in zip(self.features, feature_vector)}
-        score = 0
-        # High volume/frequency signals
-        if feature_dict.get("Flow Bytes/s", 0) > 10_000_000: score += 40
-        if feature_dict.get("Flow Packets/s", 0) > 100_000: score += 40
-        if feature_dict.get("Packet Length Std", 0) > 500: score += 20
-        
-        # More aggressive heuristic for high-frequency low-payload flows (common in scans)
-        if feature_dict.get("Flow Bytes/s", 0) < 1000 and feature_dict.get("Flow Packets/s", 0) > 100: score += 30
-        
-        classification = "attack" if score >= 20 else "normal"
-        confidence = min(60 + score, 99)
-        return classification, confidence
-
 
 # ========== REDIS-BACKED PIPELINE (NEW - Option B) ==========
 
@@ -402,7 +655,8 @@ async def log_tailer():
                     else:
                         proto = event.get("proto", "TCP")
                         port = event.get("dest_port", "")
-                        sig = f"{proto} Potential Probe (Port {port})" if final_classification == "attack" else f"{proto} Flow"
+                        is_malicious = final_classification in {"attack", "zero-day anomaly"}
+                        sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
 
                 # Build db_payload OUTSIDE the if-not-sig block so it always exists
                 db_payload = {
@@ -453,7 +707,7 @@ async def log_tailer():
                         db_payload['confidence'] = final_confidence
 
                 # --- 3b. Active IPS (Firewall) ---
-                if final_classification == "attack" and final_confidence >= 95.0:
+                if final_classification in {"attack", "zero-day anomaly"} and final_confidence >= 95.0:
                     ActiveFirewall.block(db_payload['src_ip'])
                     db_payload['category'] = f"IPS Blocked - {db_payload.get('category', 'Threat')}"
 

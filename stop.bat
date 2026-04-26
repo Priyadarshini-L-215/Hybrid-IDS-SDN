@@ -18,8 +18,8 @@ wsl -u root systemctl stop suricata 2>nul || echo.
 taskkill /F /FI "WINDOWTITLE eq IDS Core (WSL)*" /T 2>nul
 
 echo [+] Stopping Redis Server (WSL)...
-wsl -u root bash -c "redis-cli shutdown 2>/dev/null" || echo.
-wsl -u root pkill -9 redis-server 2>/dev/null || echo.
+wsl -u root bash -lc "redis-cli shutdown >/dev/null 2>&1 || true" 2>nul
+wsl -u root bash -lc "pkill -9 redis-server >/dev/null 2>&1 || true" 2>nul
 
 echo.
 echo =================================================================

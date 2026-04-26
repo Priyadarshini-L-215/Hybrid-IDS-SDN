@@ -30,17 +30,35 @@ echo "================================================"
 echo
 
 echo "[IDS] Environment Setup..."
-# Check for dependencies
-python3 -c "import websockets, pandas, sklearn" 2>/dev/null || {
-    echo "[IDS] Missing Python dependencies. Installing..."
-    pip3 install websockets pandas scikit-learn
+PIP_FLAGS="--break-system-packages"
+# Check for core dependencies
+python3 -c "import websockets, pandas, sklearn, joblib" 2>/dev/null || {
+    echo "[IDS] Missing core Python dependencies. Installing..."
+    pip3 install $PIP_FLAGS websockets pandas "scikit-learn==1.6.1" joblib
 }
+
+# Ensure sklearn runtime matches model serialization version.
+SKLEARN_VERSION="$(python3 -c "import sklearn; print(sklearn.__version__)" 2>/dev/null || echo unknown)"
+if [ "$SKLEARN_VERSION" != "1.6.1" ]; then
+    echo "[IDS] Adjusting scikit-learn version ($SKLEARN_VERSION -> 1.6.1) for model compatibility..."
+    pip3 install $PIP_FLAGS --upgrade "scikit-learn==1.6.1"
+fi
+
+# Tri-layer toggle: if torch cannot be installed, continue in RF-only mode.
+USE_AUTOENCODER="${USE_AUTOENCODER:-1}"
+if [ "$USE_AUTOENCODER" = "1" ]; then
+    python3 -c "import torch" 2>/dev/null || {
+        echo "[IDS] WARNING: PyTorch missing in WSL. Autoencoder layer disabled (RF-only mode)."
+        echo "[IDS] To enable tri-layer mode later: pip3 install torch --index-url https://download.pytorch.org/whl/cpu"
+        USE_AUTOENCODER=0
+    }
+fi
 
 if [ "$USE_REDIS_QUEUE" = "1" ]; then
     # Check for Redis Python client
     python3 -c "import redis" 2>/dev/null || {
         echo "[IDS] Installing Redis Python client..."
-        pip3 install redis
+        pip3 install $PIP_FLAGS redis
     }
 fi
 
@@ -88,6 +106,13 @@ echo
 # PYTHONUNBUFFERED=1 ensures we see logs in consumer.log immediately
 # Export mode for consumer to pick up
 export USE_REDIS_QUEUE="$USE_REDIS_QUEUE"
+export USE_AUTOENCODER="$USE_AUTOENCODER"
+
+if [ "$USE_AUTOENCODER" = "1" ]; then
+    echo "[IDS] ML mode: Tri-layer (RF + Autoencoder)"
+else
+    echo "[IDS] ML mode: RF-only fallback (Autoencoder disabled)"
+fi
 
 PYTHONUNBUFFERED=1 nohup python3 src/ml_engine/consumer.py >> "$CONSUMER_LOG" 2>&1 &
 CPID=$!

@@ -1,13 +1,18 @@
 import json
 import logging
 import sqlite3
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from threading import Thread
 from common.database import query_alerts, get_stats
 from common.config import DATA_SERVICE_PORT
 
 logger = logging.getLogger(__name__)
+
+class ThreadedHTTPServer(ThreadingHTTPServer):
+    """Multi-threaded HTTP server with increased request backlog."""
+    request_queue_size = 64
+    daemon_threads = True
 
 class DataServiceHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -16,7 +21,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 params = parse_qs(urlparse(self.path).query)
                 limit = int(params.get('limit', ['500'])[0])
                 offset = int(params.get('offset', ['0'])[0])
-                limit = max(limit, 1)
+                limit = min(max(limit, 1), 1000)
                 offset = max(offset, 0)
                 data = query_alerts(limit=limit, offset=offset)
                 self._send_response(data)
@@ -25,9 +30,15 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 self._send_response(data)
             else:
                 self.send_error(404, "Not Found")
+        except BrokenPipeError:
+            # Client closed connection prematurely, no need to log stack trace
+            pass
         except (ValueError, OSError, sqlite3.Error) as exc:
             logger.error(f"Data Service Error: {exc}")
-            self.send_error(500, str(exc))
+            try:
+                self.send_error(500, str(exc))
+            except BrokenPipeError:
+                pass
 
     def _send_response(self, data):
         self.send_response(200)
@@ -42,7 +53,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
 
 def start_data_service():
     """Starts the internal data bridge service on port 5001."""
-    server = HTTPServer(('0.0.0.0', DATA_SERVICE_PORT), DataServiceHandler)
+    server = ThreadedHTTPServer(('0.0.0.0', DATA_SERVICE_PORT), DataServiceHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    logger.info(f"[Data Service] Bridge active on 0.0.0.0:{DATA_SERVICE_PORT}")
+    logger.info(f"[Data Service] Threaded Bridge active on 0.0.0.0:{DATA_SERVICE_PORT}")

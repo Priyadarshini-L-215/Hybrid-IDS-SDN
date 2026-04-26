@@ -171,15 +171,26 @@ class WorkerPool:
     def _process_event(self, event, worker_name):
         """
         Extract features, predict, correlate, return enriched alert.
-        
-        Args:
-            event: Suricata EVE event (dict)
-            worker_name: Name of calling worker thread (for logging)
-            
-        Returns:
-            Alert dict or None if processing failed
         """
         try:
+            # --- NOISE FILTER: Ignore internal control plane traffic ---
+            src_ip = event.get("src_ip")
+            dest_ip = event.get("dest_ip")
+            src_port = event.get("src_port")
+            dest_port = event.get("dest_port")
+            
+            # Control plane ports: 5000 (Relay), 5001 (Data Bridge), 8765 (WS), 6379 (Redis), 3000 (Vite)
+            CONTROL_PORTS = {3000, 5000, 5001, 6379, 8765}
+            INTERNAL_IPS = {"127.0.0.1", "::1", "172.25.16.1", "172.25.24.205"}
+            
+            # Noise detection: Sentinel control-plane traffic OR host-WSL bridge noise
+            is_internal_bridge = (src_ip in INTERNAL_IPS and dest_ip in INTERNAL_IPS)
+            is_control_port = (src_port in CONTROL_PORTS or dest_port in CONTROL_PORTS)
+            
+            # Filter non-alert traffic involving control ports, loopback, or bridge crosstalk
+            if (is_control_port or is_internal_bridge or src_ip == "127.0.0.1") and event.get("event_type") != "alert":
+                return None
+
             # --- TRACER BYPASS: Handle diagnostic probes immediately ---
             if event.get("_tracer"):
                 worker_done_ts = time.time()  # T3b: Processing complete
@@ -222,18 +233,27 @@ class WorkerPool:
             start_time_predict = time.perf_counter()
             prediction = self.ml_engine.predict(feature_vector)
             predict_time = (time.perf_counter() - start_time_predict) * 1000  # ms
+            if prediction.get("classification") == "error":
+                logger.debug(f"[{worker_name}] Prediction error fallback: {prediction.get('error')}")
+                prediction = {
+                    "classification": "normal",
+                    "confidence": 0.0,
+                    "raw_prediction": 0,
+                    "layer": "prediction_error_fallback",
+                }
+            confidence_for_log = float(prediction.get("confidence") or 0.0)
             
             # Log timing (debug level)
             logger.debug(
                 f"[{worker_name}] {event.get('src_ip', 'unknown')} → "
                 f"{event.get('dest_ip', 'unknown')}: "
                 f"extract={extract_time:.1f}ms, predict={predict_time:.1f}ms, "
-                f"confidence={prediction.get('confidence', 0):.0f}%"
+                f"confidence={confidence_for_log:.0f}%"
             )
             
             # 1. Classification Override (Suricata Priority)
             final_classification = prediction.get("classification")
-            final_confidence = prediction.get("confidence")
+            final_confidence = float(prediction.get("confidence") or 0.0)
             
             if event.get("event_type") == "alert":
                 final_classification = "attack"
@@ -256,7 +276,8 @@ class WorkerPool:
                 else:
                     proto = event.get("proto", event.get("protocol", "TCP"))
                     port = event.get("dest_port", "")
-                    sig = f"{proto} Potential Probe (Port {port})" if final_classification == "attack" else f"{proto} Flow"
+                    is_malicious = final_classification in {"attack", "zero-day anomaly"}
+                    sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
 
             # Build enriched alert
             alert = {
@@ -275,9 +296,8 @@ class WorkerPool:
                 "raw_event": event
             }
             
-            # --- 3. Stateful Flow Correlation (IPS) ---
-            src_ip = alert.get("src_ip")
-            if src_ip and src_ip not in ("127.0.0.1", "::1", "172.25.16.1"):
+            # --- Stateful Flow Correlation ---
+            if src_ip and src_ip not in ("127.0.0.1", "::1", "172.25.16.1", "172.25.24.205"):
                 now = time.time()
                 with self.correlation_lock:
                     self.flow_history[src_ip].append(now)
@@ -308,7 +328,7 @@ class WorkerPool:
                         final_confidence = alert["confidence"]
 
             # --- 4. Active IPS (Firewall) ---
-            if alert["prediction"] == "attack" and alert["confidence"] >= 95.0:
+            if alert["prediction"] in {"attack", "zero-day anomaly"} and alert["confidence"] >= 95.0:
                 ActiveFirewall.block(alert["src_ip"])
                 alert["category"] = f"IPS Blocked - {alert.get('category', 'Threat')}"
             

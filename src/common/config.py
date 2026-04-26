@@ -18,15 +18,22 @@ HEARTBEAT_LOG = LOG_DIR / "consumer_heartbeat.txt"
 # --- DATABASE PATH ---
 if sys.platform == "linux":
     # Use native Linux partition to avoid 9p mount latency (D: drive)
-    DB_PATH = Path(os.path.expanduser("~/.fyp_ids/alerts.db"))
+    DB_PATH = Path(os.path.expanduser("~/.fyp_ids/alerts_fresh.db"))
 else:
     # Windows fallback
-    DB_PATH = BASE_DIR / "data" / "alerts.db"
+    DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
 
 # --- MODEL PATHS ---
 MODELS_DIR = BASE_DIR / "models"
-MODEL_PATH = MODELS_DIR / "model.pkl"
+RF_MODEL_PATH = MODELS_DIR / "rf_model.pkl"
+SCALER_PATH = MODELS_DIR / "scaler.pkl"
+AUTOENCODER_PATH = MODELS_DIR / "autoencoder.pth"
 FEATURES_PATH = MODELS_DIR / "features.json"
+
+# Autoencoder anomaly threshold. If AUTOENCODER_THRESHOLD is not set,
+# a percentile value (default 95th) can be used by calibration logic.
+AUTOENCODER_THRESHOLD = float(os.environ.get("AUTOENCODER_THRESHOLD", "0.0"))
+AUTOENCODER_THRESHOLD_PERCENTILE = float(os.environ.get("AUTOENCODER_THRESHOLD_PERCENTILE", "95.0"))
 
 # --- SYSTEM SETTINGS ---
 POLL_INTERVAL_SEC = 0.1

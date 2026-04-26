@@ -26,6 +26,7 @@ class AsyncFileWatcher:
         self.filepath = Path(filepath)
         self.last_position = 0
         self.last_inode = None
+        self.buffer = ""
         
         # Performance metrics
         self.line_count = 0
@@ -41,7 +42,6 @@ class AsyncFileWatcher:
         # Initialize inode for rotation detection
         if self.filepath.exists():
             self.last_inode = os.stat(self.filepath).st_ino
-            # Optional: self.last_position = os.path.getsize(self.filepath)
             # For testing, we start at 0 to ensure we don't miss tracers injected at startup
 
         while True:
@@ -56,55 +56,64 @@ class AsyncFileWatcher:
                     if current_size < self.last_position:
                         logger.info(f"[FileWatcher] File truncation detected, resetting position")
                         self.last_position = 0
+                        self.buffer = ""
                         
                     # Rotation check
                     if self.last_inode is not None and current_inode != self.last_inode:
                         logger.info(f"[FileWatcher] File rotation detected, resetting position")
                         self.last_position = 0
                         self.last_inode = current_inode
+                        self.buffer = ""
                 else:
                     # File disappeared - wait and retry
                     await asyncio.sleep(1)
                     continue
 
                 # 2. Read new content
-                content = ""
+                raw_chunk = ""
                 try:
                     with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
                         f.seek(self.last_position)
-                        content = f.read()
+                        raw_chunk = f.read()
                         self.last_position = f.tell()
                 except IOError as e:
                     logger.error(f"[FileWatcher] Read error: {e}")
                     await asyncio.sleep(1)
                     continue
 
-                # 3. Process lines and execute callback
-                if content:
-                    lines = content.splitlines()
-                    read_ts = time.time()  # T1: moment lines were read from file
-                    self.line_count += len(lines)
+                # 3. Process complete lines using buffer
+                if raw_chunk:
+                    self.buffer += raw_chunk
                     
-                    stamped_lines = []
-                    for line in lines:
-                        if "SENTINEL_LATENCY_PROBE" in line:
-                            try:
-                                import json
-                                event = json.loads(line.strip())
-                                event["_watcher_read_ts"] = read_ts
-                                line = json.dumps(event)
-                                # Keep log for diagnostic visibility
-                                logger.info(f"[TRACER] T1 FileWatcher read at {read_ts:.6f}")
-                            except Exception:
-                                pass
+                    # Only process if we have at least one complete line
+                    if '\n' in self.buffer:
+                        # Split by newline, but keep the last (potentially incomplete) part in the buffer
+                        parts = self.buffer.split('\n')
+                        self.buffer = parts.pop()  # Last element is the incomplete line or empty string
+                        lines = [p for p in parts if p.strip()]
                         
-                        stamped_lines.append(line)
-                    
-                    if stamped_lines:
-                        # Forward immediately to Redis callback
-                        await callback(stamped_lines)
-                        self.batch_count += 1
-                        self.last_data_time = time.time()
+                        if lines:
+                            read_ts = time.time()  # T1: moment lines were read from file
+                            self.line_count += len(lines)
+                            
+                            stamped_lines = []
+                            for line in lines:
+                                if "SENTINEL_LATENCY_PROBE" in line:
+                                    try:
+                                        import json
+                                        event = json.loads(line.strip())
+                                        event["_watcher_read_ts"] = read_ts
+                                        line = json.dumps(event)
+                                        logger.info(f"[TRACER] T1 FileWatcher read at {read_ts:.6f}")
+                                    except Exception:
+                                        pass
+                                
+                                stamped_lines.append(line)
+                            
+                            if stamped_lines:
+                                await callback(stamped_lines)
+                                self.batch_count += 1
+                                self.last_data_time = time.time()
 
                 # 4. Low-latency sleep (5ms)
                 await asyncio.sleep(0.005)
