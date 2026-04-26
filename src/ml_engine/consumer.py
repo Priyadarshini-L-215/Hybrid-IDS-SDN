@@ -682,7 +682,7 @@ async def log_tailer():
                     
                     # Detection Rules
                     detected_scan = False
-                    if len(port_history[src_ip]) > 25:
+                    if src_ip in port_history and len(port_history[src_ip]) > 25:
                         final_classification = "attack"
                         final_confidence = 99.0
                         db_payload['alert_sig'] = f"Stateful Port Scan (Targeting {len(port_history[src_ip])} ports)"
@@ -690,7 +690,7 @@ async def log_tailer():
                         detected_scan = True
                         port_history[src_ip].clear() # Reset after detection
                     
-                    if len(flow_history[src_ip]) > 100:
+                    if src_ip in flow_history and len(flow_history[src_ip]) > 100:
                         final_classification = "attack"
                         final_confidence = 98.0
                         db_payload['alert_sig'] = "Volumetric Flow Anomaly (DoS Pattern)"

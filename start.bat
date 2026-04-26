@@ -318,8 +318,6 @@ if errorlevel 1 (
 )
 
 :: 5. Verify Model Alignment (77 Features)
-
-:: 3b. Verify Model Alignment (77 Features)
 echo [+] Verifying model feature alignment...
 "%PYTHON_EXE%" -c "import joblib, json; s=joblib.load('models/scaler.pkl'); f=list(s.feature_names_in_); print(len(f))" > .tmp_feat_count 2>nul
 set /p FEAT_COUNT=<.tmp_feat_count
@@ -340,10 +338,11 @@ if "%FEAT_VERIFIED%"=="0" (
     )
 )
 
+:: 6. Launch Flask Dashboard Backend
 echo [+] Launching Flask Dashboard Backend...
 start "Backend (Relay)" /D "%ROOT%" cmd /k "echo [BACKEND] Initializing AI Relay... && set \"IDS_PORT=%BACKEND_PORT%\" && set \"WS_PORT=%WS_PORT%\" && .venv\Scripts\python.exe src\dashboard\app.py"
 
-:: 4. Deploy Redis Validation
+:: 7. Deploy Redis Validation
 if "%USE_REDIS_QUEUE%"=="1" (
     echo [+] Validating Redis pipeline...
     "%PYTHON_EXE%" "%ROOT%\tests\validate_redis_pipeline.py" >nul 2>&1

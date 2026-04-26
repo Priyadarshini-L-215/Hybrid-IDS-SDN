@@ -256,7 +256,7 @@ class WorkerPool:
                     if src_ip in self.port_history and len(self.port_history[src_ip]) > self.PORT_SCAN_THRESHOLD:
                         alert.update({"prediction": "attack", "confidence": 99.0, "category": "Reconnaissance", "alert_sig": f"Port Scan ({len(self.port_history[src_ip])} ports)"})
                         self.port_history[src_ip].clear()
-                    elif len(self.flow_history[src_ip]) > self.DOS_FLOW_THRESHOLD:
+                    elif src_ip in self.flow_history and len(self.flow_history[src_ip]) > self.DOS_FLOW_THRESHOLD:
                         alert.update({"prediction": "attack", "confidence": 98.0, "category": "Resource Exhaustion", "alert_sig": "DoS Pattern Detected"})
 
             # --- IPS Actions ---
