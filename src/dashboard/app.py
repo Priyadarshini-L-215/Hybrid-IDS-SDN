@@ -43,11 +43,7 @@ DEFAULT_BIND_PORT = int(os.environ.get("IDS_PORT", "5000"))
 REMOTE_CONTROL_ENABLED = os.environ.get("IDS_ALLOW_REMOTE_CONTROL") == "1"
 REMOTE_CONTROL_TOKEN = os.environ.get("IDS_API_TOKEN", "").strip()
 
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.WARNING),
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%H:%M:%S'
-)
+# Logger is initialized in common.config via setup_error_logging
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)

@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 
 def load_feature_names(features_path: str | Path = None) -> list:
     """
-    Load the ordered list of 57 feature names from features.json.
+    Load the ordered list of 77 feature names from features.json.
     
     Args:
         features_path: Path to features.json. If None, uses default path.
     
     Returns:
-        List of 57 feature names in exact order expected by model.
+        List of 77 feature names in exact order expected by model.
     """
     if features_path is None:
         # Default to models/features.json relative to project root
@@ -60,14 +60,14 @@ def load_feature_names(features_path: str | Path = None) -> list:
 
 def extract_features_from_eve(event: dict, features: list = None) -> list | None:
     """
-    Extract all 57 features from a Suricata EVE JSON event.
+    Extract all 77 features from a Suricata EVE JSON event.
     
     Args:
         event: Suricata EVE JSON event dictionary
         features: List of feature names (if None, will be loaded from features.json)
     
     Returns:
-        List of 57 feature values in exact order, or None if event is not a 'flow' type
+        List of 77 feature values in exact order, or None if event is not a 'flow' type
     """
     # Process both 'flow' and 'alert' events
     if event.get('event_type') not in ['flow', 'alert']:

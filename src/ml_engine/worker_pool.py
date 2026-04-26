@@ -1,4 +1,3 @@
-import threading
 import json
 import logging
 import time
@@ -6,194 +5,160 @@ import asyncio
 import collections
 import sqlite3
 import sys
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
-from redis.exceptions import RedisError
 
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ml_engine.redis_client import redis_client
+from ml_engine import redis_client
 from ml_engine.firewall import ActiveFirewall
 from common.config import REDIS_QUEUE_NAME, BATCH_SIZE, BATCH_FLUSH_INTERVAL
 from common.database import batch_add_alerts
+from common.wsl_utils import get_wsl_ip, get_gateway_ip
 
 logger = logging.getLogger(__name__)
 
 
 class WorkerPool:
     """
-    Pool of worker threads that consume from Redis queue and process events.
+    Async Worker Pool that consumes from Redis queue and processes events.
     
-    Each worker:
-    1. Pops event from Redis queue
+    Each worker task:
+    1. Pops event from Redis queue (async)
     2. Extracts features + ML prediction
-    3. Accumulates in batch buffer
-    4. Periodic flush to database + WebSocket broadcast
+    3. Immediate WebSocket broadcast (async)
+    4. Accumulates in batch buffer for SQLite persistence
     """
 
     def __init__(self, worker_count=4, ml_engine=None, broadcast_func=None, loop=None):
-        """
-        Initialize worker pool.
-        
-        Args:
-            worker_count: Number of parallel worker threads
-            ml_engine: MLEngine instance for feature extraction + prediction
-            broadcast_func: async function(message: str) for WebSocket broadcast
-            loop: The event loop to run the broadcast_func in
-        """
         self.worker_count = worker_count
         self.ml_engine = ml_engine
         self.broadcast_func = broadcast_func
         self.loop = loop or asyncio.get_event_loop()
+        
         self.batch_buffer = []
-        self.batch_lock = threading.RLock()
+        self.batch_lock = asyncio.Lock()
         self.batch_flush_interval = BATCH_FLUSH_INTERVAL
-        self.workers = []
-        self.flusher_thread = None
+        
+        self.worker_tasks = []
+        self.flusher_task = None
         self.running = False
         
         # --- Stateful Flow Correlation (IPS) ---
-        # Tracks flow timestamps per source IP: {ip: [ts1, ts2, ...]}
         self.flow_history = collections.defaultdict(list)
-        # Tracks latest destination-port timestamps per source IP: {ip: {port: ts}}
         self.port_history = collections.defaultdict(dict)
-        self.correlation_lock = threading.RLock()
-        self.WINDOW_SIZE = 10.0  # seconds
-        self.PORT_SCAN_THRESHOLD = 25   # unique ports within window
-        self.DOS_FLOW_THRESHOLD = 100   # flows within window
+        self.correlation_lock = asyncio.Lock()
+        self.WINDOW_SIZE = 10.0  
+        self.PORT_SCAN_THRESHOLD = 25   
+        self.DOS_FLOW_THRESHOLD = 100   
         
         # Metrics
         self.events_processed = 0
         self.events_flushed = 0
         self.errors = 0
-        self.metrics_lock = threading.Lock()
+        self.metrics_lock = asyncio.Lock()
 
     def start(self):
-        """Start worker threads and batch flusher."""
+        """Start async worker tasks and flusher."""
+        if self.running:
+            return
+            
         self.running = True
         
-        # Start worker threads
+        # Start worker tasks
         for i in range(self.worker_count):
-            worker = threading.Thread(
-                target=self._worker_loop,
-                name=f"Worker-{i}",
-                daemon=True
-            )
-            worker.start()
-            self.workers.append(worker)
+            task = asyncio.create_task(self._worker_loop(f"Worker-{i}"))
+            self.worker_tasks.append(task)
         
-        # Start batch flusher thread
-        self.flusher_thread = threading.Thread(
-            target=self._batch_flusher,
-            name="BatchFlusher",
-            daemon=True
-        )
-        self.flusher_thread.start()
+        # Start flusher task
+        self.flusher_task = asyncio.create_task(self._batch_flusher())
         
-        logger.info(f"[WorkerPool] Started {self.worker_count} parallel workers")
+        logger.info(f"[WorkerPool] Started {self.worker_count} async workers")
 
-    def _worker_loop(self):
-        """
-        Main worker loop: consume from Redis, process, accumulate.
-        """
-        worker_name = threading.current_thread().name
-        
+    async def _worker_loop(self, worker_name):
+        """Async worker loop: non-blocking pop from Redis."""
+        # Ensure async redis is initialized
+        if redis_client.async_redis_client is None:
+            await redis_client.init_async_redis()
+            
         while self.running:
             try:
-                # Blocking pop from Redis (1 second timeout)
-                event_json = redis_client.blpop(REDIS_QUEUE_NAME, timeout=1)
+                # Async blocking pop (wait up to 1s)
+                if redis_client.async_redis_client is None:
+                    await asyncio.sleep(1)
+                    continue
+                    
+                res = await redis_client.async_redis_client.blpop(REDIS_QUEUE_NAME, timeout=1)
                 
-                if not event_json:
-                    # Timeout; check again
+                if not res:
                     continue
                 
-                pop_ts = time.time()  # T3a: moment event was popped from Redis
+                pop_ts = time.time()
+                event_json = res[1]
+                event = json.loads(event_json)
                 
-                # event_json is (key, value)
-                event = json.loads(event_json[1])
-                
-                # Stamp tracer events with T3a
                 if event.get("_tracer"):
                     event["_worker_pop_ts"] = pop_ts
                     logger.info(f"[TRACER] T3a Worker pop at {pop_ts:.6f}")
                 
-                # Process event
-                processed = self._process_event(event, worker_name)
+                processed = await self._process_event(event, worker_name)
                 
                 if processed:
-                    # Broadcast immediately
-                    if self.broadcast_func and self.loop:
+                    # 1. Immediate Broadcast
+                    if self.broadcast_func:
                         try:
-                            asyncio.run_coroutine_threadsafe(
-                                self.broadcast_func(json.dumps(processed)), 
-                                self.loop
-                            )
-                        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
-                            logger.error(f"[{worker_name}] Broadcast schedule error: {exc}")
+                            await self.broadcast_func(json.dumps(processed))
+                        except (ConnectionError, BrokenPipeError) as exc:
+                            logger.error(f"[{worker_name}] Broadcast error: {exc}")
+                        except Exception as exc: # Fallback for unknown broadcast issues
+                            logger.error(f"[{worker_name}] Broadcast unexpected error: {exc}")
 
-                    # Add to batch buffer
-                    with self.batch_lock:
+                    # 2. Add to batch buffer
+                    async with self.batch_lock:
                         self.batch_buffer.append(processed)
                         
-                        # Increment processed counter
-                        with self.metrics_lock:
+                        async with self.metrics_lock:
                             self.events_processed += 1
                         
-                        # Flush if buffer hits 10 events (don't wait for interval)
-                        if len(self.batch_buffer) >= 10:
-                            self._flush_batch()
+                        # Threshold flush
+                        if len(self.batch_buffer) >= 20: # Slightly larger threshold for async
+                            await self._flush_batch()
                 
-            except (RedisError, json.JSONDecodeError, OSError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
-                logger.error(f"[{worker_name}] Error: {exc}")
-                with self.metrics_lock:
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                logger.error(f"[{worker_name}] Data format error: {exc}")
+                async with self.metrics_lock:
                     self.errors += 1
-                time.sleep(0.1)
+            except Exception as exc:
+                logger.error(f"[{worker_name}] Runtime error: {exc}")
+                async with self.metrics_lock:
+                    self.errors += 1
+                await asyncio.sleep(0.1)
 
-    def _prune_stateful_history_locked(self, now):
-        """Drop correlation state outside the sliding window."""
-        cutoff = now - self.WINDOW_SIZE
-
-        for src_ip, timestamps in list(self.flow_history.items()):
-            recent_timestamps = [ts for ts in timestamps if ts >= cutoff]
-            if recent_timestamps:
-                self.flow_history[src_ip] = recent_timestamps
-            else:
-                self.flow_history.pop(src_ip, None)
-
-        for src_ip, port_map in list(self.port_history.items()):
-            stale_ports = [port for port, seen_ts in port_map.items() if seen_ts < cutoff]
-            for port in stale_ports:
-                port_map.pop(port, None)
-            if not port_map:
-                self.port_history.pop(src_ip, None)
-
-    def _process_event(self, event, worker_name):
-        """
-        Extract features, predict, correlate, return enriched alert.
-        """
+    async def _process_event(self, event, worker_name):
+        """Process event, correlate, and enrich."""
         try:
-            # --- NOISE FILTER: Ignore internal control plane traffic ---
             src_ip = event.get("src_ip")
             dest_ip = event.get("dest_ip")
             src_port = event.get("src_port")
             dest_port = event.get("dest_port")
+            event_type = event.get("event_type")
             
-            # Control plane ports: 5000 (Relay), 5001 (Data Bridge), 8765 (WS), 6379 (Redis), 3000 (Vite)
-            CONTROL_PORTS = {3000, 5000, 5001, 6379, 8765}
-            INTERNAL_IPS = {"127.0.0.1", "::1", "172.25.16.1", "172.25.24.205"}
+            # --- Noise Filtering ---
+            CONTROL_PORTS = {3000, 3001, 5000, 5001, 6379, 8765, 8766}
+            local_ip = get_wsl_ip() or "127.0.0.1"
+            gateway_ip = get_gateway_ip() or "172.25.16.1"
+            INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
             
-            # Noise detection: Sentinel control-plane traffic OR host-WSL bridge noise
             is_internal_bridge = (src_ip in INTERNAL_IPS and dest_ip in INTERNAL_IPS)
             is_control_port = (src_port in CONTROL_PORTS or dest_port in CONTROL_PORTS)
             
-            # Filter non-alert traffic involving control ports, loopback, or bridge crosstalk
-            if (is_control_port or is_internal_bridge or src_ip == "127.0.0.1") and event.get("event_type") != "alert":
+            if (is_control_port or is_internal_bridge or src_ip == "127.0.0.1") and event_type != "alert":
                 return None
-
-            # --- TRACER BYPASS: Handle diagnostic probes immediately ---
+            
+            # --- Tracer Bypass ---
             if event.get("_tracer"):
-                worker_done_ts = time.time()  # T3b: Processing complete
+                worker_done_ts = time.time()
                 alert_info = event.get("alert", {})
                 alert = {
                     "timestamp": event.get("timestamp"),
@@ -217,41 +182,19 @@ class WorkerPool:
                     "_worker_done_ts": worker_done_ts,
                     "raw_event": event
                 }
-                logger.info(f"[TRACER] T3b Worker done at {worker_done_ts:.6f}")
                 return alert
 
-            start_time = time.perf_counter()
-            
-            # Feature extraction
+            # --- ML Engine Inference ---
+            # ml_engine prediction is still CPU bound/sync, so we run in executor if needed
+            # but usually it's fast enough for small batches.
             feature_vector = self.ml_engine.extract_features(event)
             if not feature_vector:
                 return None
             
-            extract_time = (time.perf_counter() - start_time) * 1000  # ms
-            
-            # ML Prediction
-            start_time_predict = time.perf_counter()
             prediction = self.ml_engine.predict(feature_vector)
-            predict_time = (time.perf_counter() - start_time_predict) * 1000  # ms
             if prediction.get("classification") == "error":
-                logger.debug(f"[{worker_name}] Prediction error fallback: {prediction.get('error')}")
-                prediction = {
-                    "classification": "normal",
-                    "confidence": 0.0,
-                    "raw_prediction": 0,
-                    "layer": "prediction_error_fallback",
-                }
-            confidence_for_log = float(prediction.get("confidence") or 0.0)
+                prediction = {"classification": "normal", "confidence": 0.0, "layer": "error_fallback"}
             
-            # Log timing (debug level)
-            logger.debug(
-                f"[{worker_name}] {event.get('src_ip', 'unknown')} → "
-                f"{event.get('dest_ip', 'unknown')}: "
-                f"extract={extract_time:.1f}ms, predict={predict_time:.1f}ms, "
-                f"confidence={confidence_for_log:.0f}%"
-            )
-            
-            # 1. Classification Override (Suricata Priority)
             final_classification = prediction.get("classification")
             final_confidence = float(prediction.get("confidence") or 0.0)
             
@@ -259,36 +202,31 @@ class WorkerPool:
                 final_classification = "attack"
                 final_confidence = max(final_confidence, 90.0)
 
-            # 2. Dynamic Signature Enrichment (Fixes "Unknown" signatures)
+            # --- Signature Enrichment ---
             alert_info = event.get("alert", {})
             sig = alert_info.get("signature")
-            
             if not sig:
                 etype = event.get("event_type", "flow")
-                if etype == "dns":
-                    dns = event.get("dns", {})
-                    sig = f"DNS Query: {dns.get('rrname', 'unknown')}"
-                elif etype == "http":
-                    http = event.get("http", {})
-                    sig = f"HTTP {http.get('http_method')} -> {http.get('hostname', 'unknown')}"
-                elif etype == "ssh":
-                    sig = "SSH Connection Attempt"
+                if etype == "dns": sig = f"DNS Query: {event.get('dns', {}).get('rrname', 'unknown')}"
+                elif etype == "http": sig = f"HTTP {event.get('http', {}).get('http_method')} -> {event.get('http', {}).get('hostname', 'unknown')}"
                 else:
-                    proto = event.get("proto", event.get("protocol", "TCP"))
+                    proto = event.get("proto") or "TCP"
                     port = event.get("dest_port", "")
                     is_malicious = final_classification in {"attack", "zero-day anomaly"}
+                    if etype == "flow" and not is_malicious: return None
                     sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
 
-            # Build enriched alert
+            event_id = f"{event.get('timestamp')}-{event.get('flow_id', '0')}-{event_type}"
             alert = {
+                "event_id": event_id,
                 "timestamp": event.get("timestamp"),
-                "src_ip": event.get("src_ip"),
-                "dest_ip": event.get("dest_ip"),
-                "src_port": event.get("src_port"),
-                "dest_port": event.get("dest_port"),
-                "event_type": event.get("event_type"),
+                "src_ip": src_ip,
+                "dest_ip": dest_ip,
+                "src_port": src_port,
+                "dest_port": dest_port,
+                "event_type": event_type,
                 "alert_sig": sig,
-                "protocol": event.get("proto") or event.get("protocol", "unknown"),
+                "protocol": event.get("proto") or "unknown",
                 "prediction": final_classification,
                 "confidence": final_confidence,
                 "severity": alert_info.get("severity", 5),
@@ -297,119 +235,77 @@ class WorkerPool:
             }
             
             # --- Stateful Flow Correlation ---
-            if src_ip and src_ip not in ("127.0.0.1", "::1", "172.25.16.1", "172.25.24.205"):
+            if src_ip and src_ip not in INTERNAL_IPS:
                 now = time.time()
-                with self.correlation_lock:
+                async with self.correlation_lock:
                     self.flow_history[src_ip].append(now)
-                    if alert.get("dest_port"):
-                        self.port_history[src_ip][str(alert["dest_port"])] = now
+                    if dest_port: self.port_history[src_ip][str(dest_port)] = now
                     
-                    # Prune stale entries outside window
-                    self._prune_stateful_history_locked(now)
+                    # Prune
+                    cutoff = now - self.WINDOW_SIZE
+                    self.flow_history[src_ip] = [ts for ts in self.flow_history[src_ip] if ts >= cutoff]
+                    self.port_history[src_ip] = {p: ts for p, ts in self.port_history[src_ip].items() if ts >= cutoff}
                     
-                    detected = False
-                    if len(self.port_history[src_ip]) > self.PORT_SCAN_THRESHOLD:
-                        alert["prediction"] = "attack"
-                        alert["confidence"] = 99.0
-                        alert["alert_sig"] = f"Stateful Port Scan (Targeting {len(self.port_history[src_ip])} ports)"
-                        alert["category"] = "Reconnaissance"
-                        detected = True
-                        self.port_history[src_ip].clear()  # Reset after detection
+                    # Fix: Delete empty IP keys to prevent slow memory leak
+                    if not self.flow_history[src_ip]:
+                        del self.flow_history[src_ip]
+                    if src_ip in self.port_history and not self.port_history[src_ip]:
+                        del self.port_history[src_ip]
                     
-                    if len(self.flow_history[src_ip]) > self.DOS_FLOW_THRESHOLD:
-                        alert["prediction"] = "attack"
-                        alert["confidence"] = 98.0
-                        alert["alert_sig"] = "Volumetric Flow Anomaly (DoS Pattern)"
-                        alert["category"] = "Resource Exhaustion"
-                        detected = True
-                    
-                    if detected:
-                        final_classification = alert["prediction"]
-                        final_confidence = alert["confidence"]
+                    # Only proceed if IP still in history (wasn't just deleted)
+                    if src_ip in self.port_history and len(self.port_history[src_ip]) > self.PORT_SCAN_THRESHOLD:
+                        alert.update({"prediction": "attack", "confidence": 99.0, "category": "Reconnaissance", "alert_sig": f"Port Scan ({len(self.port_history[src_ip])} ports)"})
+                        self.port_history[src_ip].clear()
+                    elif len(self.flow_history[src_ip]) > self.DOS_FLOW_THRESHOLD:
+                        alert.update({"prediction": "attack", "confidence": 98.0, "category": "Resource Exhaustion", "alert_sig": "DoS Pattern Detected"})
 
-            # --- 4. Active IPS (Firewall) ---
+            # --- IPS Actions ---
             if alert["prediction"] in {"attack", "zero-day anomaly"} and alert["confidence"] >= 95.0:
                 ActiveFirewall.block(alert["src_ip"])
-                alert["category"] = f"IPS Blocked - {alert.get('category', 'Threat')}"
+                alert["category"] = f"IPS Blocked - {alert['category']}"
             
             return alert
-            
-        except (ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError, OSError) as exc:
-            logger.error(f"[{worker_name}] Process error: {exc}")
-            with self.metrics_lock:
-                self.errors += 1
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.error(f"[{worker_name}] Processing logic error: {exc}")
+            return None
+        except Exception as exc:
+            logger.error(f"[{worker_name}] Processing unexpected error: {exc}")
             return None
 
-    def _batch_flusher(self):
-        """
-        Periodically flush accumulated alerts to database.
-        Runs in background thread.
-        """
+    async def _batch_flusher(self):
+        """Periodic background flush to database."""
         while self.running:
-            time.sleep(self.batch_flush_interval)
-            with self.batch_lock:
+            await asyncio.sleep(self.batch_flush_interval)
+            async with self.batch_lock:
                 if self.batch_buffer:
-                    self._flush_batch()
+                    await self._flush_batch()
 
-    def _flush_batch(self):
-        """
-        Flush batch_buffer to database (must be called with batch_lock held).
-        """
+    async def _flush_batch(self):
+        """Offload SQLite write to thread pool executor to avoid blocking loop."""
         if not self.batch_buffer:
             return
         
-        batch_size = len(self.batch_buffer)
+        batch = list(self.batch_buffer)
+        self.batch_buffer.clear()
         
         try:
-            # Batch insert to SQLite
-            batch_add_alerts(self.batch_buffer)
-            
-            with self.metrics_lock:
-                self.events_flushed += batch_size
-            
-            logger.debug(f"[BatchFlusher] Flushed {batch_size} alerts to database")
-            self.batch_buffer.clear()
-            
-        except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
-            logger.error(f"[BatchFlusher] Flush error: {exc}")
-            with self.metrics_lock:
-                self.errors += 1
+            # SQLite is blocking; run in executor
+            await self.loop.run_in_executor(None, batch_add_alerts, batch)
+            async with self.metrics_lock:
+                self.events_flushed += len(batch)
+        except sqlite3.Error as exc:
+            logger.error(f"[BatchFlusher] Database error: {exc}")
+        except Exception as exc:
+            logger.error(f"[BatchFlusher] Flush unexpected error: {exc}")
 
     def stop(self):
-        """Stop all workers gracefully."""
-        logger.info("[WorkerPool] Stopping workers...")
+        """Stop all tasks."""
         self.running = False
-        
-        for worker in self.workers:
-            worker.join(timeout=5)
-        
-        if self.flusher_thread:
-            self.flusher_thread.join(timeout=5)
-        
-        # Final flush
-        with self.batch_lock:
-            if self.batch_buffer:
-                self._flush_batch()
-        
-        logger.info("[WorkerPool] All workers stopped")
-
-    def get_metrics(self):
-        """Get worker pool metrics."""
-        with self.metrics_lock:
-            return {
-                "events_processed": self.events_processed,
-                "events_flushed": self.events_flushed,
-                "buffer_size": len(self.batch_buffer),
-                "errors": self.errors
-            }
+        for task in self.worker_tasks:
+            task.cancel()
+        if self.flusher_task:
+            self.flusher_task.cancel()
+        logger.info("[WorkerPool] Async workers stopped")
 
     def get_status(self):
-        """Get human-readable status."""
-        metrics = self.get_metrics()
-        return (
-            f"[WorkerPool] "
-            f"Processed: {metrics['events_processed']}, "
-            f"Flushed: {metrics['events_flushed']}, "
-            f"Buffered: {metrics['buffer_size']}, "
-            f"Errors: {metrics['errors']}"
-        )
+        return f"Processed: {self.events_processed}, Flushed: {self.events_flushed}, Buffered: {len(self.batch_buffer)}, Errors: {self.errors}"

@@ -32,6 +32,26 @@ except Exception as e:
     logger.error(f"[Redis] Failed to create connection pool: {e}")
     redis_client = None
 
+# Async client for high-performance non-blocking queue consumption
+async_redis_client = None
+
+async def init_async_redis():
+    """Initialize async Redis client."""
+    global async_redis_client
+    try:
+        import redis.asyncio as async_redis
+        async_redis_client = async_redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            db=REDIS_DB,
+            decode_responses=True,
+            socket_connect_timeout=5,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"[Redis] Failed to create async client: {e}")
+        return False
+
 
 def test_redis():
     """Test Redis connection; return True if OK, False otherwise."""
@@ -45,6 +65,22 @@ def test_redis():
         return True
     except Exception as e:
         logger.error(f"[Redis] Connection test failed: {e}")
+        return False
+
+async def test_async_redis():
+    """Test async Redis connection."""
+    if async_redis_client is None:
+        await init_async_redis()
+    
+    if async_redis_client is None:
+        return False
+        
+    try:
+        result = await async_redis_client.ping()
+        logger.info(f"[Redis] Async Connection OK (PING response: {result})")
+        return True
+    except Exception as e:
+        logger.error(f"[Redis] Async Connection test failed: {e}")
         return False
 
 

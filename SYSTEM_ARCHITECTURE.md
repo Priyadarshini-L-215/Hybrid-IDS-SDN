@@ -18,7 +18,7 @@ graph TD
         end
 
         subgraph "Intelligence Layer"
-            FE["Feature Extractor"] -- "57-Dimension Vector" --> RF["Random Forest Model"]
+            FE["Feature Extractor"] -- "77-Dimension Vector" --> RF["Random Forest Model"]
             RF -- "Probabilistic Analysis" --> SC["Stateful Correlator"]
             SC -- "Active Mitigation" --> IPS["IPS Module (ActiveFirewall)"]
         end
@@ -75,7 +75,7 @@ graph TD
 2.  A **Worker Pool** of 4 parallel threads consumes events in batches, maximizing multi-core performance.
 
 ### 3. The Intelligence Phase (ML & Correlation)
-1.  **Feature Extraction**: The system extracts **57 behavioral features** (CICIDS standard).
+1.  **Feature Extraction**: The system extracts **77 behavioral features** (CICIDS standard).
 2.  **Inference**: A **Scikit-learn Random Forest** model classifies the traffic with >95% accuracy.
 3.  **Stateful Correlation**: Connection history is tracked per IP to detect **Volumetric (DoS)** and **Reconnaissance (Port Scan)** patterns.
 

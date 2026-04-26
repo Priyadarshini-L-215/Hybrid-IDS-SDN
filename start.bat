@@ -24,7 +24,7 @@ set "USE_REDIS_QUEUE=1"
 set "WS_PORT=8765"
 set "BACKEND_PORT=5000"
 set "UI_PORT=3000"
-set "DATA_PORT=5001"
+set "DATA_SERVICE_PORT=5001"
 set "REDIS_PORT=6379"
 set "AUTOENCODER_THRESHOLD=0"
 set "AUTOENCODER_THRESHOLD_PERCENTILE=95"
@@ -54,6 +54,13 @@ if not errorlevel 1 (
 netstat -ano | findstr ":%WS_PORT% " >nul 2>&1
 if not errorlevel 1 (
     set /a WS_PORT+=1
+    set "PORT_CONFLICT=1"
+)
+
+:: Check Data Service (5001)
+netstat -ano | findstr ":%DATA_SERVICE_PORT% " >nul 2>&1
+if not errorlevel 1 (
+    set /a DATA_SERVICE_PORT+=1
     set "PORT_CONFLICT=1"
 )
 
@@ -88,7 +95,7 @@ echo [+] Preparing environment verification...
 where node >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Node.js not found. It is required for the React Dashboard.
-    echo Please install Node.js (v20+) from https://nodejs.org/
+    echo "Please install Node.js (v20+) from https://nodejs.org/"
     pause
     exit /b 1
 )
@@ -131,14 +138,32 @@ if "%FORCE_SETUP%"=="1" (
 
 if exist "%SETUP_STAMP%" if not "%FORCE_SETUP%"=="1" (
     if exist "%PYTHON_EXE%" if exist "%UI_DIR%\node_modules" (
-        echo [OK] Core dependencies verified.
-        goto :model_sync
+        :: Check if core Python packages are actually installed in Windows
+        "%PYTHON_EXE%" -c "import flask, websockets, redis, pandas, sklearn" >nul 2>&1
+        if not errorlevel 1 (
+            echo [OK] Core dependencies verified.
+            goto :model_sync
+        )
     )
-    echo [!] Setup stamp exists but required dependencies are missing.
+    echo [!] Setup stamp exists but required dependencies are missing or broken.
     echo [+] Falling back to full setup verification.
 )
 
 echo [+] Running full dependency audit...
+
+:: Check/Install Windows Python Dependencies
+echo [+] Checking Windows Python dependencies...
+"%PYTHON_EXE%" -c "import flask, websockets, redis, pandas, sklearn" >nul 2>&1
+if errorlevel 1 (
+    echo [!] Missing Python packages in Windows virtual environment.
+    echo [+] Installing requirements.txt...
+    "%PYTHON_EXE%" -m pip install -r "%ROOT%\requirements.txt" --quiet
+    if errorlevel 1 (
+        echo [ERROR] Failed to install Windows Python dependencies.
+        pause
+        exit /b 1
+    )
+)
 
 :: Check for UI Dependencies
 if not exist "%UI_DIR%\node_modules" (
@@ -158,8 +183,15 @@ if not exist "%UI_DIR%\node_modules" (
 :: Check for WSL Dependencies (Suricata + Redis)
 echo [+] Checking WSL sensor environment...
 wsl -u root bash -c "command -v suricata >/dev/null 2>&1"
-if errorlevel 1 (
-    echo [!] Suricata not found in WSL. 
+set "WSL_MISSING=0"
+if errorlevel 1 set "WSL_MISSING=1"
+
+:: Check WSL Python dependencies
+wsl -u root bash -c "python3 -c 'import redis, websockets, pandas, sklearn, joblib' >/dev/null 2>&1"
+if errorlevel 1 set "WSL_MISSING=1"
+
+if "%WSL_MISSING%"=="1" (
+    echo [!] Suricata or WSL Python dependencies are missing. 
     echo [+] Running setup_wsl.sh...
     for /f "delims=" %%I in ('wsl wslpath "%WSL_SETUP_SH%"') do set "WSL_SETUP_SCRIPT=%%I"
     wsl -u root bash -lc "chmod +x '%WSL_SETUP_SCRIPT%' && '%WSL_SETUP_SCRIPT%'"
@@ -241,18 +273,7 @@ echo [+] Purging stale processes...
 call "%ROOT%\stop.bat" --no-pause
 echo.
 
-:: 2. Launch WSL Engine
-echo [+] Launching WSL Pipeline (Suricata + ML Engine)...
-if "%USE_REDIS_QUEUE%"=="1" (
-    echo [+] Mode: Redis Queue Pipeline ^(Optimized^)
-) else (
-    echo [+] Mode: Legacy Polling ^(Compatibility^)
-)
-for /f "delims=" %%I in ('wsl wslpath "%START_IDS_SH%"') do set "WSL_SCRIPT=%%I"
-for /f "delims=" %%I in ('wsl wslpath "%ROOT%"') do set "WSL_ROOT=%%I"
-start "IDS Core (WSL)" wsl -u root bash -lc "export PROJECT_ROOT='%WSL_ROOT%' USE_REDIS_QUEUE=%USE_REDIS_QUEUE% AUTOENCODER_THRESHOLD=%AUTOENCODER_THRESHOLD% AUTOENCODER_THRESHOLD_PERCENTILE=%AUTOENCODER_THRESHOLD_PERCENTILE%; sed -i 's/\r$//' '%WSL_SCRIPT%' && bash '%WSL_SCRIPT%'"
-
-:: 3. Launch Flask Backend
+:: 2. Resolve WSL connectivity early
 echo [+] Resolving WSL connectivity...
 set "WSL_IP="
 for /f "tokens=1" %%I in ('wsl hostname -I 2^>nul') do (
@@ -261,19 +282,66 @@ for /f "tokens=1" %%I in ('wsl hostname -I 2^>nul') do (
 if not defined WSL_IP set "WSL_IP=127.0.0.1"
 echo [+] WSL IP resolved to: %WSL_IP%
 
+:: 2b. Automatic Port Mapping (Bridge WSL to Windows Localhost)
+echo [+] Setting up automatic port mapping...
+net session >nul 2>&1
+if %errorLevel% == 0 (
+    echo [+] Admin rights detected. Configuring netsh portproxy...
+    :: Map WebSocket Port
+    netsh interface portproxy add v4tov4 listenport=%WS_PORT% listenaddress=127.0.0.1 connectport=%WS_PORT% connectaddress=%WSL_IP% >nul 2>&1
+    :: Map Redis
+    netsh interface portproxy add v4tov4 listenport=%REDIS_PORT% listenaddress=127.0.0.1 connectport=%REDIS_PORT% connectaddress=%WSL_IP% >nul 2>&1
+    :: Map Data Service
+    netsh interface portproxy add v4tov4 listenport=%DATA_SERVICE_PORT% listenaddress=127.0.0.1 connectport=%DATA_SERVICE_PORT% connectaddress=%WSL_IP% >nul 2>&1
+    echo [OK] Port mapping complete (127.0.0.1 -> %WSL_IP%)
+) else (
+    echo [!] Skipping netsh portproxy (Requires Admin rights). 
+    echo     Using direct WSL IP (%WSL_IP%) for connectivity.
+)
+
+:: 3. Launch WSL Engine
+echo [+] Launching WSL Pipeline (Suricata + ML Engine)...
+if "%USE_REDIS_QUEUE%"=="1" (
+    echo [+] Mode: Redis Queue Pipeline ^(Optimized^)
+) else (
+    echo [+] Mode: Legacy Polling ^(Compatibility^)
+)
+for /f "delims=" %%I in ('wsl wslpath "%START_IDS_SH%"') do set "WSL_SCRIPT=%%I"
+for /f "delims=" %%I in ('wsl wslpath "%ROOT%"') do set "WSL_ROOT=%%I"
+start "IDS Core (WSL)" wsl -u root bash -lc "cd '%WSL_ROOT%' && export PROJECT_ROOT='%WSL_ROOT%' USE_REDIS_QUEUE=%USE_REDIS_QUEUE% WS_PORT=%WS_PORT% DATA_SERVICE_PORT=%DATA_SERVICE_PORT% AUTOENCODER_THRESHOLD=%AUTOENCODER_THRESHOLD% AUTOENCODER_THRESHOLD_PERCENTILE=%AUTOENCODER_THRESHOLD_PERCENTILE%; sed -i 's/\r$//' '%WSL_SCRIPT%' && bash '%WSL_SCRIPT%'"
+
+:: 4. Wait for WSL Engine to be ready
+echo [+] Waiting for WSL Engine to initialize...
+"%PYTHON_EXE%" "%ROOT%\scripts\wait_for_pipeline.py" --host %WSL_IP% --port %WS_PORT% --timeout 45
+if errorlevel 1 (
+    echo [WARNING] WSL Engine initialization is taking longer than expected. 
+)
+
+:: 5. Verify Model Alignment (77 Features)
+
 :: 3b. Verify Model Alignment (77 Features)
 echo [+] Verifying model feature alignment...
 "%PYTHON_EXE%" -c "import joblib, json; s=joblib.load('models/scaler.pkl'); f=list(s.feature_names_in_); print(len(f))" > .tmp_feat_count 2>nul
 set /p FEAT_COUNT=<.tmp_feat_count
 del .tmp_feat_count
-if "%FEAT_COUNT%"=="77" (
-    echo [OK] Model feature count verified (77).
-) else (
-    echo [WARNING] Model uses %FEAT_COUNT% features. Ensure feature_extractor.py is synced.
+set "FEAT_VERIFIED=0"
+if "%FEAT_COUNT%"=="" goto :feat_check_done
+if not "%FEAT_COUNT%"=="77" goto :feat_check_done
+
+echo [OK] Model feature count verified (77).
+set "FEAT_VERIFIED=1"
+
+:feat_check_done
+if "%FEAT_VERIFIED%"=="0" (
+    if "%FEAT_COUNT%"=="" (
+        echo [WARNING] Could not verify feature count. Ensure models/scaler.pkl exists.
+    ) else (
+        echo [WARNING] Model uses "%FEAT_COUNT%" features. Expected 77.
+    )
 )
 
 echo [+] Launching Flask Dashboard Backend...
-start "Backend (Relay)" /D "%ROOT%" cmd /k "echo [BACKEND] Initializing AI Relay... && set IDS_PORT=%BACKEND_PORT%&& set WS_PORT=%WS_PORT%&& .venv\Scripts\python.exe src\dashboard\app.py"
+start "Backend (Relay)" /D "%ROOT%" cmd /k "echo [BACKEND] Initializing AI Relay... && set \"IDS_PORT=%BACKEND_PORT%\" && set \"WS_PORT=%WS_PORT%\" && .venv\Scripts\python.exe src\dashboard\app.py"
 
 :: 4. Deploy Redis Validation
 if "%USE_REDIS_QUEUE%"=="1" (
@@ -289,7 +357,7 @@ echo.
 
 :: 5. Launch React Frontend
 echo [+] Launching Sentinel Core Dashboard (React)...
-start "Frontend (SOC)" /D "%UI_DIR%" cmd /k "echo [UI] Starting Dashboard... && set VITE_PORT=%UI_PORT%&& set VITE_BACKEND_PORT=%BACKEND_PORT%&& npm run dev"
+start "Frontend (SOC)" /D "%UI_DIR%" cmd /k "echo [UI] Starting Dashboard... && set \"VITE_PORT=%UI_PORT%\" && set \"VITE_BACKEND_PORT=%BACKEND_PORT%\" && npm run dev"
 
 echo.
 echo =================================================================

@@ -70,17 +70,17 @@ To launch the full stack (Sensor, Relay, and Dashboard):
 The system is optimized for the following stack:
 
 ### ML Pipeline (Engine)
-- **PyTorch 2.11+**: Dense Autoencoder for Zero-Day detection.
-- **Scikit-Learn 1.6+**: Random Forest classification & Scaling.
-- **Redis 5.0+**: High-throughput event queueing.
+- **PyTorch 2.11.0**: Dense Autoencoder for Zero-Day detection.
+- **Scikit-Learn 1.6.1**: Random Forest classification (77 features) & Scaling.
+- **Redis 5.0.8**: High-throughput event queueing.
 
 ### Backend (Relay)
-- **Flask 3.1+**: Async REST API.
-- **Flask-Sock 0.7+**: High-concurrency WebSocket bridge.
+- **Flask 3.1.3**: Async REST API.
+- **Flask-Sock 0.7.0**: High-concurrency WebSocket bridge.
 
 ### Security (Sensor)
-- **Suricata 7.0+**: Signature-based IDS/IPS.
-- **Scapy 2.6+**: Packet reconstruction and feature extraction.
+- **Suricata 7.0.3+**: Signature-based IDS/IPS.
+- **Scapy 2.6.1**: Packet reconstruction and feature extraction.
 
 ---
 

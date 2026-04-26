@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.feature_extractor import extract_features_from_eve, load_feature_names, validate_feature_vector
 from common.database import init_db, add_alert
+from common.wsl_utils import get_wsl_ip, get_gateway_ip
 from common.config import (
     EVE_LOG, HEARTBEAT_LOG, 
     RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, FEATURES_PATH,
@@ -41,7 +42,7 @@ from common.config import (
 )
 from ml_engine.data_service import start_data_service
 from ml_engine.firewall import ActiveFirewall
-from ml_engine.redis_client import test_redis, redis_client
+from ml_engine import redis_client as rc
 from ml_engine.file_watcher import AsyncFileWatcher
 from ml_engine.worker_pool import WorkerPool
 import collections
@@ -57,12 +58,7 @@ _ws_queue = None             # Initialized in main() to ensure correct event loo
 _RUNNING = True
 _TRACER_ENABLED = os.environ.get("SENTINEL_TRACER", "0") == "1"
 
-# Setup logging
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.WARNING),
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%H:%M:%S'
-)
+# Logger is initialized in common.config via setup_error_logging
 logger = logging.getLogger(__name__)
 
 # Suppress repetitive sklearn metadata warning spam in production logs.
@@ -227,28 +223,10 @@ class MLEngine:
         self._ae_dimension_warning_emitted = False
         self._feature_align_warning_emitted = False
 
-        rf_candidates = [
-            RF_MODEL_PATH,
-            RF_MODEL_PATH.parent / "sentinel_rf.pkl",
-            RF_MODEL_PATH.parents[1] / "new" / "rf_model.pkl",
-            RF_MODEL_PATH.parents[1] / "new" / "sentinel_rf.pkl",
-        ]
-        scaler_candidates = [
-            SCALER_PATH,
-            SCALER_PATH.parent / "sentinel_scaler.pkl",
-            SCALER_PATH.parents[1] / "new" / "scaler.pkl",
-            SCALER_PATH.parents[1] / "new" / "sentinel_scaler.pkl",
-        ]
-        ae_candidates = [
-            AUTOENCODER_PATH,
-            AUTOENCODER_PATH.parent / "sentinel_autoencoder.pth",
-            AUTOENCODER_PATH.parents[1] / "new" / "autoencoder.pth",
-            AUTOENCODER_PATH.parents[1] / "new" / "sentinel_autoencoder.pth",
-        ]
-
-        self.rf_model_path = self._resolve_first_existing_path(rf_candidates)
-        self.scaler_path = self._resolve_first_existing_path(scaler_candidates)
-        self.autoencoder_path = self._resolve_first_existing_path(ae_candidates)
+        # Model paths from config (with fallbacks handled in config.py)
+        self.rf_model_path = RF_MODEL_PATH
+        self.scaler_path = SCALER_PATH
+        self.autoencoder_path = AUTOENCODER_PATH
 
         try:
             self.rf_model = joblib.load(self.rf_model_path)
@@ -468,7 +446,15 @@ async def eve_batch_to_redis(batch):
     Callback: batch of EVE JSON lines → parse → push to Redis queue.
     Used by AsyncFileWatcher.
     """
-    if not batch or redis_client is None:
+    if not batch:
+        return
+        
+    # Ensure async redis is initialized
+    if rc.async_redis_client is None:
+        await rc.init_async_redis()
+        
+    if rc.async_redis_client is None:
+        logger.error("[Redis] Cannot push batch: Async client not initialized")
         return
     
     for line in batch:
@@ -480,8 +466,8 @@ async def eve_batch_to_redis(batch):
                 logger.info(f"[TRACER] T2 Redis push at {event['_redis_push_ts']:.6f}")
             elif not _TRACER_ENABLED:
                 event = _sanitize_tracer_fields(event)
-            # Push to Redis queue
-            redis_client.rpush(REDIS_QUEUE_NAME, json.dumps(event))
+            # Push to Redis queue (Async)
+            await rc.async_redis_client.rpush(REDIS_QUEUE_NAME, json.dumps(event))
         except (json.JSONDecodeError, TypeError, RedisError, OSError) as exc:
             logger.debug(f"[Redis] Queue push skipped: {exc}")
 
@@ -512,7 +498,7 @@ async def redis_pipeline_main():
     global _RUNNING
     
     # Check Redis connectivity
-    if not test_redis():
+    if not rc.test_redis():
         logger.error(f"[Redis] Cannot connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
         logger.error("[Redis] Falling back to legacy polling mode")
         return await log_tailer()
@@ -520,9 +506,8 @@ async def redis_pipeline_main():
     # Initialize ML engine for workers
     engine = MLEngine()
     
-    # Initialize worker pool with current event loop for thread-safe broadcasting
-    loop = asyncio.get_running_loop()
-    worker_pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=_broadcast, loop=loop)
+    # Initialize worker pool (now fully async)
+    worker_pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=_broadcast)
     
     # 1. Start WebSocket server and maintain pipeline within its context
     bind_host = "0.0.0.0" # Bind to all interfaces for bridge accessibility
@@ -677,13 +662,23 @@ async def log_tailer():
 
                 # --- 3a. Stateful Flow Correlation ---
                 src_ip = db_payload['src_ip']
-                if src_ip and src_ip not in ["127.0.0.1", "172.25.16.1"]:
+                local_ip = get_wsl_ip() or "127.0.0.1"
+                gateway_ip = get_gateway_ip() or "172.25.16.1"
+                INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
+                
+                if src_ip and src_ip not in INTERNAL_IPS:
                     flow_history[src_ip].append(now)
                     if db_payload['dest_port']:
                         port_history[src_ip].add(db_payload['dest_port'])
                     
-                    # Cleanup old entries
+                    # Cleanup old entries to prevent slow memory leaks
                     flow_history[src_ip] = [ts for ts in flow_history[src_ip] if now - ts < WINDOW_SIZE]
+                    if not flow_history[src_ip]:
+                        del flow_history[src_ip]
+                    
+                    # Also prune port history if idle
+                    if src_ip in port_history and not flow_history.get(src_ip):
+                        port_history.pop(src_ip, None)
                     
                     # Detection Rules
                     detected_scan = False
@@ -741,6 +736,9 @@ async def log_tailer():
 async def main():
     """Application entry point."""
     global _RUNNING
+    
+    # Initialize Redis
+    await rc.init_async_redis()
     
     # Initialize the broadcast queue within the running loop
     global _ws_queue

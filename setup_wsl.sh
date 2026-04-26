@@ -23,9 +23,20 @@ sudo apt-get install -y software-properties-common curl git python3-pip python3-
 
 # 2. Install Suricata
 echo "[+] Installing Suricata IDS/IPS..."
-sudo add-apt-repository -y ppa:oisf/suricata-stable
-sudo apt-get update -y
-sudo apt-get install -y suricata
+if grep -qi "kali" /etc/os-release; then
+    echo "[!] Kali Linux detected. Skipping PPA and using official repository..."
+    sudo apt-get update -y
+    sudo apt-get install -y suricata
+else
+    echo "[+] Ubuntu/Debian detected. Adding PPA..."
+    sudo add-apt-repository -y ppa:oisf/suricata-stable || echo "[!] PPA failed, trying direct install..."
+    sudo apt-get update -y
+    sudo apt-get install -y suricata
+fi
+
+# Initialize Suricata rules
+echo "[+] Updating Suricata rules..."
+sudo suricata-update || echo "[!] suricata-update failed, skipping..."
 
 echo "[+] Configuring Suricata for EVE JSON output..."
 # Ensure log directory exists

@@ -47,6 +47,34 @@ const StatCard = ({ title, value, icon: Icon, type, trend }) => (
   </div>
 );
 
+const AlertRow = React.memo(({ alert }) => {
+  const isAttack = alert.prediction?.toLowerCase() === 'attack';
+  const rowKey = alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${alert.src_port || ''}-${alert.dest_port || ''}`;
+  
+  return (
+    <tr key={rowKey} className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
+      <td>
+        <div className="cell-time">
+          <Clock size={12} /> {formatTimestamp(alert.timestamp)}
+        </div>
+      </td>
+      <td className="mono">{alert.src_ip}</td>
+      <td className="mono">{alert.dest_ip}</td>
+      <td className="sig-text">{alert.alert_sig}</td>
+      <td>
+        <span className={`badge ${isAttack ? 'badge-danger' : 'badge-primary'}`}>
+          {alert.prediction?.toUpperCase()}
+        </span>
+      </td>
+      <td>
+        <div className="mono" style={{ color: isAttack ? 'var(--danger)' : 'var(--primary)' }}>
+          {alert.confidence}%
+        </div>
+      </td>
+    </tr>
+  );
+});
+
 const AlertsTable = ({ alerts, filter, onFilterChange }) => {
   const filteredAlerts = useMemo(() => {
     let list = [...alerts].reverse();
@@ -85,34 +113,9 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
             {filteredAlerts.length === 0 ? (
               <tr><td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '3rem' }}>Waiting for network events...</td></tr>
             ) : (
-              filteredAlerts.map((alert) => {
-                const isAttack = alert.prediction?.toLowerCase() === 'attack';
-                // Robust unique key for real-time table updates
-                const rowKey = `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${alert.src_port || ''}-${alert.dest_port || ''}`;
-                
-                return (
-                  <tr key={rowKey} className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
-                    <td>
-                      <div className="cell-time">
-                        <Clock size={12} /> {formatTimestamp(alert.timestamp)}
-                      </div>
-                    </td>
-                    <td className="mono">{alert.src_ip}</td>
-                    <td className="mono">{alert.dest_ip}</td>
-                    <td className="sig-text">{alert.alert_sig}</td>
-                    <td>
-                      <span className={`badge ${isAttack ? 'badge-danger' : 'badge-primary'}`}>
-                        {alert.prediction?.toUpperCase()}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="mono" style={{ color: isAttack ? 'var(--danger)' : 'var(--primary)' }}>
-                        {alert.confidence}%
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
+              filteredAlerts.map((alert) => (
+                <AlertRow key={alert.event_id || alert.id || alert.timestamp} alert={alert} />
+              ))
             )}
           </tbody>
         </table>
@@ -207,6 +210,7 @@ const AttackLab = ({ alerts }) => {
 function App() {
   const [data, setData] = useState({
     alerts: [],
+    chart_points: [],
     total_processed: 0,
     attack_total: 0,
     normal_total: 0,
@@ -239,13 +243,11 @@ function App() {
         let nextNormal = prev.normal_total;
 
         batch.forEach(alert => {
-          // Avoid duplicate log entries
-          const isDuplicate = nextAlerts.some(a =>
-            a.timestamp === alert.timestamp &&
-            a.src_ip === alert.src_ip &&
-            a.dest_ip === alert.dest_ip &&
-            a.src_port === alert.src_port &&
-            a.dest_port === alert.dest_port
+          // Avoid duplicate log entries using unique event_id or id
+          const isDuplicate = nextAlerts.some(a => 
+            (a.event_id && alert.event_id && a.event_id === alert.event_id) ||
+            (a.id && alert.id && a.id === alert.id) ||
+            (!a.event_id && !a.id && a.timestamp === alert.timestamp && a.src_ip === alert.src_ip && a.dest_ip === alert.dest_ip)
           );
           if (isDuplicate) return;
 
@@ -254,9 +256,16 @@ function App() {
           if (isAttack) nextAttacks++; else nextNormal++;
         });
 
+        const nextPoints = [...prev.chart_points, ...batch.map(a => ({
+          time: formatTimestamp(a.timestamp),
+          threat: a.prediction?.toLowerCase() === 'attack' ? a.confidence : 0,
+          safe: a.prediction?.toLowerCase() === 'normal' ? a.confidence : 0,
+        }))].slice(-100);
+
         return {
           ...prev,
           alerts: nextAlerts.slice(-100),
+          chart_points: nextPoints,
           total_processed: prev.total_processed + batch.length,
           attack_total: nextAttacks,
           normal_total: nextNormal,
@@ -349,12 +358,18 @@ function App() {
 
         setData(prev => {
           // Create a merged list of unique alerts
-          const existingIds = new Set(prev.alerts.map(a => `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
-          const newHistorical = json.alerts.filter(a => !existingIds.has(`${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
+          const existingIds = new Set(prev.alerts.map(a => a.event_id || a.id || `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
+          const newHistorical = json.alerts.filter(a => !existingIds.has(a.event_id || a.id || `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
 
+          const allAlerts = [...newHistorical, ...prev.alerts].slice(-100);
           return {
             ...json,
-            alerts: [...newHistorical, ...prev.alerts].slice(-100),
+            alerts: allAlerts,
+            chart_points: allAlerts.map(a => ({
+              time: formatTimestamp(a.timestamp),
+              threat: a.prediction?.toLowerCase() === 'attack' ? a.confidence : 0,
+              safe: a.prediction?.toLowerCase() === 'normal' ? a.confidence : 0,
+            })),
             total_processed: Math.max(json.total_processed, prev.total_processed),
             attack_total: Math.max(json.attack_total, prev.attack_total),
             normal_total: Math.max(json.normal_total, prev.normal_total)
@@ -367,13 +382,7 @@ function App() {
     seedData();
   }, []);
 
-  const chartData = useMemo(() => {
-    return data.alerts.map((alert, index) => ({
-      time: formatTimestamp(alert.timestamp),
-      threat: alert.prediction?.toLowerCase() === 'attack' ? alert.confidence : 0,
-      safe: alert.prediction?.toLowerCase() === 'normal' ? alert.confidence : 0,
-    }));
-  }, [data.alerts]);
+  const chartData = data.chart_points;
 
   return (
     <div className="dashboard-container">

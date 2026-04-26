@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import sys
+import logging
+from logging.handlers import RotatingFileHandler
 
 # --- BASE DIRECTORY RESOLUTION ---
 # This file is at src/common/config.py, so level 2 is project root
@@ -48,6 +50,36 @@ WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{WS_PORT}")
 
 # --- LOGGING ---
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING").upper()
+
+def setup_error_logging():
+    """Configure a centralized error log file for all components."""
+    error_log_path = LOG_DIR / "errors.log"
+    # Ensure directory exists before creating handler
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    
+    handler = RotatingFileHandler(
+        error_log_path, 
+        maxBytes=10*1024*1024, # 10MB
+        backupCount=3
+    )
+    handler.setLevel(logging.ERROR)
+    
+    # Custom formatter for error logs to make them stand out
+    formatter = logging.Formatter(
+        '[%(asctime)s] %(name)s [%(levelname)s] (%(filename)s:%(lineno)d): %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    
+    # Attach to root logger so all modules benefit
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    # Ensure root level is at least WARNING so ERRORs pass through
+    if root_logger.level > logging.WARNING:
+        root_logger.setLevel(logging.WARNING)
+
+# Initialize logging immediately on import
+setup_error_logging()
 
 # --- REDIS QUEUE & CACHING ---
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")

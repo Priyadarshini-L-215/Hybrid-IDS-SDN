@@ -35,7 +35,7 @@ The system utilizes a high-performance split-host architecture:
 
 1.  **Detection & Mitigation Sensor (WSL - Ubuntu)**: 
     *   **Suricata**: Signature-based packet inspection generating EVE JSON telemetry.
-    *   **Redis-Backed Pipeline**: A high-concurrency 4-worker pool that performs 57-feature extraction and Random Forest classification.
+    *   **Redis-Backed Pipeline**: A high-concurrency 4-worker pool that performs 77-feature extraction and Random Forest classification.
     *   **Stateful Flow Correlator**: Tracks connection patterns to detect DoS and stealthy reconnaissance.
     *   **Active IPS Module**: Interfaces with the system firewall to block malicious actors instantly.
 2.  **Telemetry & Management Layer (Windows)**:
