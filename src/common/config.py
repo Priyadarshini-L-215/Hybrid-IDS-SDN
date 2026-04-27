@@ -10,20 +10,12 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 # --- LOG PATHS ---
 LOG_DIR = BASE_DIR / "data" / "logs"
-if sys.platform == "linux":
-    EVE_LOG = Path("/var/log/suricata/eve.json")
-else:
-    EVE_LOG = LOG_DIR / "eve.json"
+EVE_LOG = Path("/var/log/suricata/eve.json")
 ML_ALERTS_LOG = LOG_DIR / "ml_alerts.json"
 HEARTBEAT_LOG = LOG_DIR / "consumer_heartbeat.txt"
 
 # --- DATABASE PATH ---
-if sys.platform == "linux":
-    # Use native Linux partition to avoid 9p mount latency (D: drive)
-    DB_PATH = Path(os.path.expanduser("~/.fyp_ids/alerts_fresh.db"))
-else:
-    # Windows fallback
-    DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
+DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
 
 # --- MODEL PATHS ---
 MODELS_DIR = BASE_DIR / "models"
@@ -42,44 +34,51 @@ POLL_INTERVAL_SEC = 0.1
 HEARTBEAT_INTERVAL_SEC = 10
 ALERT_CACHE_SIZE = 100
 
-# --- WEBSOCKET & DATA SERVICE ---
+# --- WEBSOCKET ---
 WS_HOST = os.environ.get("WS_HOST", "0.0.0.0")
-WS_PORT = int(os.environ.get("WS_PORT", "8765"))
-DATA_SERVICE_PORT = int(os.environ.get("DATA_SERVICE_PORT", "5001"))
+WS_PORT = int(os.environ.get("WS_PORT", "8777"))
 WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{WS_PORT}")
 
 # --- LOGGING ---
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "WARNING").upper()
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
-def setup_error_logging():
-    """Configure a centralized error log file for all components."""
+def setup_logging():
+    """Configure centralized logging for file and console."""
+    root_logger = logging.getLogger()
+    # Clear existing handlers to avoid duplicates
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        
+    root_logger.setLevel(getattr(logging, LOG_LEVEL))
+
+    # 1. Error File Handler (Rotating)
     error_log_path = LOG_DIR / "errors.log"
-    # Ensure directory exists before creating handler
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    
-    handler = RotatingFileHandler(
+    file_handler = RotatingFileHandler(
         error_log_path, 
         maxBytes=10*1024*1024, # 10MB
         backupCount=3
     )
-    handler.setLevel(logging.ERROR)
-    
-    # Custom formatter for error logs to make them stand out
-    formatter = logging.Formatter(
+    file_handler.setLevel(logging.ERROR)
+    file_formatter = logging.Formatter(
         '[%(asctime)s] %(name)s [%(levelname)s] (%(filename)s:%(lineno)d): %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    handler.setFormatter(formatter)
-    
-    # Attach to root logger so all modules benefit
-    root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
-    # Ensure root level is at least WARNING so ERRORs pass through
-    if root_logger.level > logging.WARNING:
-        root_logger.setLevel(logging.WARNING)
+    file_handler.setFormatter(file_formatter)
+    root_logger.addHandler(file_handler)
+
+    # 2. Console Handler (for redirection to consumer.log/relay.log)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, LOG_LEVEL))
+    console_formatter = logging.Formatter(
+        '[%(asctime)s] [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
 
 # Initialize logging immediately on import
-setup_error_logging()
+setup_logging()
 
 # --- REDIS QUEUE & CACHING ---
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
@@ -99,5 +98,5 @@ def ensure_dirs():
     """Ensure all required directories exist."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    # Ensure native Linux DB directory exists
+    # Ensure DB directory exists
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)

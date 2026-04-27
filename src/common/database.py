@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import logging
+import threading
 from common.config import DB_PATH
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class DatabaseHandler:
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON alerts(timestamp DESC)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_prediction ON alerts(prediction)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip ON alerts(src_ip)')
         self.conn.commit()
 
     def add_alert(self, alert_data):
@@ -113,7 +115,13 @@ class DatabaseHandler:
             ''', params)
             self.conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Failed to batch add alerts: {e}")
+            logger.error(f"Batch insert failed, falling back to individual inserts: {e}")
+            # Fallback: insert one-by-one to salvage as many as possible
+            for alert_data in alerts_data_list:
+                try:
+                    self.add_alert(alert_data)
+                except sqlite3.Error:
+                    pass  # Individual failures already logged by add_alert
 
     def query_alerts(self, limit=100, filter_type=None, offset=0):
         cursor = self.conn.cursor()
@@ -159,11 +167,14 @@ class DatabaseHandler:
 
 # --- Legacy Functional Interface (for compatibility) ---
 _default_handler = None
+_handler_lock = threading.Lock()
 
 def _get_handler():
     global _default_handler
     if _default_handler is None:
-        _default_handler = DatabaseHandler()
+        with _handler_lock:
+            if _default_handler is None:  # Double-checked locking
+                _default_handler = DatabaseHandler()
     return _default_handler
 
 def init_db(): _get_handler().init_db()

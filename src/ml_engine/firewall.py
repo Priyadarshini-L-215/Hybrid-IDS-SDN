@@ -7,7 +7,7 @@ import socket
 logger = logging.getLogger(__name__)
 
 class ActiveFirewall:
-    """Manages WSL-based IP blocking via iptables."""
+    """Manages IP blocking via iptables."""
     _blocked_ips = set()
     _lock = threading.Lock()
     _protected_ips = {"127.0.0.1", "::1", "172.25.16.1", "0.0.0.0"}
@@ -51,8 +51,8 @@ class ActiveFirewall:
         if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
             return True
 
-        # Never block private/local infrastructure ranges from the sensor itself.
-        # This avoids self-inflicted outages when bridge/host traffic is classified as attack.
+        # Never block private/local infrastructure ranges.
+        # This avoids self-inflicted outages when internal traffic is classified as attack.
         if parsed.is_private or parsed.is_link_local or parsed.is_reserved:
             return True
 

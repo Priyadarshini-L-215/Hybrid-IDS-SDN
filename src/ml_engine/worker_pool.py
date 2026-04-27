@@ -15,7 +15,8 @@ from ml_engine import redis_client
 from ml_engine.firewall import ActiveFirewall
 from common.config import REDIS_QUEUE_NAME, BATCH_SIZE, BATCH_FLUSH_INTERVAL
 from common.database import batch_add_alerts
-from common.wsl_utils import get_wsl_ip, get_gateway_ip
+from common.net_utils import get_local_ip, get_gateway_ip
+from common.alert_builder import build_alert_payload
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class WorkerPool:
         self.worker_count = worker_count
         self.ml_engine = ml_engine
         self.broadcast_func = broadcast_func
-        self.loop = loop or asyncio.get_event_loop()
+        self._loop = loop  # Resolved lazily if None
         
         self.batch_buffer = []
         self.batch_lock = asyncio.Lock()
@@ -53,11 +54,10 @@ class WorkerPool:
         self.PORT_SCAN_THRESHOLD = 25   
         self.DOS_FLOW_THRESHOLD = 100   
         
-        # Metrics
+        # Metrics (atomic via GIL — no lock needed for simple int increments)
         self.events_processed = 0
         self.events_flushed = 0
         self.errors = 0
-        self.metrics_lock = asyncio.Lock()
 
     def start(self):
         """Start async worker tasks and flusher."""
@@ -114,12 +114,9 @@ class WorkerPool:
                         except Exception as exc: # Fallback for unknown broadcast issues
                             logger.error(f"[{worker_name}] Broadcast unexpected error: {exc}")
 
-                    # 2. Add to batch buffer
                     async with self.batch_lock:
                         self.batch_buffer.append(processed)
-                        
-                        async with self.metrics_lock:
-                            self.events_processed += 1
+                        self.events_processed += 1
                         
                         # Threshold flush
                         if len(self.batch_buffer) >= 20: # Slightly larger threshold for async
@@ -127,12 +124,10 @@ class WorkerPool:
                 
             except (json.JSONDecodeError, KeyError, TypeError) as exc:
                 logger.error(f"[{worker_name}] Data format error: {exc}")
-                async with self.metrics_lock:
-                    self.errors += 1
+                self.errors += 1
             except Exception as exc:
                 logger.error(f"[{worker_name}] Runtime error: {exc}")
-                async with self.metrics_lock:
-                    self.errors += 1
+                self.errors += 1
                 await asyncio.sleep(0.1)
 
     async def _process_event(self, event, worker_name):
@@ -145,8 +140,8 @@ class WorkerPool:
             event_type = event.get("event_type")
             
             # --- Noise Filtering ---
-            CONTROL_PORTS = {3000, 3001, 5000, 5001, 6379, 8765, 8766}
-            local_ip = get_wsl_ip() or "127.0.0.1"
+            CONTROL_PORTS = {3000, 3001, 5000, 5001, 6379, 8765, 8766, 8777}
+            local_ip = get_local_ip() or "127.0.0.1"
             gateway_ip = get_gateway_ip() or "172.25.16.1"
             INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
             
@@ -173,6 +168,7 @@ class WorkerPool:
                     "confidence": 100.0,
                     "severity": alert_info.get("severity", 3),
                     "category": alert_info.get("category", "Diagnostic"),
+                    "id": event.get("_tracer_id"), # Use id for tracers if present
                     "_tracer": True,
                     "_tracer_id": event.get("_tracer_id"),
                     "_tracer_inject_ts": event.get("_tracer_inject_ts"),
@@ -185,8 +181,6 @@ class WorkerPool:
                 return alert
 
             # --- ML Engine Inference ---
-            # ml_engine prediction is still CPU bound/sync, so we run in executor if needed
-            # but usually it's fast enough for small batches.
             feature_vector = self.ml_engine.extract_features(event)
             if not feature_vector:
                 return None
@@ -194,45 +188,14 @@ class WorkerPool:
             prediction = self.ml_engine.predict(feature_vector)
             if prediction.get("classification") == "error":
                 prediction = {"classification": "normal", "confidence": 0.0, "layer": "error_fallback"}
-            
-            final_classification = prediction.get("classification")
-            final_confidence = float(prediction.get("confidence") or 0.0)
-            
-            if event.get("event_type") == "alert":
-                final_classification = "attack"
-                final_confidence = max(final_confidence, 90.0)
 
-            # --- Signature Enrichment ---
-            alert_info = event.get("alert", {})
-            sig = alert_info.get("signature")
-            if not sig:
-                etype = event.get("event_type", "flow")
-                if etype == "dns": sig = f"DNS Query: {event.get('dns', {}).get('rrname', 'unknown')}"
-                elif etype == "http": sig = f"HTTP {event.get('http', {}).get('http_method')} -> {event.get('http', {}).get('hostname', 'unknown')}"
-                else:
-                    proto = event.get("proto") or "TCP"
-                    port = event.get("dest_port", "")
-                    is_malicious = final_classification in {"attack", "zero-day anomaly"}
-                    if etype == "flow" and not is_malicious: return None
-                    sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
-
-            event_id = f"{event.get('timestamp')}-{event.get('flow_id', '0')}-{event_type}"
-            alert = {
-                "event_id": event_id,
-                "timestamp": event.get("timestamp"),
-                "src_ip": src_ip,
-                "dest_ip": dest_ip,
-                "src_port": src_port,
-                "dest_port": dest_port,
-                "event_type": event_type,
-                "alert_sig": sig,
-                "protocol": event.get("proto") or "unknown",
-                "prediction": final_classification,
-                "confidence": final_confidence,
-                "severity": alert_info.get("severity", 5),
-                "category": alert_info.get("category", "ML Detection"),
-                "raw_event": event
-            }
+            # --- Build alert using shared utility ---
+            alert = build_alert_payload(event, prediction)
+            
+            # Filter out benign flow events that the shared builder marked as normal flows
+            if event.get("event_type") == "flow" and alert["prediction"] == "normal":
+                if not alert["prediction"] in {"attack", "zero-day anomaly"}:
+                    return None
             
             # --- Stateful Flow Correlation ---
             if src_ip and src_ip not in INTERNAL_IPS:
@@ -288,11 +251,11 @@ class WorkerPool:
         batch = list(self.batch_buffer)
         self.batch_buffer.clear()
         
+        loop = asyncio.get_running_loop()
         try:
             # SQLite is blocking; run in executor
-            await self.loop.run_in_executor(None, batch_add_alerts, batch)
-            async with self.metrics_lock:
-                self.events_flushed += len(batch)
+            await loop.run_in_executor(None, batch_add_alerts, batch)
+            self.events_flushed += len(batch)
         except sqlite3.Error as exc:
             logger.error(f"[BatchFlusher] Database error: {exc}")
         except Exception as exc:

@@ -31,15 +31,15 @@ Unlike traditional IDS, Sentinel Core implements **Active Mitigation**—automat
 
 ## 🏗️ Architecture
 
-The system utilizes a high-performance split-host architecture:
+The system utilizes a high-performance native Linux architecture:
 
-1.  **Detection & Mitigation Sensor (WSL - Ubuntu)**: 
+1.  **Detection & Mitigation Sensor**: 
     *   **Suricata**: Signature-based packet inspection generating EVE JSON telemetry.
     *   **Redis-Backed Pipeline**: A high-concurrency 4-worker pool that performs 77-feature extraction and Random Forest classification.
     *   **Stateful Flow Correlator**: Tracks connection patterns to detect DoS and stealthy reconnaissance.
     *   **Active IPS Module**: Interfaces with the system firewall to block malicious actors instantly.
-2.  **Telemetry & Management Layer (Windows)**:
-    *   **Flask Relay**: An asynchronous bridge with auto-reconnect that pipes telemetry from Linux to browser clients.
+2.  **Telemetry & Management Layer**:
+    *   **Flask API**: An asynchronous bridge that pipes telemetry from the consumer to browser clients.
     *   **Security Dashboard**: A glassmorphic React interface for professional SOC monitoring.
 3.  **Data Layer**:
     *   **SQLite (Persistent)**: Optimized batch-write architecture using **WAL mode** for concurrent access.
@@ -60,23 +60,18 @@ The system utilizes a high-performance split-host architecture:
 
 ## 🚀 Fast Track (Recommended)
 
-To install everything and start the system for the first time, simply run the unified launcher from Windows:
+To install everything and start the system for the first time, simply run the unified setup and launcher:
 
-```cmd
-start.bat
-```
-
-For a full dependency recheck and refresh:
-
-```cmd
-start.bat --force-setup
+```bash
+chmod +x setup.sh start.sh
+./setup.sh
+./start.sh
 ```
 
 **What this does automatically:**
-1.  Detects and prepares your **WSL** (Linux) environment.
-2.  Installs **Suricata**, **Redis**, and ML dependencies.
-3.  Initializes the **Python venv** and **Node.js** UI.
-4.  Launches all components (Sensor, Backend, and Dashboard) in separate terminals.
+1.  Installs **Suricata**, **Redis**, and system dependencies via apt.
+2.  Initializes the **Python venv** and **Node.js** UI.
+3.  Launches all components (Sensor, Backend, and Dashboard) in the background.
 
 ---
 
@@ -86,20 +81,15 @@ start.bat --force-setup
 *   **`tests/`**: Consolidated validation suite.
 *   **`data/logs/`**: Centralized logging and heartbeats.
 
-### Custom Setup Scripts
-If you prefer to run setup steps manually:
-- `setup.bat`: Prepares the Windows backend and UI.
-- `setup_wsl.sh`: Run this inside WSL to prepare the Suricata sensor.
-
 ---
 
 ## 🛡️ Management
 
 | Action | Command |
 | :--- | :--- |
-| **Stop System** | `stop.bat` |
+| **Stop System** | `./stop.sh` |
 | **Run Tests** | `pytest tests/` |
-| **Health Check** | `wsl bash check_system_status.sh` |
+| **Health Check** | `./diag.sh` |
 | **Dashboard** | `http://localhost:3000` |
 
 ## 🏗️ Technical Deep Dive

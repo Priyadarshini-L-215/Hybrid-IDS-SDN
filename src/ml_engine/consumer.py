@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.feature_extractor import extract_features_from_eve, load_feature_names, validate_feature_vector
 from common.database import init_db, add_alert
-from common.wsl_utils import get_wsl_ip, get_gateway_ip
+from common.net_utils import get_local_ip, get_gateway_ip
 from common.config import (
     EVE_LOG, HEARTBEAT_LOG, 
     RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, FEATURES_PATH,
@@ -40,11 +40,11 @@ from common.config import (
     USE_REDIS_QUEUE, WORKER_COUNT, BATCH_SIZE, WATCHER_FLUSH_TIMEOUT,
     REDIS_QUEUE_NAME, REDIS_HOST, REDIS_PORT
 )
-from ml_engine.data_service import start_data_service
 from ml_engine.firewall import ActiveFirewall
 from ml_engine import redis_client as rc
 from ml_engine.file_watcher import AsyncFileWatcher
 from ml_engine.worker_pool import WorkerPool
+from common.alert_builder import build_alert_payload
 import collections
 
 # Initialize
@@ -179,16 +179,18 @@ async def _broadcast_worker():
             message = await _ws_queue.get()
             
             # Stamp tracer events with T4 (WS send time) only when enabled.
-            try:
-                parsed = json.loads(message)
-                if parsed.get("_tracer") and _TRACER_ENABLED:
-                    parsed["_ws_send_ts"] = time.time()
-                    logger.info(f"[TRACER] T4 WS broadcast at {parsed['_ws_send_ts']:.6f}")
-                elif not _TRACER_ENABLED:
-                    parsed = _sanitize_tracer_fields(parsed)
+            # Pre-filter with substring check to avoid JSON parsing on every message.
+            if '"_tracer"' in message:
+                try:
+                    parsed = json.loads(message)
+                    if parsed.get("_tracer") and _TRACER_ENABLED:
+                        parsed["_ws_send_ts"] = time.time()
+                        logger.info(f"[TRACER] T4 WS broadcast at {parsed['_ws_send_ts']:.6f}")
+                    elif not _TRACER_ENABLED:
+                        parsed = _sanitize_tracer_fields(parsed)
                     message = json.dumps(parsed)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
             
             with _ws_clients_lock:
                 clients = list(_ws_clients)
@@ -197,9 +199,8 @@ async def _broadcast_worker():
                 continue
             
             # Send to all clients
-            if clients:
-                tasks = [client.send(message) for client in clients]
-                await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [client.send(message) for client in clients]
+            await asyncio.gather(*tasks, return_exceptions=True)
             
             _ws_queue.task_done()
         except (OSError, RuntimeError, WebSocketException, asyncio.CancelledError) as exc:
@@ -215,10 +216,10 @@ class MLEngine:
         self.autoencoder = None
         self.autoencoder_enabled = os.environ.get("USE_AUTOENCODER", "1") == "1"
         if self.autoencoder_enabled and not TORCH_AVAILABLE:
-            logger.warning("PyTorch is not installed in WSL. Autoencoder layer disabled; running RF-only mode.")
+            logger.warning("PyTorch is not installed. Autoencoder layer disabled; running RF-only mode.")
             self.autoencoder_enabled = False
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if TORCH_AVAILABLE else None
-        self._mse_history = []
+        self._mse_history = collections.deque(maxlen=500)
         self._calibration_window = 500
         self._ae_dimension_warning_emitted = False
         self._feature_align_warning_emitted = False
@@ -424,8 +425,6 @@ class MLEngine:
                 }
 
             self._mse_history.append(mse)
-            if len(self._mse_history) > self._calibration_window:
-                self._mse_history = self._mse_history[-self._calibration_window:]
 
             return {
                 "classification": "normal",
@@ -510,7 +509,7 @@ async def redis_pipeline_main():
     worker_pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=_broadcast)
     
     # 1. Start WebSocket server and maintain pipeline within its context
-    bind_host = "0.0.0.0" # Bind to all interfaces for bridge accessibility
+    bind_host = "0.0.0.0"
     logger.info(f"[WS] Starting WebSocket server on {bind_host}:{WS_PORT}...")
     try:
         async with websockets.serve(_ws_handler, bind_host, WS_PORT, ping_interval=30, ping_timeout=15):
@@ -571,6 +570,12 @@ async def log_tailer():
 
     logger.info(f"Tailing {EVE_LOG} for events...")
     
+    # Cache local/gateway IPs (refreshed every 30s by net_utils TTL cache)
+    local_ip = get_local_ip() or "127.0.0.1"
+    gateway_ip = get_gateway_ip() or "172.25.16.1"
+    INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
+    _last_ip_refresh = time.time()
+    
     # Persistent file handle
     f = open(EVE_LOG, "r", encoding="utf-8")
     f.seek(0, os.SEEK_END)
@@ -615,56 +620,18 @@ async def log_tailer():
                 prediction = engine.predict(features)
                 if prediction["classification"] == "error": continue
 
-                # 3. DB Logging
-                alert_info = event.get("alert", {})
-                # Override ML if Suricata already knows it's an alert
-                final_classification = prediction.get("classification")
-                final_confidence = prediction.get("confidence")
-                
-                if event.get("event_type") == "alert":
-                    final_classification = "attack"
-                    final_confidence = max(final_confidence, 90.0)
-
-                # Dynamic Signature Enrichment
-                sig = alert_info.get("signature")
-                if not sig:
-                    etype = event.get("event_type", "flow")
-                    if etype == "dns":
-                        dns = event.get("dns", {})
-                        sig = f"DNS Query: {dns.get('rrname', 'unknown')}"
-                    elif etype == "http":
-                        http = event.get("http", {})
-                        sig = f"HTTP {http.get('http_method')} -> {http.get('hostname', 'unknown')}"
-                    elif etype == "ssh":
-                        sig = "SSH Connection Attempt"
-                    else:
-                        proto = event.get("proto", "TCP")
-                        port = event.get("dest_port", "")
-                        is_malicious = final_classification in {"attack", "zero-day anomaly"}
-                        sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
-
-                # Build db_payload OUTSIDE the if-not-sig block so it always exists
-                db_payload = {
-                    "timestamp": event.get("timestamp"),
-                    "event_type": event.get("event_type"),
-                    "src_ip": event.get("src_ip"),
-                    "src_port": event.get("src_port"),
-                    "dest_ip": event.get("dest_ip"),
-                    "dest_port": event.get("dest_port"),
-                    "protocol": event.get("proto"),
-                    "alert_sig": sig,
-                    "prediction": final_classification,
-                    "confidence": final_confidence,
-                    "severity": alert_info.get("severity", 4),
-                    "category": alert_info.get("category", "ML Detection"),
-                    "raw_event": event
-                }
+                # Build alert payload using shared utility
+                db_payload = build_alert_payload(event, prediction)
 
                 # --- 3a. Stateful Flow Correlation ---
                 src_ip = db_payload['src_ip']
-                local_ip = get_wsl_ip() or "127.0.0.1"
-                gateway_ip = get_gateway_ip() or "172.25.16.1"
-                INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
+                now_ts = time.time()
+                # Refresh cached IPs every 60 seconds
+                if now_ts - _last_ip_refresh > 60:
+                    local_ip = get_local_ip() or "127.0.0.1"
+                    gateway_ip = get_gateway_ip() or "172.25.16.1"
+                    INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
+                    _last_ip_refresh = now_ts
                 
                 if src_ip and src_ip not in INTERNAL_IPS:
                     flow_history[src_ip].append(now)
@@ -683,23 +650,22 @@ async def log_tailer():
                     # Detection Rules
                     detected_scan = False
                     if src_ip in port_history and len(port_history[src_ip]) > 25:
-                        final_classification = "attack"
-                        final_confidence = 99.0
+                        db_payload['prediction'] = "attack"
+                        db_payload['confidence'] = 99.0
                         db_payload['alert_sig'] = f"Stateful Port Scan (Targeting {len(port_history[src_ip])} ports)"
                         db_payload['category'] = "Reconnaissance"
                         detected_scan = True
                         port_history[src_ip].clear() # Reset after detection
                     
                     if src_ip in flow_history and len(flow_history[src_ip]) > 100:
-                        final_classification = "attack"
-                        final_confidence = 98.0
+                        db_payload['prediction'] = "attack"
+                        db_payload['confidence'] = 98.0
                         db_payload['alert_sig'] = "Volumetric Flow Anomaly (DoS Pattern)"
                         db_payload['category'] = "Resource Exhaustion"
                         detected_scan = True
-                    
-                    if detected_scan:
-                        db_payload['prediction'] = final_classification
-                        db_payload['confidence'] = final_confidence
+
+                final_classification = db_payload['prediction']
+                final_confidence = db_payload['confidence']
 
                 # --- 3b. Active IPS (Firewall) ---
                 if final_classification in {"attack", "zero-day anomaly"} and final_confidence >= 95.0:
@@ -711,7 +677,7 @@ async def log_tailer():
                 # 4. WebSocket Broadcast
                 await _broadcast(json.dumps(db_payload))
                 
-                logger.info(f"[{final_classification.upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({final_confidence}%)")  # use final_ not original prediction
+                logger.info(f"[{final_classification.upper()}] {db_payload['src_ip']} -> {db_payload['dest_ip']} ({final_confidence}%)")
 
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as exc:
                 logger.error(f"Processing error: {exc}")
@@ -769,8 +735,7 @@ async def main():
     else:
         logger.info("[Main] Using legacy polling pipeline")
     
-    # Start the native bridge data service for Windows bypass
-    start_data_service()
+
     
     try:
         # Choose pipeline based on config

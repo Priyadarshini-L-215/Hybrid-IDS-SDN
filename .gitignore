@@ -1,18 +1,12 @@
-# Environments
-.env
-.venv
-.venv_wsl/
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+env/
+venv/
+.venv/
 build/
 develop-eggs/
 dist/
@@ -29,44 +23,50 @@ wheels/
 .installed.cfg
 *.egg
 
-# Node.js / React (ui)
-ui/node_modules/
+# --- Node.js / UI ---
 node_modules/
-npm-debug.log
-yarn-debug.log
-yarn-error.log
+ui/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 ui/build/
 ui/dist/
 .pnp
 .pnp.js
 
-# Data & Logs (Suricata & ML Engine)
-data/alerts.db
-data/logs/*.json
+# --- Machine Learning Models ---
+# We ignore binary models by default. Use LFS if tracking is required.
+models/*.pkl
+models/*.joblib
+models/*.pth
+models/*.h5
+models/*.onnx
+
+# --- Data & Runtime Logs ---
+# Ignore all dynamic data and logs
+data/*.db
+data/*.sqlite
+data/*.sqlite3
 data/logs/*.log
+data/logs/*.json
 data/logs/*.txt
-data/logs/eve.json
-data/logs/ml_alerts.json
+*.log
 
-# Machine Learning Artifacts (Uncomment if models shouldn't be tracked)
-# models/*.pkl
-# models/*.h5
-# models/*.joblib
-
-# IDE & OS
+# --- IDE & System ---
 .vscode/
 .idea/
 *.swp
 *.swo
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Documentation
-# Ignore documentation except specific files
-*.md
-!README.md
-!SYSTEM_ARCHITECTURE.md
-!STARTUP_GUIDE.md
-!TROUBLESHOOTING_INDEX.md
-!WEBSOCKET_TROUBLESHOOTING.md
+# --- Environment Variables ---
+.env
+.env.local
+.env.*.local
 
+# --- Documentation ---
+# Keep documentation, ignore backup files
+*.md.bak
+*.tmp

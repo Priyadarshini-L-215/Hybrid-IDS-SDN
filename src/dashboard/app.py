@@ -21,6 +21,8 @@ CURRENT_DIR = Path(__file__).resolve().parent
 SRC_DIR = CURRENT_DIR.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 try:
     from integration import tail_ml_alerts, get_consumer_heartbeat
@@ -28,7 +30,6 @@ try:
         EVE_LOG, ML_ALERTS_LOG, WS_URI, WS_PORT,
         ALERT_CACHE_SIZE, ensure_dirs, LOG_LEVEL
     )
-    from common.wsl_utils import get_wsl_ip as resolve_wsl_ip
     from nmap_runner import run_nmap, analyse_with_gemini, SCAN_PROFILES, get_nmap_status
     ensure_dirs()
 except ImportError as e:
@@ -55,13 +56,13 @@ _browser_clients = set()
 _browser_lock = threading.Lock()
 
 # Relay status for diagnostics
+_relay_status_lock = threading.Lock()
 _relay_status = {
     "state": "starting",          # starting | connected | retrying | failed
     "current_uri": WS_URI,
     "consecutive_failures": 0,
     "last_error": None,
     "last_connected_at": None,
-    "wsl_ip": None,
     "messages_relayed": 0,
 }
 
@@ -69,99 +70,68 @@ _relay_status = {
 _relay_reconnect_event = threading.Event()
 
 
-def _build_relay_candidates(seed_uri: str):
-    """Build ordered relay candidates from configured URI and current WSL IP."""
-    candidates = []
-
-    def _add(uri):
-        if uri and uri not in candidates:
-            candidates.append(uri)
-
-    # Fallback to WSL IP if 127.0.0.1 fails
-    wsl_ip = _get_wsl_ip()
-    if wsl_ip:
-        _add(f"ws://{wsl_ip}:{WS_PORT}")
-
-    _add(seed_uri)
-    _add(f"ws://127.0.0.1:{WS_PORT}")
-
-    return candidates
-
-def _get_wsl_ip():
-    """Resolve WSL2 IP address by querying `wsl hostname -I`."""
-    try:
-        ip = resolve_wsl_ip()
-        _relay_status["wsl_ip"] = ip
-        return ip
-    except (OSError, RuntimeError, ValueError) as exc:
-        logger.warning(f"[Relay] Could not resolve WSL IP: {exc}")
-        _relay_status["wsl_ip"] = None
-        return None
-
 def _relay_worker():
-    """Relays messages from WSL consumer to browser clients."""
+    """Relays messages from consumer WebSocket to browser clients."""
     async def _relay():
         global _browser_clients
         
-        relay_candidates = _build_relay_candidates(WS_URI)
-        candidate_idx = 0
-        current_uri = relay_candidates[candidate_idx]
-        logger.info(f"[Relay] Targeting {current_uri} (candidates: {relay_candidates})")
+        target_uri = f"ws://127.0.0.1:{WS_PORT}"
+        logger.info(f"[Relay] Targeting {target_uri}")
         
-        _relay_status["current_uri"] = current_uri
-        _relay_status["state"] = "starting"
+        with _relay_status_lock:
+            _relay_status["current_uri"] = target_uri
+            _relay_status["state"] = "starting"
         
-        RETRY_INTERVAL = 3.0   # seconds between attempts
-        WSL_RECHECK_EVERY = 5  # re-resolve WSL IP every N failures
+        RETRY_INTERVAL = 3.0
         consecutive_failures = 0
         
         while True:
             try:
-                logger.info(f"[Relay] Connecting → {current_uri} (attempt {consecutive_failures + 1})")
-                _relay_status["state"] = "retrying"
+                logger.info(f"[Relay] Connecting → {target_uri} (attempt {consecutive_failures + 1})")
                 
+                # Fix: Some environments add 'Connection: keep-alive' which breaks strict WS handshakes
+                # We force 'Connection: Upgrade' to ensure compatibility.
                 async with ws_client.connect(
-                    current_uri,
-                    open_timeout=30,  # Increased from 15 to 30 to handle WSL handshake lag
+                    target_uri,
+                    open_timeout=15,
                     ping_interval=20,
                     ping_timeout=20,
-                    close_timeout=10
+                    close_timeout=10,
+                    extra_headers={"Connection": "Upgrade"}
                 ) as ws:
-                    logger.info(f"[Relay] ✓ Pipeline active: {current_uri}")
+                    logger.info(f"[Relay] ✓ Pipeline active: {target_uri}")
                     consecutive_failures = 0
-                    _relay_status.update({
-                        "state": "connected",
-                        "consecutive_failures": 0,
-                        "last_error": None,
-                        "last_connected_at": time.strftime("%H:%M:%S"),
-                        "current_uri": current_uri,
-                    })
+                    with _relay_status_lock:
+                        _relay_status.update({
+                            "state": "connected",
+                            "consecutive_failures": 0,
+                            "last_error": None,
+                            "last_connected_at": time.strftime("%H:%M:%S"),
+                            "current_uri": target_uri,
+                        })
                     
                     async for message in ws:
-                        relay_recv_ts = time.time()  # T5a: relay received from WSL
+                        relay_recv_ts = time.time()
                         
-                        # Stamp tracer events with T5 (relay timestamps)
+                        # Stamp tracer events with relay timestamps
                         try:
                             parsed = json.loads(message)
                             if parsed.get("_tracer"):
                                 parsed["_relay_recv_ts"] = relay_recv_ts
-                                parsed["_relay_fwd_ts"] = time.time()  # T5b: about to forward
+                                parsed["_relay_fwd_ts"] = time.time()
                                 message = json.dumps(parsed)
                                 logger.info(f"[TRACER] T5 Relay recv at {relay_recv_ts:.6f}")
                         except (json.JSONDecodeError, TypeError, ValueError):
                             pass
                         
-                        _relay_status["messages_relayed"] += 1
+                        with _relay_status_lock:
+                            _relay_status["messages_relayed"] += 1
                         # --- Fan-out broadcast to all browser clients ---
                         with _browser_lock:
                             if _browser_clients:
                                 dead = set()
                                 for client in list(_browser_clients):
                                     try:
-                                        # Non-blocking send logic:
-                                        # flask_sock doesn't expose a timeout on send easily,
-                                        # but we can check if the socket is writable or use a try-block.
-                                        # For now, we keep it simple but handle the case where the client is gone.
                                         client.send(message)
                                     except (OSError, RuntimeError, TimeoutError) as send_err:
                                         logger.debug(f"[Relay] Send failed (dead client): {send_err}")
@@ -180,48 +150,26 @@ def _relay_worker():
                     ws_client.exceptions.WebSocketException) as e:
                 consecutive_failures += 1
                 err_msg = f"{type(e).__name__}: {e}"
-                _relay_status.update({
-                    "state": "retrying",
-                    "consecutive_failures": consecutive_failures,
-                    "last_error": err_msg,
-                    "current_uri": current_uri,
-                })
+                with _relay_status_lock:
+                    _relay_status.update({
+                        "state": "retrying",
+                        "consecutive_failures": consecutive_failures,
+                        "last_error": err_msg,
+                        "current_uri": target_uri,
+                    })
                 
                 hint = ""
                 if isinstance(e, ConnectionRefusedError):
-                    hint = " [consumer not running or WSL restarted]"
+                    hint = " [consumer not running]"
                 elif isinstance(e, asyncio.TimeoutError):
-                    hint = " [WSL firewall/port not exposed — check consumer started]"
+                    hint = " [consumer may still be initializing]"
                 
                 logger.warning(
-                    f"[Relay] ✗ {current_uri} unreachable — {type(e).__name__}{hint} "
+                    f"[Relay] ✗ {target_uri} unreachable — {type(e).__name__}{hint} "
                     f"(attempt {consecutive_failures}). Retry in {RETRY_INTERVAL}s..."
                 )
-
-                # Try the next candidate first for fast recovery on mixed WSL networking setups.
-                if len(relay_candidates) > 1:
-                    candidate_idx = (candidate_idx + 1) % len(relay_candidates)
-                    next_uri = relay_candidates[candidate_idx]
-                    if next_uri != current_uri:
-                        current_uri = next_uri
-                        _relay_status["current_uri"] = current_uri
-                        logger.info(f"[Relay] Switching target → {current_uri}")
                 
-                # Re-resolve WSL IP periodically — WSL IP can change after restart
-                if consecutive_failures % WSL_RECHECK_EVERY == 0:
-                    new_ip = _get_wsl_ip()
-                    if new_ip:
-                        candidate = f"ws://{new_ip}:{WS_PORT}"
-                        if candidate not in relay_candidates:
-                            relay_candidates.append(candidate)
-                            logger.info(f"[Relay] Added new WSL relay candidate → {candidate}")
-                    else:
-                        logger.error(
-                            "[Relay] ✗ WSL IP could not be resolved. "
-                            "Is WSL running? Run: wsl hostname -I"
-                        )
-                
-                # Interruptible sleep: check _relay_reconnect_event in 1s ticks
+                # Interruptible sleep with exponential backoff
                 sleep_time = min(RETRY_INTERVAL * (2 ** (consecutive_failures // 3)), 30.0)
                 _relay_reconnect_event.clear()
                 deadline = time.time() + sleep_time
@@ -234,13 +182,13 @@ def _relay_worker():
             except (OSError, RuntimeError, ValueError, TypeError, ws_client.exceptions.WebSocketException) as e:
                 consecutive_failures += 1
                 err_msg = f"{type(e).__name__}: {e}"
-                _relay_status.update({
-                    "state": "retrying",
-                    "consecutive_failures": consecutive_failures,
-                    "last_error": err_msg,
-                })
+                with _relay_status_lock:
+                    _relay_status.update({
+                        "state": "retrying",
+                        "consecutive_failures": consecutive_failures,
+                        "last_error": err_msg,
+                    })
                 logger.error(f"[Relay] ✗ Unexpected error: {err_msg}. Reconnecting in {RETRY_INTERVAL}s...")
-                # Interruptible sleep
                 sleep_time = min(RETRY_INTERVAL * (2 ** (consecutive_failures // 3)), 30.0)
                 _relay_reconnect_event.clear()
                 deadline = time.time() + sleep_time
@@ -252,11 +200,12 @@ def _relay_worker():
     try:
         asyncio.run(_relay())
     except Exception as fatal:
-        # Top-level crash guard: keep the relay thread from dying silently.
         _relay_status["state"] = "failed"
         logger.critical(f"[Relay] Fatal worker crash: {fatal}")
 
-threading.Thread(target=_relay_worker, daemon=True, name="WS-Relay-Thread").start()
+# Start relay thread only when not testing
+if not app.testing:
+    threading.Thread(target=_relay_worker, daemon=True, name="WS-Relay-Thread").start()
 
 @sock.route("/ws/alerts")
 def ws_alerts(ws):
@@ -265,31 +214,23 @@ def ws_alerts(ws):
         _browser_clients.add(ws)
     try:
         while True:
-            # Keep the socket alive on idle clients. Some ws implementations raise
-            # TimeoutError for silent periods; treat that as a heartbeat tick.
             try:
                 message = ws.receive(timeout=30)
             except TypeError:
-                # Compatibility path for ws objects that don't accept timeout kwarg.
                 message = ws.receive()
             except TimeoutError:
                 continue
 
-            # None indicates client-initiated close.
             if message is None:
                 break
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         logger.debug(f"[WS] Browser socket closed: {exc}")
     except Exception as exc:
-        # Guard against framework-specific websocket close exceptions.
         logger.debug(f"[WS] Browser socket terminated: {exc}")
         pass
     finally:
         with _browser_lock:
             _browser_clients.discard(ws)
-
-# DEPRECATED: background_refresh removed in favor of Initial Seed + WebSocket Stream
-# This reduces DB load and prevents state clobbering in the UI
 
 # ===== API ROUTES =====
 
@@ -297,7 +238,6 @@ def ws_alerts(ws):
 def api_alerts():
     """Returns the latest alerts for initial dashboard seeding."""
     try:
-        # Fetch fresh data directly from integration layer
         alerts, total, displayed, attacks, normal = tail_ml_alerts(ALERT_CACHE_SIZE)
         return jsonify({
             "alerts": alerts,
@@ -315,7 +255,6 @@ def api_alerts():
 def api_stats():
     """Returns real-time aggregator statistics."""
     try:
-        # Fetch directly from DB integration
         _, total, displayed, attacks, normal = tail_ml_alerts(ALERT_CACHE_SIZE)
         return jsonify({
             "processed_total": total,
@@ -338,62 +277,49 @@ def api_health():
 
 @app.route("/api/pipeline/status", methods=["GET"])
 def api_pipeline_status():
-    """Live diagnostic endpoint — shows exactly what the relay is doing and why it may be failing."""
+    """Live diagnostic endpoint — shows relay state and pipeline health."""
     import subprocess
     
-    # Check WSL is up
-    wsl_running = False
-    wsl_ip = None
-    try:
-        out = subprocess.check_output(["wsl", "hostname", "-I"], text=True, timeout=3).strip()
-        wsl_ip = out.split()[0] if out.strip() else None
-        wsl_running = bool(wsl_ip)
-    except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError, ValueError, TypeError) as e:
-        wsl_ip = None
-        wsl_running = False
-    
-    # Check consumer process in WSL
+    # Check consumer process
     consumer_running = False
     try:
         r = subprocess.run(
-            ["wsl", "pgrep", "-f", "consumer.py"],
+            ["pgrep", "-f", "consumer.py"],
             capture_output=True, text=True, timeout=4
         )
         consumer_running = r.returncode == 0
     except (OSError, subprocess.SubprocessError):
         pass
     
-    # Check Redis in WSL
+    # Check Redis
     redis_ok = False
     try:
         r = subprocess.run(
-            ["wsl", "redis-cli", "ping"],
+            ["redis-cli", "ping"],
             capture_output=True, text=True, timeout=4
         )
         redis_ok = r.stdout.strip() == "PONG"
     except (OSError, subprocess.SubprocessError):
         pass
     
-    # Try to reach the WS port from Windows (TCP connect test)
+    # Try to reach the WS port (TCP connect test)
     ws_port_open = False
-    test_host = wsl_ip or "127.0.0.1"
     try:
         import socket as _socket
         s = _socket.socket()
         s.settimeout(2)
-        s.connect((test_host, WS_PORT))
+        s.connect(("127.0.0.1", WS_PORT))
         s.close()
         ws_port_open = True
     except (OSError, socket.error):
         pass
     
-    # Get tail of consumer log from WSL
+    # Get tail of consumer log
     consumer_log_tail = []
     try:
         r = subprocess.run(
-            ["wsl", "tail", "-n", "30", "data/logs/consumer.log"],
+            ["tail", "-n", "30", "data/logs/consumer.log"],
             capture_output=True, text=True, timeout=5,
-            cwd=None  # wsl resolves paths relative to Windows CWD
         )
         consumer_log_tail = r.stdout.strip().splitlines() if r.returncode == 0 else [r.stderr.strip()]
     except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError) as e:
@@ -401,30 +327,27 @@ def api_pipeline_status():
     
     # Build diagnosis
     issues = []
-    if not wsl_running:
-        issues.append("WSL is not running. Run: wsl in a terminal to start it.")
-    if wsl_running and not consumer_running:
-        issues.append("ML consumer (consumer.py) is NOT running inside WSL. Run start.bat or: wsl -u root bash start_ids.sh")
-    if wsl_running and not redis_ok:
-        issues.append("Redis is not responding inside WSL. Run: wsl -u root redis-server --daemonize yes")
-    if wsl_running and consumer_running and not ws_port_open:
-        issues.append(f"WebSocket port {WS_PORT} is not reachable on {test_host}. The consumer may still be initializing — wait 5-10s.")
+    if not consumer_running:
+        issues.append("ML consumer (consumer.py) is NOT running. Run ./start.sh")
+    if not redis_ok:
+        issues.append("Redis is not responding. Run: sudo service redis-server start")
+    if consumer_running and not ws_port_open:
+        issues.append(f"WebSocket port {WS_PORT} is not reachable. The consumer may still be initializing — wait 5-10s.")
     if not issues:
         issues.append("All checks passed — pipeline appears healthy.")
     
+    with _relay_status_lock:
+        relay_snapshot = dict(_relay_status)
     with _browser_lock:
         browser_client_count = len(_browser_clients)
     
     return jsonify({
-        "relay": _relay_status,
+        "relay": relay_snapshot,
         "checks": {
-            "wsl_running": wsl_running,
-            "wsl_ip": wsl_ip,
             "consumer_running": consumer_running,
             "redis_ok": redis_ok,
             "ws_port_open": ws_port_open,
             "ws_port": WS_PORT,
-            "ws_test_host": test_host,
             "browser_clients_connected": browser_client_count,
         },
         "diagnosis": issues,
@@ -434,7 +357,6 @@ def api_pipeline_status():
 
 @app.route("/api/alerts/clear", methods=["POST"])
 def api_alerts_clear():
-    # In a real environment, you'd add _guard_sensitive_api() here
     return jsonify({"success": True}), 200
 
 @app.route("/api/nmap/check", methods=["GET"])
@@ -455,9 +377,10 @@ def api_nmap_scan():
 def api_relay_reconnect():
     """Immediately interrupt relay backoff sleep and trigger a reconnect attempt."""
     logger.info("[Relay] Manual reconnection requested via API.")
-    _relay_status["consecutive_failures"] = 0
-    _relay_status["state"] = "retrying"
-    _relay_reconnect_event.set()  # Interrupt asyncio.sleep in the relay loop
+    with _relay_status_lock:
+        _relay_status["consecutive_failures"] = 0
+        _relay_status["state"] = "retrying"
+    _relay_reconnect_event.set()
     return jsonify({"success": True, "message": "Reconnect signal sent — relay will retry immediately"}), 200
 
 @app.route("/api/nmap/analyse", methods=["POST"])

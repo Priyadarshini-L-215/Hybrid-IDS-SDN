@@ -52,7 +52,7 @@ const AlertRow = React.memo(({ alert }) => {
   const rowKey = alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${alert.src_port || ''}-${alert.dest_port || ''}`;
   
   return (
-    <tr key={rowKey} className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
+    <tr className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
       <td>
         <div className="cell-time">
           <Clock size={12} /> {formatTimestamp(alert.timestamp)}
@@ -221,6 +221,7 @@ function App() {
   const [connectionState, setConnectionState] = useState('connecting');
   const wsRef = useRef(null);
   const pendingAlertsRef = useRef([]); // Batching queue for high-frequency events
+  const eventIdSetRef = useRef(new Set()); // O(1) duplicate detection
 
   // Data Pipeline: WebSocket logic
   useEffect(() => {
@@ -243,13 +244,10 @@ function App() {
         let nextNormal = prev.normal_total;
 
         batch.forEach(alert => {
-          // Avoid duplicate log entries using unique event_id or id
-          const isDuplicate = nextAlerts.some(a => 
-            (a.event_id && alert.event_id && a.event_id === alert.event_id) ||
-            (a.id && alert.id && a.id === alert.id) ||
-            (!a.event_id && !a.id && a.timestamp === alert.timestamp && a.src_ip === alert.src_ip && a.dest_ip === alert.dest_ip)
-          );
-          if (isDuplicate) return;
+          // O(1) duplicate detection via Set
+          const alertKey = alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}`;
+          if (eventIdSetRef.current.has(alertKey)) return;
+          eventIdSetRef.current.add(alertKey);
 
           const isAttack = alert.prediction?.toLowerCase() === 'attack';
           nextAlerts.push(alert);
@@ -276,7 +274,9 @@ function App() {
 
     const getWebSocketUrl = () => {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      return `${proto}//${window.location.host}/ws/alerts`;
+      // In dev mode (Vite), the WS proxy may not be configured — fall back to Flask directly
+      const host = window.location.port === '3000' ? 'localhost:5000' : window.location.host;
+      return `${proto}//${host}/ws/alerts`;
     };
 
     const connectWS = () => {

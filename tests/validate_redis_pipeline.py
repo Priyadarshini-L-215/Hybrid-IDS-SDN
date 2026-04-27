@@ -2,7 +2,6 @@
 """
 Sentinel Core – Redis Pipeline Validation Report
 Tests all components of the Redis optimization.
-Runs on Windows during startup; gracefully skips WSL-only dependencies.
 """
 import sys
 sys.path.insert(0, 'src')
@@ -13,7 +12,7 @@ from common.config import (
     EVE_LOG, WS_PORT
 )
 
-# Conditional imports — these depend on 'redis' which only exists in WSL
+# Conditional imports — gracefully skip if not installed
 _redis_available = False
 try:
     from ml_engine.redis_client import test_redis, get_redis_info, get_queue_depth
@@ -45,9 +44,8 @@ def print_section(title):
 def test_redis_connection():
     print_section("1. Redis Connection Test")
     if not _redis_available:
-        print("  [SKIP] Redis Python client not installed on this host (expected on Windows)")
-        print("  [INFO] Redis tests run inside WSL during consumer startup")
-        return True  # Not a failure — just not applicable here
+        print("  [SKIP] Redis Python client not installed")
+        return True  # Not a failure — just not applicable
     if test_redis():
         info = get_redis_info()
         print(f"  [OK] Connection: OK (Redis {info.get('version')})")
