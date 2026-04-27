@@ -185,13 +185,12 @@ class WorkerPool:
                 return alert
 
             # --- ML Engine Inference ---
-            # ml_engine prediction is still CPU bound/sync, so we run in executor if needed
-            # but usually it's fast enough for small batches.
-            feature_vector = self.ml_engine.extract_features(event)
+            # Offload CPU-bound ML extraction and prediction to threads to avoid stalling the event loop
+            feature_vector = await asyncio.to_thread(self.ml_engine.extract_features, event)
             if not feature_vector:
                 return None
             
-            prediction = self.ml_engine.predict(feature_vector)
+            prediction = await asyncio.to_thread(self.ml_engine.predict, feature_vector)
             if prediction.get("classification") == "error":
                 prediction = {"classification": "normal", "confidence": 0.0, "layer": "error_fallback"}
             
@@ -261,7 +260,8 @@ class WorkerPool:
 
             # --- IPS Actions ---
             if alert["prediction"] in {"attack", "zero-day anomaly"} and alert["confidence"] >= 95.0:
-                ActiveFirewall.block(alert["src_ip"])
+                # Offload blocking firewall call to thread to avoid stalling the loop
+                await asyncio.to_thread(ActiveFirewall.block, alert["src_ip"])
                 alert["category"] = f"IPS Blocked - {alert['category']}"
             
             return alert

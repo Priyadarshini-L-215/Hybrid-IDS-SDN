@@ -53,10 +53,10 @@ class RuleBasedRF:
 class ThresholdAutoencoder(nn.Module):
     """Identity-like reconstruction with intentional failure for noisy vectors."""
 
-    def __init__(self, noise_trigger=500000.0):
+    def __init__(self, input_dim=77, noise_trigger=500000.0):
         super().__init__()
         self.noise_trigger = noise_trigger
-        self.input_dim = 57
+        self.input_dim = input_dim
 
     def forward(self, x):
         high_noise = torch.max(torch.abs(x), dim=1, keepdim=True).values > self.noise_trigger
@@ -89,7 +89,7 @@ def main():
 
     engine.scaler = IdentityScaler()
     engine.rf_model = RuleBasedRF(flow_bytes_idx=flow_bytes_idx, flow_pkts_idx=flow_pkts_idx)
-    engine.autoencoder = ThresholdAutoencoder(noise_trigger=500000.0).to(engine.device)
+    engine.autoencoder = ThresholdAutoencoder(input_dim=len(engine.features), noise_trigger=500000.0).to(engine.device)
     engine.autoencoder_threshold = 100.0
     engine._mse_history = [10.0] * 50
 
