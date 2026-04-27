@@ -10,20 +10,12 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 # --- LOG PATHS ---
 LOG_DIR = BASE_DIR / "data" / "logs"
-if sys.platform == "linux":
-    EVE_LOG = Path("/var/log/suricata/eve.json")
-else:
-    EVE_LOG = LOG_DIR / "eve.json"
+EVE_LOG = Path("/var/log/suricata/eve.json")
 ML_ALERTS_LOG = LOG_DIR / "ml_alerts.json"
 HEARTBEAT_LOG = LOG_DIR / "consumer_heartbeat.txt"
 
 # --- DATABASE PATH ---
-if sys.platform == "linux":
-    # Use native Linux partition to avoid 9p mount latency (D: drive)
-    DB_PATH = Path(os.path.expanduser("~/.fyp_ids/alerts_fresh.db"))
-else:
-    # Windows fallback
-    DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
+DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
 
 # --- MODEL PATHS ---
 MODELS_DIR = BASE_DIR / "models"

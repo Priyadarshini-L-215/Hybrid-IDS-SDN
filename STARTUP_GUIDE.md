@@ -2,55 +2,50 @@
 
 ## 🛠️ Prerequisites
 
-Before starting, ensure you have the following installed on your **Windows** host:
-1. **WSL2 (Ubuntu 22.04+)**: Required for the high-performance ML Sensor.
-2. **Python 3.12+**: Required for both Windows (Relay) and WSL (Engine).
-3. **Node.js 20+**: Required for the React SOC Dashboard.
-4. **Suricata**: Automated install provided, but requires administrative privileges.
+Before starting, ensure you have the following installed on your **Linux** system (or WSL Ubuntu):
+1. **Ubuntu 22.04+** (Recommended)
+2. **Python 3.12+**
+3. **Node.js 20+**
+4. **Sudo privileges** (Required for Suricata and iptables)
 
 ---
 
 ## 🚀 Installation Procedure
 
-### 1. Unified Setup (Recommended)
-The fastest way to install all dependencies across both Windows and WSL is the automated launcher:
-```powershell
-# Open PowerShell in the project root
-.\start.bat --force-setup
-```
-This script will:
-- Initialize the Windows virtual environment (`.venv`).
-- Install Windows Python dependencies from `requirements_win.txt`.
-- Provision WSL with Suricata, Redis, and PyTorch using `requirements_wsl.txt`.
-- Install Node.js packages for the dashboard.
+We provide an automated setup script that installs system packages, creates a Python virtual environment, and sets up the React UI.
 
-### 2. Manual Step-by-Step
-If you prefer granular control:
-
-**A. Windows Backend & UI**
-```powershell
-.\setup.bat
-```
-
-**B. WSL Sensor (Linux)**
 ```bash
-# Inside WSL
-chmod +x setup_wsl.sh
-./setup_wsl.sh
+# Clone the repository and navigate into it
+# Make sure setup.sh is executable
+chmod +x setup.sh
+
+# Run the unified setup
+./setup.sh
 ```
+
+This script will:
+- Install Suricata, Redis, nmap, and nftables via `apt`.
+- Install Node.js if not present.
+- Create `.venv` and install all Python dependencies from `requirements.txt`.
+- Run `npm install` in the `ui/` directory.
 
 ---
 
 ## 🚦 Starting the System
 
 To launch the full stack (Sensor, Relay, and Dashboard):
-```powershell
-.\start.bat
+
+```bash
+./start.sh
 ```
 
-### Startup Options
-- `--legacy`: Disables Redis and uses the low-latency direct polling pipeline (not recommended for production).
-- `--no-ui`: Starts the backend and sensor only (useful for headless servers).
+### Stopping the System
+
+To gracefully shut down all components:
+
+```bash
+./stop.sh
+```
 
 ---
 
@@ -60,8 +55,8 @@ To launch the full stack (Sensor, Relay, and Dashboard):
 |---------|--------------|-------------|
 | **SOC Dashboard** | `http://localhost:3000` | Real-time threat visualization |
 | **Pipeline Health** | `http://localhost:5000/api/pipeline/status` | Real-time diagnostic JSON |
-| **ML Logs** | `wsl tail -f data/logs/consumer.log` | Raw inference results |
-| **Relay Logs** | `data/logs/relay.log` | Windows-to-WSL bridge logs |
+| **ML Logs** | `tail -f data/logs/consumer.log` | Raw inference results |
+| **Relay Logs** | `tail -f data/logs/relay.log` | Flask API logs |
 
 ---
 
@@ -69,7 +64,7 @@ To launch the full stack (Sensor, Relay, and Dashboard):
 
 The system is optimized for the following stack:
 
-### ML Pipeline (Engine - WSL)
+### ML Pipeline (Engine)
 - **PyTorch (Latest Stable)**: Dense Autoencoder for Zero-Day detection.
 - **Scikit-Learn 1.6.1**: Random Forest classification (77 features) & Scaling.
 - **Redis 5.0.8**: High-throughput event queueing.
@@ -84,19 +79,15 @@ The system is optimized for the following stack:
 
 ---
 
-## 🔍 Troubleshooting Installation
+## 🔍 Diagnostics
 
-### "ModuleNotFoundError: No module named 'torch' in WSL"
-The Autoencoder requires PyTorch in the Linux environment. Run:
+If the system isn't starting properly, use the diagnostic tool:
+
 ```bash
-wsl python3 -m pip install --break-system-packages torch
+./diag.sh
 ```
 
-### "WSL IP Resolution Failed"
-If `start.bat` cannot find your WSL IP, ensure the `vEthernet (WSL)` adapter is enabled in Windows Network Connections and that WSL is running.
-
-### "Suricata Permission Denied"
-Suricata requires access to your network interfaces. Ensure you have accepted the UAC prompt or run your terminal as Administrator.
+This will check all required processes, open ports, and the virtual environment.
 
 ---
 

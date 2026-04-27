@@ -68,40 +68,8 @@ def tail_ml_alerts(cache_size=ALERT_CACHE_SIZE):
     global _last_bridge_alerts, _last_bridge_stats
 
     try:
-        # Check platform - if Windows, we hit the WSL Data Service
-        if sys.platform == "win32":
-            try:
-                # 1. Fetch alerts from Bridge
-                db_alerts = _fetch_bridge_payload("/api/alerts", params={"limit": cache_size, "offset": 0})
-
-                # 2. Fetch stats from Bridge
-                stats = _fetch_bridge_payload("/api/stats")
-                _last_bridge_alerts = db_alerts
-                _last_bridge_stats = stats
-            except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError) as exc:
-                if _last_bridge_alerts is not None and _last_bridge_stats is not None:
-                    logger.warning(
-                        f"WSL Data Service unreachable ({exc}); using cached bridge snapshot to avoid stale fallback."
-                    )
-                    db_alerts = _last_bridge_alerts
-                    stats = _last_bridge_stats
-                elif os.environ.get("ALLOW_STALE_WINDOWS_DB_FALLBACK", "0") == "1":
-                    logger.warning(
-                        f"WSL Data Service unreachable ({exc}); using direct Windows DB fallback "
-                        f"(ALLOW_STALE_WINDOWS_DB_FALLBACK=1)."
-                    )
-                    db_alerts = query_alerts(limit=cache_size)
-                    stats = get_stats()
-                else:
-                    logger.warning(
-                        f"WSL Data Service unreachable ({exc}); returning empty seed instead of stale local data."
-                    )
-                    db_alerts = []
-                    stats = {"total_processed": 0, "attack_total": 0, "normal_total": 0}
-        else:
-            # Native Linux execution
-            db_alerts = query_alerts(limit=cache_size)
-            stats = get_stats()
+        db_alerts = query_alerts(limit=cache_size)
+        stats = get_stats()
         
         # Mapping for dashboard format
         alerts = []

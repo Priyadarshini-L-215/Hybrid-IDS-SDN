@@ -43,26 +43,12 @@ MAX_RUNTIME_SECONDS = 300   # 5 min
 #  Path Resolution                                                     #
 # ------------------------------------------------------------------ #
 def get_nmap_path() -> str:
-    """Find the nmap executable on Windows/Linux."""
-    # 1. Check if configured NMAP_BIN is already valid in PATH
+    """Find the nmap executable."""
     if shutil.which(NMAP_BIN):
         return NMAP_BIN
-    
-    # 2. Check common Windows installation paths
-    common_windows_paths = [
-        "nmap",
-        "nmap.exe",
-        r"C:\Program Files (x86)\Nmap\nmap.exe",
-        r"C:\Program Files\Nmap\nmap.exe",
-        # Check relative to AppData if installed for current user
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Nmap\nmap.exe")
-    ]
-    
-    for path in common_windows_paths:
-        if shutil.which(path) or os.path.exists(path):
-            return path
-            
-    return NMAP_BIN # Fallback to default
+    if os.path.exists("/usr/bin/nmap"):
+        return "/usr/bin/nmap"
+    return NMAP_BIN
 
 def get_nmap_status() -> dict:
     """Return a lightweight availability summary for UI health checks."""
@@ -121,12 +107,7 @@ def run_nmap(
         safe_extras = _sanitise_flags(extra_flags)
         flags.extend(safe_extras)
 
-    # When running Nmap on Windows against localhost, traffic doesn't traverse the WSL virtual switch,
-    # so Suricata (inside WSL) won't see it. We dynamically map localhost to the WSL IP to force traffic over the bridge.
-    if target in ["127.0.0.1", "localhost"]:
-        wsl_ip = get_wsl_ip()
-        if wsl_ip:
-            target = wsl_ip
+    # Native Linux execution doesn't need IP mapping for loopback
 
     # Use the resolved path
     nmap_path = get_nmap_path()

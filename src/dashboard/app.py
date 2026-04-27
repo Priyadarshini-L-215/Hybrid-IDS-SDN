@@ -28,7 +28,6 @@ try:
         EVE_LOG, ML_ALERTS_LOG, WS_URI, WS_PORT,
         ALERT_CACHE_SIZE, ensure_dirs, LOG_LEVEL
     )
-    from common.wsl_utils import get_wsl_ip as resolve_wsl_ip
     from nmap_runner import run_nmap, analyse_with_gemini, SCAN_PROFILES, get_nmap_status
     ensure_dirs()
 except ImportError as e:
@@ -70,17 +69,12 @@ _relay_reconnect_event = threading.Event()
 
 
 def _build_relay_candidates(seed_uri: str):
-    """Build ordered relay candidates from configured URI and current WSL IP."""
+    """Build ordered relay candidates from configured URI and localhost."""
     candidates = []
 
     def _add(uri):
         if uri and uri not in candidates:
             candidates.append(uri)
-
-    # Fallback to WSL IP if 127.0.0.1 fails
-    wsl_ip = _get_wsl_ip()
-    if wsl_ip:
-        _add(f"ws://{wsl_ip}:{WS_PORT}")
 
     _add(seed_uri)
     _add(f"ws://127.0.0.1:{WS_PORT}")
@@ -88,15 +82,8 @@ def _build_relay_candidates(seed_uri: str):
     return candidates
 
 def _get_wsl_ip():
-    """Resolve WSL2 IP address by querying `wsl hostname -I`."""
-    try:
-        ip = resolve_wsl_ip()
-        _relay_status["wsl_ip"] = ip
-        return ip
-    except (OSError, RuntimeError, ValueError) as exc:
-        logger.warning(f"[Relay] Could not resolve WSL IP: {exc}")
-        _relay_status["wsl_ip"] = None
-        return None
+    """Legacy placeholder."""
+    return None
 
 def _relay_worker():
     """Relays messages from WSL consumer to browser clients."""
@@ -341,42 +328,35 @@ def api_pipeline_status():
     """Live diagnostic endpoint — shows exactly what the relay is doing and why it may be failing."""
     import subprocess
     
-    # Check WSL is up
-    wsl_running = False
-    wsl_ip = None
-    try:
-        out = subprocess.check_output(["wsl", "hostname", "-I"], text=True, timeout=3).strip()
-        wsl_ip = out.split()[0] if out.strip() else None
-        wsl_running = bool(wsl_ip)
-    except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError, ValueError, TypeError) as e:
-        wsl_ip = None
-        wsl_running = False
+    # Check WSL is up (Always true on native Linux)
+    wsl_running = True
+    wsl_ip = "127.0.0.1"
     
-    # Check consumer process in WSL
+    # Check consumer process in Linux
     consumer_running = False
     try:
         r = subprocess.run(
-            ["wsl", "pgrep", "-f", "consumer.py"],
+            ["pgrep", "-f", "consumer.py"],
             capture_output=True, text=True, timeout=4
         )
         consumer_running = r.returncode == 0
     except (OSError, subprocess.SubprocessError):
         pass
     
-    # Check Redis in WSL
+    # Check Redis in Linux
     redis_ok = False
     try:
         r = subprocess.run(
-            ["wsl", "redis-cli", "ping"],
+            ["redis-cli", "ping"],
             capture_output=True, text=True, timeout=4
         )
         redis_ok = r.stdout.strip() == "PONG"
     except (OSError, subprocess.SubprocessError):
         pass
     
-    # Try to reach the WS port from Windows (TCP connect test)
+    # Try to reach the WS port (TCP connect test)
     ws_port_open = False
-    test_host = wsl_ip or "127.0.0.1"
+    test_host = "127.0.0.1"
     try:
         import socket as _socket
         s = _socket.socket()
@@ -387,13 +367,12 @@ def api_pipeline_status():
     except (OSError, socket.error):
         pass
     
-    # Get tail of consumer log from WSL
+    # Get tail of consumer log from Linux
     consumer_log_tail = []
     try:
         r = subprocess.run(
-            ["wsl", "tail", "-n", "30", "data/logs/consumer.log"],
+            ["tail", "-n", "30", "data/logs/consumer.log"],
             capture_output=True, text=True, timeout=5,
-            cwd=None  # wsl resolves paths relative to Windows CWD
         )
         consumer_log_tail = r.stdout.strip().splitlines() if r.returncode == 0 else [r.stderr.strip()]
     except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError) as e:
@@ -401,13 +380,11 @@ def api_pipeline_status():
     
     # Build diagnosis
     issues = []
-    if not wsl_running:
-        issues.append("WSL is not running. Run: wsl in a terminal to start it.")
-    if wsl_running and not consumer_running:
-        issues.append("ML consumer (consumer.py) is NOT running inside WSL. Run start.bat or: wsl -u root bash start_ids.sh")
-    if wsl_running and not redis_ok:
-        issues.append("Redis is not responding inside WSL. Run: wsl -u root redis-server --daemonize yes")
-    if wsl_running and consumer_running and not ws_port_open:
+    if not consumer_running:
+        issues.append("ML consumer (consumer.py) is NOT running. Run ./start.sh")
+    if not redis_ok:
+        issues.append("Redis is not responding. Run: sudo service redis-server start")
+    if consumer_running and not ws_port_open:
         issues.append(f"WebSocket port {WS_PORT} is not reachable on {test_host}. The consumer may still be initializing — wait 5-10s.")
     if not issues:
         issues.append("All checks passed — pipeline appears healthy.")
