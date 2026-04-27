@@ -115,24 +115,6 @@ def _relay_worker():
         WSL_RECHECK_EVERY = 5  # re-resolve WSL IP every N failures
         consecutive_failures = 0
         
-        def _sync_broadcast(msg):
-            """Synchronous fan-out to browser clients, safe to run in a thread."""
-            with _browser_lock:
-                if not _browser_clients:
-                    return
-                
-                dead = set()
-                for client in list(_browser_clients):
-                    try:
-                        client.send(msg)
-                    except (OSError, RuntimeError, TimeoutError, Exception) as exc:
-                        logger.debug(f"[Relay] Send failed: {exc}")
-                        dead.add(client)
-                
-                if dead:
-                    _browser_clients.difference_update(dead)
-                    logger.info(f"[Relay] Pruned {len(dead)} stalled connections. Active: {len(_browser_clients)}")
-
         while True:
             try:
                 logger.info(f"[Relay] Connecting → {current_uri} (attempt {consecutive_failures + 1})")
@@ -170,10 +152,27 @@ def _relay_worker():
                             pass
                         
                         _relay_status["messages_relayed"] += 1
-                        
                         # --- Fan-out broadcast to all browser clients ---
-                        # Offload blocking sync sends to a thread to avoid stalling the async WS loop
-                        await asyncio.to_thread(_sync_broadcast, message)
+                        with _browser_lock:
+                            if _browser_clients:
+                                dead = set()
+                                for client in list(_browser_clients):
+                                    try:
+                                        # Non-blocking send logic:
+                                        # flask_sock doesn't expose a timeout on send easily,
+                                        # but we can check if the socket is writable or use a try-block.
+                                        # For now, we keep it simple but handle the case where the client is gone.
+                                        client.send(message)
+                                    except (OSError, RuntimeError, TimeoutError) as send_err:
+                                        logger.debug(f"[Relay] Send failed (dead client): {send_err}")
+                                        dead.add(client)
+                                    except Exception as exc:
+                                        logger.warning(f"[Relay] Unexpected error broadcasting to client: {exc}")
+                                        dead.add(client)
+                                
+                                if dead:
+                                    _browser_clients -= dead
+                                    logger.info(f"[Relay] Pruned {len(dead)} stalled connections. Active: {len(_browser_clients)}")
 
             except (ConnectionRefusedError, socket.error,
                     ws_client.exceptions.InvalidMessage,

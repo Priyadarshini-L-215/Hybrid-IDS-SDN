@@ -357,9 +357,11 @@ class MLEngine:
             aligned_for_scaler = self._align_to_expected_dim(features_np, scaler_expected, "scaler")
 
             # Layer 1: input normalization for downstream models.
-            # Use numpy array directly instead of DataFrame to avoid instantiation overhead per event.
-            # (Warnings for missing feature names are suppressed in class initialization)
-            scaled_vector = self.scaler.transform(aligned_for_scaler)
+            if hasattr(self.scaler, "feature_names_in_") and len(self.scaler.feature_names_in_) == aligned_for_scaler.shape[1]:
+                scaler_input = pd.DataFrame(aligned_for_scaler, columns=list(self.scaler.feature_names_in_))
+            else:
+                scaler_input = aligned_for_scaler
+            scaled_vector = self.scaler.transform(scaler_input)
 
             rf_expected = int(getattr(self.rf_model, "n_features_in_", scaled_vector.shape[1]))
             scaled_vector = self._align_to_expected_dim(scaled_vector, rf_expected, "random_forest")
