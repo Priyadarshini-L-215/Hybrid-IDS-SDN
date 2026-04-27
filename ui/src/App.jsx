@@ -113,8 +113,8 @@ const AlertsTable = ({ alerts, filter, onFilterChange }) => {
             {filteredAlerts.length === 0 ? (
               <tr><td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '3rem' }}>Waiting for network events...</td></tr>
             ) : (
-              filteredAlerts.map((alert) => (
-                <AlertRow key={alert.event_id || alert.id || alert.timestamp} alert={alert} />
+              filteredAlerts.map((alert, idx) => (
+                <AlertRow key={alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${idx}`} alert={alert} />
               ))
             )}
           </tbody>

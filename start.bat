@@ -121,11 +121,11 @@ if errorlevel 1 (
 )
 
 :: Check for Python venv (Redis client required)
-if not exist "%PYTHON_EXE%" (
+if not exist "!PYTHON_EXE!" (
     echo [!] Python virtual environment not found.
     echo [+] Running setup.bat to bootstrap Windows environment...
-    call "%ROOT%\setup.bat" --no-pause
-    if not exist "%PYTHON_EXE%" (
+    call "!ROOT!\setup.bat" --no-pause
+    if not exist "!PYTHON_EXE!" (
         echo [ERROR] Python virtual environment setup failed.
         pause
         exit /b 1
@@ -136,10 +136,10 @@ if "%FORCE_SETUP%"=="1" (
     echo [!] Forced setup verification requested.
 )
 
-if exist "%SETUP_STAMP%" if not "%FORCE_SETUP%"=="1" (
-    if exist "%PYTHON_EXE%" if exist "%UI_DIR%\node_modules" (
+if exist "!SETUP_STAMP!" if not "%FORCE_SETUP%"=="1" (
+    if exist "!PYTHON_EXE!" if exist "!UI_DIR!\node_modules" (
         :: Check if core Python packages are actually installed in Windows
-        "%PYTHON_EXE%" -c "import flask, websockets, redis, pandas, sklearn" >nul 2>&1
+        "!PYTHON_EXE!" -c "import flask, websockets, redis, pandas, sklearn" >nul 2>&1
         if not errorlevel 1 (
             echo [OK] Core dependencies verified.
             goto :model_sync
@@ -156,8 +156,16 @@ echo [+] Checking Windows Python dependencies...
 "%PYTHON_EXE%" -c "import flask, websockets, redis, pandas, sklearn" >nul 2>&1
 if errorlevel 1 (
     echo [!] Missing Python packages in Windows virtual environment.
+    
+    :: Ensure pip exists before installing
+    "!PYTHON_EXE!" -m pip --version >nul 2>&1
+    if errorlevel 1 (
+        echo [!] pip is missing. Attempting to restore...
+        "!PYTHON_EXE!" -m ensurepip --default-pip
+    )
+
     echo [+] Installing requirements_win.txt...
-    "%PYTHON_EXE%" -m pip install -r "%ROOT%\requirements_win.txt" --quiet
+    "!PYTHON_EXE!" -m pip install -r "!ROOT!\requirements_win.txt" --quiet
     if errorlevel 1 (
         echo [ERROR] Failed to install Windows Python dependencies.
         pause
@@ -166,18 +174,18 @@ if errorlevel 1 (
 )
 
 :: Check for UI Dependencies
-if not exist "%UI_DIR%\node_modules" (
-    echo [!] UI dependencies not found in %UI_DIR%
+if not exist "!UI_DIR!\node_modules" (
+    echo [!] UI dependencies not found in "!UI_DIR!"
     echo [+] Running npm install...
-    cd /d "%UI_DIR%"
+    cd /d "!UI_DIR!"
     call npm install
     if errorlevel 1 (
         echo [ERROR] npm install failed. Fix UI dependencies and re-run start.bat.
-        cd /d "%ROOT%"
+        cd /d "!ROOT!"
         pause
         exit /b 1
     )
-    cd /d "%ROOT%"
+    cd /d "!ROOT!"
 )
 
 :: Check for WSL Dependencies (Suricata + Redis)

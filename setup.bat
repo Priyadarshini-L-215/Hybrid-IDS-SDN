@@ -4,7 +4,7 @@ echo =================================================================
 echo             SENTINEL CORE - WINDOWS ENVIRONMENT SETUP
 echo =================================================================
 
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
@@ -25,17 +25,27 @@ if not defined PY_CMD (
 )
 
 :: 2. Create Virtual Environment
-if not exist "%ROOT%\.venv" (
+if not exist "!ROOT!\.venv" (
     echo [+] Creating Python virtual environment...
-    %PY_CMD% -m venv "%ROOT%\.venv"
+    %PY_CMD% -m venv "!ROOT!\.venv"
 ) else (
     echo [OK] Virtual environment already exists.
 )
 
 :: 3. Install Dependencies
 echo [+] Installing backend dependencies...
-"%ROOT%\.venv\Scripts\python.exe" -m pip install --upgrade pip
-"%ROOT%\.venv\Scripts\python.exe" -m pip install -r "%ROOT%\requirements_win.txt"
+"!ROOT!\.venv\Scripts\python.exe" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [!] pip is missing in virtual environment. Attempting to restore...
+    "!ROOT!\.venv\Scripts\python.exe" -m ensurepip --default-pip
+    if errorlevel 1 (
+        echo [ERROR] Could not restore pip. Please ensure your base Python installation has pip.
+        pause
+        exit /b 1
+    )
+)
+"!ROOT!\.venv\Scripts\python.exe" -m pip install --upgrade pip
+"!ROOT!\.venv\Scripts\python.exe" -m pip install -r "!ROOT!\requirements_win.txt"
 if errorlevel 1 (
     echo [ERROR] Python dependency installation failed.
     pause
@@ -48,7 +58,7 @@ where npm >nul 2>&1
 if errorlevel 1 (
     echo [WARNING] npm not found. Please install Node.js to use the dashboard.
 ) else (
-    pushd "%ROOT%\ui"
+    pushd "!ROOT!\ui"
     if exist package-lock.json (
         call npm ci
     ) else (
