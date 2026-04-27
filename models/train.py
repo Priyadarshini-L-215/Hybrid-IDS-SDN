@@ -249,7 +249,7 @@ def main():
         logger.info(f"Model Accuracy: {accuracy*100:.2f}%")
         logger.info(f"ROC-AUC Score:  {roc_auc:.4f}")
         logger.info(f"\nArtifacts saved to: {Path.cwd()}")
-        logger.info("  • model.pkl")
+        logger.info("  • rf_model.pkl")
         logger.info("  • features.json")
         logger.info("  • metrics.json")
         logger.info("  • feature_importance.csv")
@@ -264,3 +264,4 @@ def main():
 if __name__ == "__main__":
     exit_code = main()
     sys.exit(exit_code)
+)

@@ -77,7 +77,6 @@ start.bat --force-setup
 2.  Installs **Suricata**, **Redis**, and ML dependencies.
 3.  Initializes the **Python venv** and **Node.js** UI.
 4.  Launches all components (Sensor, Backend, and Dashboard) in separate terminals.
-5.  Synchronizes tri-layer model artifacts from `new/` into `models/` when needed.
 
 ---
 

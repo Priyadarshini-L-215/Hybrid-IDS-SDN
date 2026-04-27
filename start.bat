@@ -224,35 +224,18 @@ if "%USE_REDIS_QUEUE%"=="1" (
 echo [+] Syncing ML artifacts for Tri-Layer pipeline...
 if not exist "%MODELS_DIR%" mkdir "%MODELS_DIR%"
 
-:: Always copy from 'new' if they exist, to pick up "recently updated" models
-if exist "%RF_MODEL_FALLBACK%" (
-    copy /Y "%RF_MODEL_FALLBACK%" "%RF_MODEL%" >nul
-    echo [+] Using updated RF model from new\
-)
-if exist "%SCALER_MODEL_FALLBACK%" (
-    copy /Y "%SCALER_MODEL_FALLBACK%" "%SCALER_MODEL%" >nul
-    echo [+] Using updated scaler from new\
-)
-if exist "%AE_MODEL_FALLBACK%" (
-    copy /Y "%AE_MODEL_FALLBACK%" "%AE_MODEL%" >nul
-    echo [+] Using updated autoencoder from new\
-)
-
 if not exist "%RF_MODEL%" (
     echo [ERROR] Missing RF model: models\rf_model.pkl
-    echo         Place rf_model.pkl in models\ or sentinel_rf.pkl in new\
     pause
     exit /b 1
 )
 if not exist "%SCALER_MODEL%" (
     echo [ERROR] Missing scaler: models\scaler.pkl
-    echo         Place scaler.pkl in models\ or sentinel_scaler.pkl in new\
     pause
     exit /b 1
 )
 if not exist "%AE_MODEL%" (
     echo [ERROR] Missing autoencoder: models\autoencoder.pth
-    echo         Place autoencoder.pth in models\ or sentinel_autoencoder.pth in new\
     pause
     exit /b 1
 )
