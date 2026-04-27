@@ -275,12 +275,6 @@ function App() {
     }, 250);
 
     const getWebSocketUrl = () => {
-      // In Vite dev (port 3000), connect directly to Flask backend to avoid
-      // proxy-level socket abort noise and reconnection churn.
-      if (window.location.port === '3000') {
-        return 'ws://127.0.0.1:5000/ws/alerts';
-      }
-
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       return `${proto}//${window.location.host}/ws/alerts`;
     };

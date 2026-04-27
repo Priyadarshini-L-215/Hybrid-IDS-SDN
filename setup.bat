@@ -35,7 +35,7 @@ if not exist "%ROOT%\.venv" (
 :: 3. Install Dependencies
 echo [+] Installing backend dependencies...
 "%ROOT%\.venv\Scripts\python.exe" -m pip install --upgrade pip
-"%ROOT%\.venv\Scripts\python.exe" -m pip install -r "%ROOT%\requirements.txt"
+"%ROOT%\.venv\Scripts\python.exe" -m pip install -r "%ROOT%\requirements_win.txt"
 if errorlevel 1 (
     echo [ERROR] Python dependency installation failed.
     pause

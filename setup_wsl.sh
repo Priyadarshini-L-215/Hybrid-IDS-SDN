@@ -69,15 +69,15 @@ echo "[OK] Redis configured and started"
 echo "[+] Installing Python ML dependencies..."
 python3 -m pip install --upgrade pip
 
-if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
-    echo "[+] Installing Python dependencies from requirements.txt..."
-    if ! python3 -m pip install -r "$PROJECT_ROOT/requirements.txt"; then
+if [ -f "$PROJECT_ROOT/requirements_wsl.txt" ]; then
+    echo "[+] Installing Python dependencies from requirements_wsl.txt..."
+    if ! python3 -m pip install -r "$PROJECT_ROOT/requirements_wsl.txt"; then
         echo "[!] Standard pip install failed. Retrying with --break-system-packages..."
-        python3 -m pip install --break-system-packages -r "$PROJECT_ROOT/requirements.txt"
+        python3 -m pip install --break-system-packages -r "$PROJECT_ROOT/requirements_wsl.txt"
     fi
 else
-    echo "[WARNING] requirements.txt not found at $PROJECT_ROOT; installing minimal fallback set"
-    python3 -m pip install websockets pandas scikit-learn requests numpy redis
+    echo "[WARNING] requirements_wsl.txt not found at $PROJECT_ROOT; installing minimal fallback set"
+    python3 -m pip install torch websockets pandas scikit-learn requests numpy redis scapy
 fi
 
 # 5. Configure Firewall (IPS Mode)

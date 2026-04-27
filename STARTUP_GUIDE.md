@@ -20,8 +20,8 @@ The fastest way to install all dependencies across both Windows and WSL is the a
 ```
 This script will:
 - Initialize the Windows virtual environment (`.venv`).
-- Install all Python dependencies from `requirements.txt`.
-- Provision WSL with Suricata, Redis, and PyTorch.
+- Install Windows Python dependencies from `requirements_win.txt`.
+- Provision WSL with Suricata, Redis, and PyTorch using `requirements_wsl.txt`.
 - Install Node.js packages for the dashboard.
 
 ### 2. Manual Step-by-Step
@@ -69,8 +69,8 @@ To launch the full stack (Sensor, Relay, and Dashboard):
 
 The system is optimized for the following stack:
 
-### ML Pipeline (Engine)
-- **PyTorch 2.11.0**: Dense Autoencoder for Zero-Day detection.
+### ML Pipeline (Engine - WSL)
+- **PyTorch (Latest Stable)**: Dense Autoencoder for Zero-Day detection.
 - **Scikit-Learn 1.6.1**: Random Forest classification (77 features) & Scaling.
 - **Redis 5.0.8**: High-throughput event queueing.
 

@@ -156,8 +156,8 @@ echo [+] Checking Windows Python dependencies...
 "%PYTHON_EXE%" -c "import flask, websockets, redis, pandas, sklearn" >nul 2>&1
 if errorlevel 1 (
     echo [!] Missing Python packages in Windows virtual environment.
-    echo [+] Installing requirements.txt...
-    "%PYTHON_EXE%" -m pip install -r "%ROOT%\requirements.txt" --quiet
+    echo [+] Installing requirements_win.txt...
+    "%PYTHON_EXE%" -m pip install -r "%ROOT%\requirements_win.txt" --quiet
     if errorlevel 1 (
         echo [ERROR] Failed to install Windows Python dependencies.
         pause
