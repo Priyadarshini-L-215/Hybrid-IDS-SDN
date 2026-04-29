@@ -7,6 +7,7 @@ from common.config import REDIS_QUEUE_NAME, BATCH_SIZE, BATCH_FLUSH_INTERVAL
 from ml_engine import redis_client as rc
 from ml_engine.firewall import ActiveFirewall
 from ml_engine.engine import MLEngine
+from ml_engine.drift_detector import DriftDetector
 from common.alert_builder import build_alert_payload
 
 logger = structlog.get_logger(__name__)
@@ -33,6 +34,9 @@ class WorkerPool:
         self.processed_count = 0
         self.error_count = 0
         self.start_time = time.time()
+        
+        # Initialize Drift Detector
+        self.drift_detector = DriftDetector(on_drift=self._on_drift_detected)
 
     async def start(self):
         """Start async worker tasks."""
@@ -97,6 +101,10 @@ class WorkerPool:
                 t_batch_end = time.time()
                 batch_lat = (t_batch_end - t_batch_start) * 1000 / (len(results) or 1)
                 
+                # Update drift detector with ML scores
+                for res in results:
+                    self.drift_detector.update(res.get("ml_score", 0.0))
+                
                 # 3. Finalize Alerts and Mitigation
                 alerts_to_send = []
                 for i, res in enumerate(results):
@@ -125,6 +133,14 @@ class WorkerPool:
                 logger.error("Worker loop error", error=str(e), worker=worker_id)
                 self.error_count += 1
                 await asyncio.sleep(1)
+
+    async def _on_drift_detected(self, drift_info: dict):
+        """Broadcast drift alert to WebSocket clients via the broadcast func."""
+        if self.broadcast_func:
+            try:
+                await self.broadcast_func(json.dumps(drift_info))
+            except Exception as e:
+                logger.error("Failed to broadcast drift alert", error=str(e))
 
     async def _apply_mitigation(self, alert: dict, res: dict):
         """Interface with ActiveFirewall for IPS actions."""

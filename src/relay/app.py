@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import time
 from datetime import datetime
@@ -15,7 +16,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from common.config import (
-    REDIS_ALERT_STREAM, REDIS_HOST, REDIS_PORT, setup_logging, DB_PATH
+    REDIS_ALERT_STREAM, REDIS_HOST, REDIS_PORT, setup_logging, DB_PATH,
+    CONFIG_PATH, YAML_CONFIG, API_PORT
 )
 from common.database import get_recent_alerts, get_stats
 from ml_engine import redis_client as rc
@@ -119,6 +121,46 @@ async def get_pipeline_status():
             "ws_port_open": True
         }
     }
+
+@app.get("/api/config")
+async def get_config():
+    """Returns the current sentinel_config.yaml content."""
+    try:
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH, "r") as f:
+                return yaml.safe_load(f) or {}
+        return {}
+    except Exception as e:
+        logger.error("Failed to read config", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to read configuration file")
+
+@app.post("/api/config")
+async def update_config(new_config: Dict[str, Any]):
+    """Updates and saves the sentinel_config.yaml file."""
+    try:
+        # We merge with existing config to preserve comments/structure 
+        # (though yaml.dump doesn't preserve comments well, we'll just write the dict)
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(new_config, f, default_flow_style=False)
+        
+        logger.info("Configuration updated successfully")
+        # Signal the consumer to reload (if it's running)
+        try:
+            import subprocess
+            import signal
+            # Find the consumer PID
+            pid_res = subprocess.run(["pgrep", "-f", "src/ml_engine/consumer.py"], capture_output=True, text=True)
+            if pid_res.returncode == 0:
+                for pid in pid_res.stdout.split():
+                    os.kill(int(pid), signal.SIGHUP)
+                logger.info("Signaled consumer to reload config")
+        except Exception as e:
+            logger.warning("Failed to signal consumer for reload", error=str(e))
+            
+        return {"status": "success", "message": "Config updated and reload signal sent"}
+    except Exception as e:
+        logger.error("Failed to update config", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to save configuration")
 
 @app.post("/api/mitigation/unblock")
 async def unblock_ip(request: Dict[str, Any]):
@@ -228,19 +270,23 @@ async def run_ddos_simulation(request: Dict[str, Any]):
     def _send_packets():
         import socket
         import random
+        import time
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         bytes_payload = random._urandom(1024)
-        for _ in range(1000):
-            port = random.randint(1, 65535)
-            try:
-                sock.sendto(bytes_payload, (target, port))
-            except:
-                pass
+        # Send in bursts to trigger threshold rules
+        for _ in range(5):
+            for _ in range(500):
+                port = random.randint(1, 65535)
+                try:
+                    sock.sendto(bytes_payload, (target, port))
+                except:
+                    pass
+            time.sleep(0.1)
         sock.close()
 
     try:
         await asyncio.to_thread(_send_packets)
-        return {"success": True, "message": f"DDoS simulation packets sent to {target}"}
+        return {"success": True, "message": f"DDoS simulation flood (2500 pkts) sent to {target}"}
     except Exception as e:
         logger.error("DDoS simulation failed", error=str(e))
         return {"success": False, "error": str(e)}
@@ -250,19 +296,25 @@ async def run_payload_simulation(request: Dict[str, Any]):
     target = request.get("target", "127.0.0.1")
     logger.info("Simulating Payload Injection", target=target)
     
-    # Simulate a SQL Injection attempt via HTTP
-    # We send it to port 5000 (ourselves) to see it in the logs
     try:
         import httpx
-        payload = "' OR '1'='1' --"
+        # Send multiple patterns to trigger SQLi regex
+        payloads = [
+            "' OR '1'='1' --",
+            "admin' --",
+            "'; DROP TABLE users; --",
+            "<script>alert('xss')</script>"
+        ]
+        
         async with httpx.AsyncClient() as client:
-            # We don't care if it fails, we just want the traffic to be seen by Suricata
-            try:
-                await client.get(f"http://{target}:5000/api/health?id={payload}", timeout=1.0)
-            except:
-                pass
+            for p in payloads:
+                try:
+                    # We send it to port 5000 (ourselves)
+                    await client.get(f"http://{target}:5000/api/health?id={p}", timeout=1.0)
+                except:
+                    pass
                 
-        return {"success": True, "message": f"Malicious payload injected towards {target}"}
+        return {"success": True, "message": f"Malicious payloads ({len(payloads)}) injected towards {target}"}
     except Exception as e:
         logger.error("Payload simulation failed", error=str(e))
         return {"success": False, "error": str(e)}
@@ -275,3 +327,10 @@ if ui_dist.exists():
     logger.info("Serving React UI from ui/dist")
 else:
     logger.warning("ui/dist not found, serving API only")
+
+if __name__ == "__main__":
+    import uvicorn
+    # Use 0.0.0.0 for API_HOST by default to allow external access if needed
+    API_HOST = os.environ.get("API_HOST", "0.0.0.0")
+    logger.info(f"Starting Sentinel Relay on {API_HOST}:{API_PORT}")
+    uvicorn.run(app, host=API_HOST, port=API_PORT)

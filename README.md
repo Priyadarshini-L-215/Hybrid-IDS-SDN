@@ -25,7 +25,8 @@ Unlike traditional IDS, Sentinel Core implements **Active Mitigation**—automat
 | **Frontend UI** | React 19, Vite, Lucide React (Sentinel Core Design) |
 | **Communication** | Native WebSockets (`asyncio`/`websockets`) |
 | **Data Persistence** | SQLite3 (WAL Mode, High-performance batch logging) |
-| **Analysis AI** | Google Gemini (External Scan Analysis) |
+| **Analysis AI** | Google Gemini (External Scan Analysis), SHAP (XAI Forensics) |
+| **Drift Detection** | River (ADWIN Algorithm) |
 
 ---
 
@@ -60,6 +61,11 @@ The system utilizes a high-performance native Linux architecture:
 *   **Active Mitigation**: High-confidence threats (>95%) are automatically blocked by the IPS module.
 *   **Volumetric Analysis**: Detects DoS/DDoS patterns and aggressive port scans through stateful correlation.
 *   **Neural Telemetery**: Native WebSocket stream ensures sub-10ms alert visibility.
+*   **Explainable AI (XAI)**: SHAP TreeExplainer provides feature-level evidence for every attack classification.
+*   **MITRE ATT&CK Integration**: Automatic mapping of signatures to the MITRE knowledge base for tactical context.
+*   **Concept Drift Monitoring**: Integrated `river.ADWIN` detector flags ML performance decay in real-time.
+*   **SOC Administrative Console**: Persistent settings management for ML thresholds, IPS policies, and system tuning.
+*   **Cold-Start Persistence**: Automatic re-population of kernel blocklists from Redis on system reboot.
 *   **Integrated Diagnostics**: Built-in tools for pipeline health, tracer probes, and connection testing.
 *   **System Observability**: `/api/pipeline/status` returns a live snapshot for debugging relay state, recent alert sources, and current stats.
 

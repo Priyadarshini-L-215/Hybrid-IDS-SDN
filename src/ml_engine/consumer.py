@@ -43,10 +43,22 @@ async def main():
 
     pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=broadcast_to_redis)
     
-    # 2. Setup termination handling
+    # 2. Setup termination and reload handling
     loop = asyncio.get_running_loop()
+    
+    def trigger_reload():
+        logger.info("Reload signal received, refreshing config...")
+        engine.reload_config()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(pool)))
+        
+    try:
+        loop.add_signal_handler(signal.SIGHUP, trigger_reload)
+        logger.info("SIGHUP handler registered for config reloading")
+    except AttributeError:
+        # Windows doesn't have SIGHUP
+        pass
 
     # 3. Start workers
     await pool.start()

@@ -16,18 +16,18 @@ pkill -f "ingestion.py" || true
 sleep 0.5
 pkill -9 -f "ingestion.py" || true
 
-echo "[+] Stopping Flask Relay..."
-pkill -f "flask" || true
-pkill -f "gunicorn" || true
+echo "[+] Stopping Relay API (FastAPI)..."
+pkill -f "src.relay.app" || true
+pkill -f "uvicorn" || true
 sleep 0.5
-pkill -9 -f "flask" || true
-pkill -9 -f "gunicorn" || true
+pkill -9 -f "src.relay.app" || true
+pkill -9 -f "uvicorn" || true
 
-echo "[+] Stopping React UI..."
-pkill -f "npm" || true
+echo "[+] Stopping Dashboard UI (Vite)..."
+pkill -f "npm.*dev" || true
 pkill -f "vite" || true
 sleep 0.5
-pkill -9 -f "npm" || true
+pkill -9 -f "npm.*dev" || true
 pkill -9 -f "vite" || true
 
 echo "[+] Stopping Suricata Sensor..."

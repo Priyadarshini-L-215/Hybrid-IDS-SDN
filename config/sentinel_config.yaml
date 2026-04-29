@@ -8,12 +8,14 @@ system:
   batch_flush_interval: 0.25
 
 network:
-  ws_port: 8777
+  api_port: 5000
+  ui_port: 3000
   redis_host: "127.0.0.1"
   redis_port: 6379
 
 detection:
   # Stateful Flow Correlation (IPS)
+  anomaly_min_samples: 10
   port_scan_threshold: 25
   dos_threshold: 100
   correlation_window: 10.0

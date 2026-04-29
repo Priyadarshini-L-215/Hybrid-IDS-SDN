@@ -50,8 +50,12 @@ class ActiveFirewall:
             
             cls._initialized = True
             
-            # Start decay thread (Only one process should decay, but it's idempotent via Redis)
+            # Start decay thread
             threading.Thread(target=cls._decay_loop, daemon=True).start()
+            
+            # Cold-start: Load existing high-reputation offenders from Redis into kernel
+            cls._repopulate_from_reputation()
+            
             logger.info("IPS Firewall initialized", shared_reputation=True, protected_count=len(cls._protected_ips))
 
     @classmethod
@@ -90,6 +94,26 @@ class ActiveFirewall:
             logger.info("Kernel firewall rules synchronized", chain=CHAIN_NAME)
         except Exception as e:
             logger.error("Failed to setup kernel firewall", error=str(e))
+
+    @classmethod
+    def _repopulate_from_reputation(cls):
+        """On startup, read Redis reputation and re-block active offenders."""
+        if not cls._redis_client: return
+        try:
+            reputation = cls._redis_client.hgetall(cls.REDIS_REPUTATION_KEY)
+            count = 0
+            for ip, score in reputation.items():
+                s = float(score)
+                if s >= REPUTATION_PERM_BLOCK:
+                    cls.block(ip, ttl=0)
+                    count += 1
+                elif s >= REPUTATION_TEMP_BLOCK:
+                    cls.block(ip, ttl=BLOCK_TTL)
+                    count += 1
+            if count > 0:
+                logger.info("Firewall cold-start complete", reblocked_count=count)
+        except Exception as e:
+            logger.error("Failed to repopulate firewall from Redis", error=str(e))
 
     @classmethod
     def _decay_loop(cls):

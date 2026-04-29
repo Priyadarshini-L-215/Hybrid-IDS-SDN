@@ -23,7 +23,7 @@ def _load_yaml_config():
         print(f"Warning: Failed to load config from {CONFIG_PATH}: {e}")
         return {}
 
-YAML_CONFIG = _load_yaml_config()
+YAML_CONFIG = {}
 
 def get_cfg(path, default=None):
     """Deep lookup in YAML config (e.g. 'detection.weights.ml')"""
@@ -35,6 +35,60 @@ def get_cfg(path, default=None):
         else:
             return default
     return val
+
+def refresh_config():
+    """Reloads the YAML config from disk and updates global state."""
+    global YAML_CONFIG, API_PORT, UI_PORT, REDIS_HOST, REDIS_PORT, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, BLOCK_TTL, RATE_LIMIT_PER_SEC
+    
+    YAML_CONFIG = _load_yaml_config()
+    
+    # Update network settings
+    API_PORT = int(get_cfg("network.api_port", 5000))
+    UI_PORT = int(get_cfg("network.ui_port", 3000))
+    REDIS_HOST = os.environ.get("REDIS_HOST", get_cfg("network.redis_host", "127.0.0.1"))
+    REDIS_PORT = int(os.environ.get("REDIS_PORT", get_cfg("network.redis_port", 6379)))
+    
+    # Update detection thresholds
+    ML_THRESHOLD_ATTACK = get_cfg("detection.decision_engine.thresholds.attack", 0.85)
+    ML_THRESHOLD_SUSPICIOUS = get_cfg("detection.decision_engine.thresholds.suspicious", 0.6)
+    
+    # Update weights
+    ML_WEIGHT_SIG = get_cfg("detection.decision_engine.weights.signature", 1.0)
+    ML_WEIGHT_RF = get_cfg("detection.decision_engine.weights.ml", 0.5)
+    ML_WEIGHT_AE = get_cfg("detection.decision_engine.weights.anomaly", 0.3)
+    
+    # Update anomaly settings
+    ANOMALY_PERCENTILE = float(get_cfg("detection.anomaly_percentile", 99.5))
+    ANOMALY_MIN_SAMPLES = int(get_cfg("detection.anomaly_min_samples", 50))
+    
+    # Update mitigation settings
+    REPUTATION_LIMIT = get_cfg("mitigation.reputation_limit", 10.0)
+    REPUTATION_TEMP_BLOCK = get_cfg("mitigation.reputation_temp_block", 25.0)
+    REPUTATION_PERM_BLOCK = get_cfg("mitigation.reputation_perm_block", 50.0)
+    BLOCK_TTL = get_cfg("mitigation.block_ttl", 300)
+    RATE_LIMIT_PER_SEC = get_cfg("mitigation.rate_limit_per_sec", 5)
+    
+    # print(f"Config refreshed from {CONFIG_PATH}")
+
+# Initialize with defaults before first refresh
+API_PORT = 5000
+UI_PORT = 3000
+REDIS_HOST = "127.0.0.1"
+REDIS_PORT = 6379
+ML_THRESHOLD_ATTACK = 0.85
+ML_THRESHOLD_SUSPICIOUS = 0.6
+ML_WEIGHT_SIG = 1.0
+ML_WEIGHT_RF = 0.5
+ML_WEIGHT_AE = 0.3
+ANOMALY_PERCENTILE = 99.5
+ANOMALY_MIN_SAMPLES = 50
+REPUTATION_LIMIT = 10.0
+REPUTATION_TEMP_BLOCK = 25.0
+REPUTATION_PERM_BLOCK = 50.0
+BLOCK_TTL = 300
+RATE_LIMIT_PER_SEC = 5
+
+refresh_config()
 
 # --- LOG PATHS ---
 LOG_DIR = BASE_DIR / "data" / "logs"
@@ -63,10 +117,11 @@ POLL_INTERVAL_SEC = 0.1
 HEARTBEAT_INTERVAL_SEC = 10
 ALERT_CACHE_SIZE = 100
 
-# --- WEBSOCKET ---
-WS_HOST = os.environ.get("WS_HOST", "0.0.0.0")
-WS_PORT = int(os.environ.get("WS_PORT", get_cfg("network.ws_port", 8777)))
-WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{WS_PORT}")
+# --- NETWORK ---
+API_HOST = os.environ.get("API_HOST", "0.0.0.0")
+API_PORT = int(os.environ.get("API_PORT", get_cfg("network.api_port", 5000)))
+UI_PORT = int(os.environ.get("UI_PORT", get_cfg("network.ui_port", 3000)))
+WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{API_PORT}/ws")
 
 # --- LOGGING ---
 LOG_LEVEL = os.environ.get("LOG_LEVEL", get_cfg("system.log_level", "INFO")).upper()
@@ -132,6 +187,8 @@ ML_THRESHOLD_SUSPICIOUS = get_cfg("detection.decision_engine.thresholds.suspicio
 ML_WEIGHT_SIG = get_cfg("detection.decision_engine.weights.signature", 1.0)
 ML_WEIGHT_RF = get_cfg("detection.decision_engine.weights.ml", 0.5)
 ML_WEIGHT_AE = get_cfg("detection.decision_engine.weights.anomaly", 0.3)
+ANOMALY_PERCENTILE = float(get_cfg("detection.anomaly_percentile", 99.5))
+ANOMALY_MIN_SAMPLES = int(get_cfg("detection.anomaly_min_samples", 50))
 
 # --- MITIGATION SETTINGS ---
 REPUTATION_LIMIT = get_cfg("mitigation.reputation_limit", 10.0)

@@ -44,12 +44,14 @@ setup_logging() {
     : > "$STARTUP_LOG_FILE"
 }
 
-# Activate virtual environment
+# Activate virtual environment (Auto-setup if missing)
 activate_venv() {
-    if [ ! -d "$PROJECT_ROOT/.venv" ]; then
-        log_error "Virtual environment not found at $PROJECT_ROOT/.venv"
-        log_error "Run ./setup.sh first"
-        exit 1
+    if [ ! -d "$PROJECT_ROOT/.venv" ] || [ ! -d "$PROJECT_ROOT/ui/node_modules" ]; then
+        log_warn "Missing environment or dependencies. Running auto-setup..."
+        if ! ./setup.sh; then
+            log_error "Auto-setup failed. Please run ./setup.sh manually."
+            exit 1
+        fi
     fi
 
     # shellcheck source=/dev/null
@@ -58,7 +60,7 @@ activate_venv() {
         exit 1
     fi
 
-    log_info "Virtual environment activated"
+    log_info "Environment ready"
 }
 
 # Load configuration from Python
@@ -70,14 +72,17 @@ load_config() {
         SURICATA_SOCKET="/tmp/sentinel_suricata.sock"
     fi
 
-    if ! WS_PORT=$(python3 -c "from src.common.config import WS_PORT; print(WS_PORT)" 2>/dev/null); then
-        log_warn "Could not load WS_PORT from config, using default"
-        WS_PORT=8777
+    if ! API_PORT=$(python3 -c "from src.common.config import API_PORT; print(API_PORT)" 2>/dev/null); then
+        log_warn "Could not load API_PORT from config, using default 5000"
+        API_PORT=5000
     fi
 
-    FLASK_PORT=5000
+    if ! UI_PORT=$(python3 -c "from src.common.config import UI_PORT; print(UI_PORT)" 2>/dev/null); then
+        log_warn "Could not load UI_PORT from config, using default 3000"
+        UI_PORT=3000
+    fi
 
-    log_info "Loaded config: WS_PORT=$WS_PORT, SURICATA_SOCKET=$SURICATA_SOCKET"
+    log_info "Loaded config: API_PORT=$API_PORT, UI_PORT=$UI_PORT, SURICATA_SOCKET=$SURICATA_SOCKET"
 }
 
 # ============================================================================
@@ -313,37 +318,27 @@ build_ui() {
 }
 
 start_relay() {
-    if is_process_running "uvicorn" || is_process_running "src.relay"; then
-        log_warn "Relay process already running, skipping start"
+    if is_process_running "src/relay/app.py"; then
+        log_warn "Relay API already running, skipping start"
         return 0
     fi
 
-    if ! check_port_conflict $FLASK_PORT "Flask Relay"; then
+    if ! is_port_available "$API_PORT"; then
+        log_error "Port $API_PORT is already in use. Cannot start Relay API."
         return 1
     fi
 
-    > "$PROJECT_ROOT/data/logs/relay.log"
-    log_info "Starting FastAPI Relay (Uvicorn) on port $FLASK_PORT..."
-
-    python3 -m uvicorn src.relay.app:app \
-        --host 0.0.0.0 \
-        --port $FLASK_PORT \
-        --workers 1 \
-        >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
+    log_info "Starting Relay API on port $API_PORT..."
+    python3 "$PROJECT_ROOT/src/relay/app.py" >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
     local pid=$!
-
+    
     log_info "Relay process started (PID: $pid)"
     echo "relay_pid=$pid" >> "$STATE_FILE"
 
-    if wait_for_condition "Relay API" "curl -s http://127.0.0.1:$FLASK_PORT/api/health 2>/dev/null | grep -q ok" 15; then
+    if wait_for_condition "Relay API" "nc -z 127.0.0.1 $API_PORT" 15; then
         return 0
     else
-        log_warn "Relay health check failed, but continuing..."
-        sleep 2
-        if is_process_running "uvicorn"; then
-            log_warn "Relay is running but health check failed"
-            return 0
-        fi
+        log_error "Relay API failed to start on port $API_PORT"
         return 1
     fi
 }
@@ -354,25 +349,29 @@ start_ui() {
         return 0
     fi
 
-    if ! check_port_conflict 3000 "React UI"; then
+    if ! is_port_available "$UI_PORT"; then
+        log_error "Port $UI_PORT is already in use. Cannot start Dashboard UI."
         return 1
     fi
 
-    log_info "Starting React Dashboard on port 3000..."
+    log_info "Starting Dashboard UI on port $UI_PORT..."
     cd "$PROJECT_ROOT/ui" || return 1
-
-    nohup npm run dev -- --host 0.0.0.0 --port 3000 >> "$PROJECT_ROOT/data/logs/ui.log" 2>&1 &
+    
+    # Pass port as environment variable to Vite
+    export VITE_BACKEND_PORT=$API_PORT
+    export VITE_PORT=$UI_PORT
+    PORT=$UI_PORT npm run dev -- --host 0.0.0.0 --port "$UI_PORT" >> "$PROJECT_ROOT/data/logs/ui.log" 2>&1 &
     local pid=$!
 
     cd "$PROJECT_ROOT" || return 1
 
-    log_info "UI dev server started (PID: $pid)"
+    log_info "UI process started (PID: $pid)"
     echo "ui_pid=$pid" >> "$STATE_FILE"
 
-    if wait_for_condition "React UI" "curl -s http://127.0.0.1:3000 2>/dev/null | grep -q Sentinel" 20; then
+    if wait_for_condition "Dashboard UI" "nc -z 127.0.0.1 $UI_PORT" 15; then
         return 0
     else
-        log_warn "UI may still be loading..."
+        log_warn "Dashboard UI may still be starting..."
         return 0
     fi
 }
@@ -413,8 +412,7 @@ main() {
     touch "$STATE_LOCK_FILE"
 
     if [ "$CLEAN_START" -eq 1 ]; then
-        log_info "Clean start requested. Flushing Redis..."
-        redis-cli flushall || true
+        log_info "Clean start requested..."
     fi
 
     if [ "$FORCE_REBUILD" -eq 1 ]; then
@@ -438,6 +436,11 @@ main() {
 
     # Service startup sequence (ordered by dependencies)
     start_redis || { log_error "Failed to start Redis"; exit 1; }
+    
+    if [ "$CLEAN_START" -eq 1 ]; then
+        log_info "Flushing Redis state..."
+        redis-cli flushall || true
+    fi
     echo ""
 
     start_ingestion || { log_error "Failed to start Ingestion"; exit 1; }
@@ -481,7 +484,7 @@ main() {
         log_error "✗ ML Consumer is NOT running"; all_healthy=0
     fi
 
-    if is_process_running "uvicorn"; then
+    if is_process_running "src/relay/app.py" || is_process_running "uvicorn"; then
         log_success "✓ FastAPI Relay is running"
     else
         log_error "✗ FastAPI Relay is NOT running"; all_healthy=0
@@ -503,9 +506,8 @@ main() {
     echo "================================================================="
     echo ""
     echo "[SERVICES]"
-    echo "- Dashboard:         http://127.0.0.1:3000"
-    echo "- WebSocket API:     ws://127.0.0.1:${WS_PORT}"
-    echo "- REST API:          http://127.0.0.1:${FLASK_PORT}"
+    echo "- Dashboard:         http://127.0.0.1:${UI_PORT}"
+    echo "- WebSocket/REST:    http://127.0.0.1:${API_PORT}"
     echo "- Ingestion Log:     tail -f data/logs/ingestion.log"
     echo "- Consumer Log:      tail -f data/logs/consumer.log"
     echo "- Startup Log:       tail -f data/logs/startup.log"
@@ -519,7 +521,12 @@ main() {
     # Tail logs if interactive
     if [ -t 1 ]; then
         log_info "Running in interactive mode. Press Ctrl+C to detach."
-        tail -f "$PROJECT_ROOT/data/logs/consumer.log"
+        tail -f "$PROJECT_ROOT/data/logs/consumer.log" &
+        local tail_pid=$!
+        
+        # Wait for Ctrl+C
+        trap "kill $tail_pid 2>/dev/null; exit" INT
+        wait $tail_pid
     fi
 
     return $((1 - all_healthy))

@@ -22,7 +22,8 @@ import {
   StopCircle,
   Clock,
   ExternalLink,
-  Info
+  Info,
+  ChevronDown
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -98,6 +99,10 @@ function App() {
   
   const [chartData, setChartData] = useState([]);
   const [attackers, setAttackers] = useState({});
+  const [driftWarning, setDriftWarning] = useState(null);
+  const [expandedRow, setExpandedRow] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [saveStatus, setSaveStatus] = useState(null);
   const lastStats = useRef({ processed: 0, attacks: 0 });
   
   const ws = useRef(null);
@@ -131,9 +136,41 @@ function App() {
     }
   };
 
+  const fetchConfig = async () => {
+    try {
+      const res = await fetch('/api/config');
+      const data = await res.json();
+      setConfig(data);
+    } catch (err) {
+      console.error("Config fetch failed:", err);
+    }
+  };
+
+  const saveConfig = async () => {
+    setSaveStatus('saving');
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSaveStatus('success');
+        setTimeout(() => setSaveStatus(null), 3000);
+      } else {
+        setSaveStatus('error');
+      }
+    } catch (err) {
+      console.error("Config save failed:", err);
+      setSaveStatus('error');
+    }
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchAlerts();
+    fetchConfig();
     const timer = setInterval(fetchStatus, 3000);
     return () => clearInterval(timer);
   }, []);
@@ -141,10 +178,9 @@ function App() {
   // WebSocket Connection
   useEffect(() => {
     const connect = () => {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws/alerts`;
+      const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/alerts`;
       
-      ws.current = new WebSocket(wsUrl);
+      ws.current = new WebSocket(WS_URL);
 
       ws.current.onopen = () => {
         setConnected(true);
@@ -154,6 +190,12 @@ function App() {
       ws.current.onmessage = (event) => {
         try {
           const alert = JSON.parse(event.data);
+          
+          if (alert.type === "drift_alert") {
+            setDriftWarning(alert.message);
+            return;
+          }
+
           setAlerts(prev => [alert, ...prev].slice(0, 100));
 
           if (alert.processing_time_ms !== undefined) {
@@ -412,6 +454,12 @@ function App() {
           >
             <Cpu size={16} /> Attack Lab
           </button>
+          <button 
+            className={`tab-button ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            <Settings size={16} /> Settings
+          </button>
         </div>
 
         <div className="status-container" style={{ position: 'absolute', top: '2.5rem', right: '4rem', zIndex: 100 }}>
@@ -440,7 +488,31 @@ function App() {
         </div>
       </header>
 
-
+      {/* Drift Warning Banner */}
+      {driftWarning && (
+        <div className="drift-banner animate-fade-in" style={{ 
+          background: 'rgba(234, 179, 8, 0.1)', 
+          border: '1px solid var(--warning)', 
+          color: 'var(--warning)', 
+          padding: '1rem', 
+          borderRadius: '12px', 
+          marginBottom: '1.5rem', 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '12px',
+          fontWeight: 700,
+          fontSize: '0.85rem'
+        }}>
+          <AlertTriangle size={18} />
+          <div style={{ flex: 1 }}>{driftWarning}</div>
+          <button 
+            onClick={() => setDriftWarning(null)}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontWeight: 800 }}
+          >
+            DISMISS
+          </button>
+        </div>
+      )}
 
       {/* Stats Grid */}
       <div className="stats-grid animate-fade-in" style={{ animationDelay: '0.1s' }}>
@@ -552,46 +624,114 @@ function App() {
                                            alert.category?.toLowerCase().includes('ips') || 
                                            alert.prediction?.toLowerCase().includes('attack');
                           return (
-                            <tr key={alert.event_id || i} className={`alert-row ${isBlocked ? 'alert-row-danger' : ''}`}>
-                              <td style={{ opacity: 0.6 }}>{alert.timestamp?.split('T')[1]?.split('.')[0]}</td>
-                              <td className="ip-address">
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                  {(isBlocked || alert.is_mitigated) && <Lock size={12} className="text-danger" />}
-                                  {alert.src_ip}
-                                </div>
-                              </td>
-                              <td className="ip-address">{alert.dst_ip || 'Internal'}</td>
-                              <td>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                  <Badge variant={
-                                    alert.prediction?.toLowerCase().includes('attack') ? 'danger' :
-                                    alert.prediction?.toLowerCase().includes('suspicious') ? 'warning' : 'success'
-                                  }>
-                                    {alert.prediction?.toUpperCase()}
-                                  </Badge>
-                                  {alert.is_mitigated && (
-                                    <span style={{ 
-                                      fontSize: '0.65rem', 
-                                      fontWeight: 800, 
-                                      color: 'var(--warning)', 
-                                      letterSpacing: '0.05em',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '4px'
-                                    }}>
-                                      <Zap size={10} /> {alert.mitigation}
+                            <React.Fragment key={alert.event_id || i}>
+                              <tr 
+                                className={`alert-row ${isBlocked ? 'alert-row-danger' : ''}`}
+                                onClick={() => setExpandedRow(expandedRow === (alert.event_id || i) ? null : (alert.event_id || i))}
+                                style={{ cursor: 'pointer', transition: 'background 0.2s' }}
+                              >
+                                <td style={{ opacity: 0.6 }}>{alert.timestamp?.split('T')[1]?.split('.')[0]}</td>
+                                <td className="ip-address">
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    {(isBlocked || alert.is_mitigated) && <Lock size={12} className="text-danger" />}
+                                    {alert.src_ip}
+                                  </div>
+                                </td>
+                                <td className="ip-address">{alert.dst_ip || 'Internal'}</td>
+                                <td>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    <Badge variant={
+                                      alert.prediction?.toLowerCase().includes('attack') ? 'danger' :
+                                      alert.prediction?.toLowerCase().includes('suspicious') ? 'warning' : 'success'
+                                    }>
+                                      {alert.prediction?.toUpperCase()}
+                                    </Badge>
+                                    {alert.is_mitigated && alert.mitigation && (
+                                      <span style={{ 
+                                        fontSize: '0.65rem', 
+                                        fontWeight: 800, 
+                                        color: 'var(--warning)', 
+                                        letterSpacing: '0.05em',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '4px'
+                                      }}>
+                                        <Zap size={10} /> {alert.mitigation}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td style={{ fontWeight: 800 }}>
+                                  {alert.confidence > 0 ? `${alert.confidence?.toFixed(1)}%` : '—'}
+                                </td>
+                                <td style={{ fontSize: '0.8rem' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span>
+                                      {alert.category?.startsWith('IPS') ? (
+                                        <span className="text-danger" style={{ fontWeight: 700 }}>[{alert.category.split(' - ')[0]}] </span>
+                                      ) : null}
+                                      {alert.alert_sig}
                                     </span>
-                                  )}
-                                </div>
-                              </td>
-                              <td style={{ fontWeight: 800 }}>{alert.confidence?.toFixed(1)}%</td>
-                              <td style={{ fontSize: '0.8rem' }}>
-                                {alert.category?.startsWith('IPS') ? (
-                                  <span className="text-danger" style={{ fontWeight: 700 }}>[{alert.category.split(' - ')[0]}] </span>
-                                ) : null}
-                                {alert.alert_sig}
-                              </td>
-                            </tr>
+                                    <ChevronDown size={14} style={{ opacity: 0.3, transform: expandedRow === (alert.event_id || i) ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+                                  </div>
+                                </td>
+                              </tr>
+                              
+                              {expandedRow === (alert.event_id || i) && (
+                                <tr className="explain-row" style={{ background: 'rgba(255,255,255,0.02)' }}>
+                                   <td colSpan={6} style={{ padding: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                      <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                                         {alert.mitre && (
+                                           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                              <Shield size={16} className="text-primary" />
+                                              <span style={{ fontWeight: 800, fontSize: '0.8rem', color: 'var(--primary)', letterSpacing: '0.05em' }}>
+                                                MITRE ATT&CK: {alert.mitre.id} — {alert.mitre.name}
+                                              </span>
+                                           </div>
+                                         )}
+                                         
+                                         <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '3rem' }}>
+                                            <div>
+                                               <div style={{ fontSize: '0.7rem', opacity: 0.5, marginBottom: '0.75rem', fontWeight: 800, letterSpacing: '0.05em' }}>BEHAVIORAL EVIDENCE (TOP FEATURES)</div>
+                                               {alert.shap_top3?.length > 0 ? (
+                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                                    {alert.shap_top3.map(f => (
+                                                      <div key={f.feature} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                                         <span style={{ fontSize: '0.75rem', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', opacity: 0.8 }}>{f.feature}</span>
+                                                         <div style={{ flex: 1.5, height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden', position: 'relative' }}>
+                                                            <div style={{ 
+                                                              width: `${Math.min(Math.abs(f.impact) * 200, 100)}%`, 
+                                                              height: '100%', 
+                                                              background: f.impact > 0 ? 'var(--danger)' : 'var(--primary)',
+                                                              opacity: 0.6
+                                                            }} />
+                                                         </div>
+                                                         <span style={{ fontSize: '0.7rem', fontWeight: 800, width: '50px', textAlign: 'right', fontFamily: 'monospace' }}>{f.value.toFixed(2)}</span>
+                                                      </div>
+                                                    ))}
+                                                 </div>
+                                               ) : (
+                                                 <div style={{ fontSize: '0.75rem', opacity: 0.4, fontStyle: 'italic' }}>No SHAP evidence available for this event type.</div>
+                                               )}
+                                            </div>
+                                            
+                                            <div style={{ borderLeft: '1px solid rgba(255,255,255,0.05)', paddingLeft: '2rem' }}>
+                                               <div style={{ fontSize: '0.7rem', opacity: 0.5, marginBottom: '0.75rem', fontWeight: 800, letterSpacing: '0.05em' }}>ANOMALY SCOPE</div>
+                                               <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
+                                                  <span className="gradient-text" style={{ fontSize: (alert.anomaly_score > 0) ? '2.5rem' : '1.5rem', fontWeight: 900 }}>
+                                                     {(alert.anomaly_score > 0) ? alert.anomaly_score.toFixed(4) : 'CALIBRATING...'}
+                                                  </span>
+                                               </div>
+                                               <p style={{ fontSize: '0.7rem', opacity: 0.5, marginTop: '0.25rem', lineHeight: 1.4 }}>
+                                                  Normalised reconstruction error relative to rolling <b>{alert.protocol}</b> baseline.
+                                               </p>
+                                            </div>
+                                         </div>
+                                      </div>
+                                   </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
                           );
                         })}
                       </tbody>
@@ -815,6 +955,319 @@ function App() {
                        Inject Payload
                      </button>
                    </GlassCard>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'settings' && config && (
+              <motion.div key="settings" className="content-stack animate-fade-in">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                  <h2 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 900 }} className="gradient-text">System Configuration</h2>
+                  <button 
+                    onClick={saveConfig}
+                    className="glass"
+                    style={{ 
+                      padding: '10px 24px', 
+                      borderRadius: '12px', 
+                      background: saveStatus === 'success' ? 'var(--success)' : 'var(--primary)',
+                      color: 'white',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      border: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      transition: 'all 0.3s'
+                    }}
+                  >
+                    {saveStatus === 'saving' ? <RefreshCcw size={16} className="animate-spin" /> : <Database size={16} />}
+                    {saveStatus === 'success' ? 'SAVED' : saveStatus === 'error' ? 'FAILED' : 'SAVE CONFIGURATION'}
+                  </button>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                  {/* ML Decision Engine Settings */}
+                  <GlassCard title="ML Decision Engine" icon={Cpu}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                      <div>
+                         <label style={{ fontSize: '0.75rem', opacity: 0.6, display: 'block', marginBottom: '0.5rem' }}>Attack Threshold</label>
+                         <input 
+                           type="range" min="0" max="1" step="0.01" 
+                           value={config.detection?.decision_engine?.thresholds?.attack || 0.85}
+                           onChange={(e) => {
+                             const newConfig = {...config};
+                             newConfig.detection.decision_engine.thresholds.attack = parseFloat(e.target.value);
+                             setConfig(newConfig);
+                           }}
+                           style={{ width: '100%' }}
+                         />
+                         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.25rem' }}>
+                            <span style={{ fontSize: '0.7rem' }}>Conservative</span>
+                            <span style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--primary)' }}>{config.detection?.decision_engine?.thresholds?.attack}</span>
+                            <span style={{ fontSize: '0.7rem' }}>Aggressive</span>
+                         </div>
+                      </div>
+
+                      <div>
+                         <label style={{ fontSize: '0.75rem', opacity: 0.6, display: 'block', marginBottom: '0.5rem' }}>Suspicious Threshold</label>
+                         <input 
+                           type="range" min="0" max="1" step="0.01" 
+                           value={config.detection?.decision_engine?.thresholds?.suspicious || 0.6}
+                           onChange={(e) => {
+                             const newConfig = {...config};
+                             newConfig.detection.decision_engine.thresholds.suspicious = parseFloat(e.target.value);
+                             setConfig(newConfig);
+                           }}
+                           style={{ width: '100%' }}
+                         />
+                         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.25rem' }}>
+                            <span style={{ fontSize: '0.7rem' }}>Low Sensitivity</span>
+                            <span style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--warning)' }}>{config.detection?.decision_engine?.thresholds?.suspicious}</span>
+                            <span style={{ fontSize: '0.7rem' }}>High Sensitivity</span>
+                         </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
+                         <div>
+                            <label style={{ fontSize: '0.65rem', opacity: 0.5 }}>Sig Weight</label>
+                            <input 
+                              type="number" step="0.1" className="glass"
+                              value={config.detection?.decision_engine?.weights?.signature}
+                              onChange={(e) => {
+                                const newConfig = {...config};
+                                newConfig.detection.decision_engine.weights.signature = parseFloat(e.target.value);
+                                setConfig(newConfig);
+                              }}
+                              style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                            />
+                         </div>
+                         <div>
+                            <label style={{ fontSize: '0.65rem', opacity: 0.5 }}>ML Weight</label>
+                            <input 
+                              type="number" step="0.1" className="glass"
+                              value={config.detection?.decision_engine?.weights?.ml}
+                              onChange={(e) => {
+                                const newConfig = {...config};
+                                newConfig.detection.decision_engine.weights.ml = parseFloat(e.target.value);
+                                setConfig(newConfig);
+                              }}
+                              style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                            />
+                         </div>
+                         <div>
+                            <label style={{ fontSize: '0.65rem', opacity: 0.5 }}>Anomaly Weight</label>
+                            <input 
+                              type="number" step="0.1" className="glass"
+                              value={config.detection?.decision_engine?.weights?.anomaly}
+                              onChange={(e) => {
+                                const newConfig = {...config};
+                                newConfig.detection.decision_engine.weights.anomaly = parseFloat(e.target.value);
+                                setConfig(newConfig);
+                              }}
+                              style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                            />
+                         </div>
+                      </div>
+                    </div>
+                  </GlassCard>
+
+                  {/* Mitigation Policies */}
+                  <GlassCard title="Mitigation Policy" icon={Shield}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                             <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>Block Duration (TTL)</div>
+                             <div style={{ fontSize: '0.7rem', opacity: 0.5 }}>Time in seconds for temporary blocks</div>
+                          </div>
+                          <input 
+                            type="number" className="glass"
+                            value={config.mitigation?.block_ttl}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.mitigation.block_ttl = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '80px', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white', textAlign: 'right' }}
+                          />
+                       </div>
+
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                             <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>Rate Limit</div>
+                             <div style={{ fontSize: '0.7rem', opacity: 0.5 }}>Max packets/sec per IP before sampling</div>
+                          </div>
+                          <input 
+                            type="number" className="glass"
+                            value={config.mitigation?.rate_limit_per_sec}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.mitigation.rate_limit_per_sec = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '80px', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white', textAlign: 'right' }}
+                          />
+                       </div>
+
+                       <div style={{ marginTop: '0.5rem', padding: '1rem', background: 'rgba(234, 179, 8, 0.05)', border: '1px solid rgba(234, 179, 8, 0.2)', borderRadius: '10px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.5rem', color: 'var(--warning)', fontWeight: 800, fontSize: '0.7rem' }}>
+                             <AlertTriangle size={14} /> ATTENTION REQUIRED
+                          </div>
+                          <p style={{ fontSize: '0.7rem', margin: 0, opacity: 0.7, lineHeight: 1.4 }}>
+                            Changes to mitigation thresholds will enforce stricter kernel-level packet drops. Ensure your whitelists are current before applying aggressive policies.
+                          </p>
+                       </div>
+                    </div>
+                  </GlassCard>
+
+                  {/* System Parameters */}
+                  <GlassCard title="Pipeline & Infrastructure" icon={Server}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+                       <div>
+                          <label style={{ fontSize: '0.7rem', opacity: 0.5 }}>Log Level</label>
+                          <select 
+                            className="glass"
+                            value={config.system?.log_level}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.system.log_level = e.target.value;
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                          >
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                          </select>
+                       </div>
+                       <div>
+                          <label style={{ fontSize: '0.7rem', opacity: 0.5 }}>Worker Threads</label>
+                          <input 
+                            type="number" className="glass"
+                            value={config.system?.worker_count}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.system.worker_count = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                          />
+                       </div>
+                       <div>
+                          <label style={{ fontSize: '0.7rem', opacity: 0.5 }}>Batch Size</label>
+                          <input 
+                            type="number" className="glass"
+                            value={config.system?.batch_size}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.system.batch_size = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                          />
+                       </div>
+                       <div>
+                          <label style={{ fontSize: '0.7rem', opacity: 0.5 }}>Websocket Port</label>
+                          <input 
+                            type="number" className="glass"
+                            value={config.network?.ws_port}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.network.ws_port = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '100%', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white' }}
+                          />
+                       </div>
+                    </div>
+                  </GlassCard>
+
+                  {/* Detection Tuning */}
+                  <GlassCard title="Detection Correlation" icon={Activity}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                             <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>Port Scan Threshold</div>
+                             <div style={{ fontSize: '0.7rem', opacity: 0.5 }}>Unique ports per window to trigger alert</div>
+                          </div>
+                          <input 
+                            type="number" className="glass"
+                            value={config.detection?.port_scan_threshold}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.detection.port_scan_threshold = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '80px', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white', textAlign: 'right' }}
+                          />
+                       </div>
+
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                             <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>DoS Event Threshold</div>
+                             <div style={{ fontSize: '0.7rem', opacity: 0.5 }}>Events per window from single source</div>
+                          </div>
+                          <input 
+                            type="number" className="glass"
+                            value={config.detection?.dos_threshold}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.detection.dos_threshold = parseInt(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '80px', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white', textAlign: 'right' }}
+                          />
+                       </div>
+
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                             <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>Correlation Window</div>
+                             <div style={{ fontSize: '0.7rem', opacity: 0.5 }}>Time in seconds for flow aggregation</div>
+                          </div>
+                          <input 
+                            type="number" step="1" className="glass"
+                            value={config.detection?.correlation_window}
+                            onChange={(e) => {
+                              const newConfig = {...config};
+                              newConfig.detection.correlation_window = parseFloat(e.target.value);
+                              setConfig(newConfig);
+                            }}
+                            style={{ width: '80px', padding: '8px', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '6px', color: 'white', textAlign: 'right' }}
+                          />
+                       </div>
+                    </div>
+                  </GlassCard>
+
+                  {/* Adversarial Weaknesses & Model Limits */}
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <GlassCard title="Adversarial Weaknesses & Model Limits" icon={Lock}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                        <div>
+                          <div style={{ color: 'var(--danger)', fontWeight: 800, fontSize: '0.75rem', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>EVASION VULNERABILITIES</div>
+                          <ul style={{ fontSize: '0.75rem', opacity: 0.7, paddingLeft: '1.25rem', lineHeight: 1.6 }}>
+                            <li><b>Feature Manipulation</b>: Attackers may use packet padding or timing delays to bypass ML thresholds.</li>
+                            <li><b>Aggregation Blind Spots</b>: Single-packet exploits can be masked by high-volume normal traffic in the flow aggregator.</li>
+                            <li><b>SHAP Obfuscation</b>: Spurious benign features can be injected to distract from malicious indicators in forensics.</li>
+                          </ul>
+                        </div>
+                        <div>
+                          <div style={{ color: 'var(--warning)', fontWeight: 800, fontSize: '0.75rem', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>OPERATIONAL LIMITS</div>
+                          <ul style={{ fontSize: '0.75rem', opacity: 0.7, paddingLeft: '1.25rem', lineHeight: 1.6 }}>
+                            <li><b>Low & Slow Drift</b>: Incremental poisoning of the VAE baseline may occur if attacks are distributed over weeks.</li>
+                            <li><b>Zero-Day Latency</b>: Novel attacks without prior feature correlation may take N-samples before triggering ADWIN alerts.</li>
+                            <li><b>False Positives</b>: High-entropy benign traffic (e.g., encrypted backups) can skew anomaly scores.</li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: '1.5rem', padding: '0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', fontSize: '0.7rem', opacity: 0.5, fontStyle: 'italic', textAlign: 'center' }}>
+                        Notice: This system uses a hybrid behavioral/signature approach. Analysts should cross-reference ML alerts with deterministic Suricata signatures for high-confidence mitigation.
+                      </div>
+                    </GlassCard>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '1rem', padding: '1rem', borderTop: '1px solid rgba(255,255,255,0.05)', textAlign: 'center', opacity: 0.4, fontSize: '0.7rem' }}>
+                  Sentinel Core v3.0.0 — Hybrid ML/Signature Pipeline — SOC Administrative Console
                 </div>
               </motion.div>
             )}

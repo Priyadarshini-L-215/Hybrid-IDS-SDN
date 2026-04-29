@@ -14,3 +14,6 @@ prometheus-client
 aiosqlite
 python-multipart
 httpx
+river>=0.21.0
+onnxruntime
+shap>=0.45.0

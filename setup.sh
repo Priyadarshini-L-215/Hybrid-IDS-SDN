@@ -98,6 +98,7 @@ setup_system_packages() {
         "iptables"
         "redis-server"
         "suricata"
+        "ipset"
         "software-properties-common"
     )
 

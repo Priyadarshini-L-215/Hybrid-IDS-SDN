@@ -5,6 +5,7 @@ Consolidates the duplicated alert-construction logic from consumer.py
 (legacy pipeline) and worker_pool.py (Redis pipeline) into a single
 reusable function.
 """
+from common.mitre_map import get_mitre
 
 
 SIGNATURE_MAP = {
@@ -101,5 +102,8 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         "processing_time_ms": 0.0,
         "alert_source": event.get("alert_source"),
         "is_simulation": event.get("is_simulation"),
+        "mitre": get_mitre(sig),
+        "shap_top3": prediction.get("shap_top3", []),
+        "anomaly_score": prediction.get("anomaly_score", 0.0),
         "raw_event": event,
     }

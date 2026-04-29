@@ -58,6 +58,37 @@ class MLEngine:
             logger.error("Failed to load metadata", error=str(e))
             self.meta = {"model_version": "v3.0-error"}
 
+    def reload_config(self):
+        """Reloads settings from config.py and updates internal components."""
+        try:
+            from common.config import refresh_config
+            refresh_config()
+            from common.config import (
+                ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE,
+                ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
+                ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES
+            )
+            
+            # Update Decision Engine
+            self.decision_engine.weights = {
+                "signature": ML_WEIGHT_SIG,
+                "ml": ML_WEIGHT_RF,
+                "anomaly": ML_WEIGHT_AE
+            }
+            self.decision_engine.thresholds = {
+                "attack": ML_THRESHOLD_ATTACK,
+                "suspicious": ML_THRESHOLD_SUSPICIOUS
+            }
+            
+            # Update Anomaly Scorer
+            if hasattr(self, 'anomaly_scorer'):
+                self.anomaly_scorer.percentile = ANOMALY_PERCENTILE
+                self.anomaly_scorer.min_samples = ANOMALY_MIN_SAMPLES
+                
+            logger.info("MLEngine configuration reloaded successfully")
+        except Exception as e:
+            logger.error("Failed to reload MLEngine config", error=str(e))
+
     def _load_models(self):
         """Loads Scaler and RF (prefers ONNX)."""
         try:
@@ -168,6 +199,7 @@ class MLEngine:
                 "anomaly_score": round(anomaly_score, 4),
                 "sig_present": sig_present,
                 "model_version": self.meta.get("model_version", "v3.0"),
+                "shap_top3": self._get_shap_top3(features_list[i]) if classification != "normal" else [],
                 "latency": {
                     "extract_ms": round(extract_ms / batch_count, 2),
                     "infer_ms": round(infer_ms / batch_count, 2),
