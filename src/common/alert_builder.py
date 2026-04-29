@@ -7,6 +7,39 @@ reusable function.
 """
 
 
+SIGNATURE_MAP = {
+    # ICMP
+    "SURICATA ICMPv4 unknown code": "Invalid ICMPv4 Code (Decoder Anomaly)",
+    "SURICATA ICMPv4 unknown type": "Invalid ICMPv4 Type (Decoder Anomaly)",
+    "SURICATA ICMPv4 truncated packet": "Truncated ICMPv4 Packet",
+    "SURICATA ICMPv6 unknown type": "Invalid ICMPv6 Type",
+    
+    # TCP/IP
+    "SURICATA IPv4 length too small": "Malformed IPv4 Header (Too Short)",
+    "SURICATA TCP invalid header length": "Invalid TCP Header Length",
+    "SURICATA TCP packet too short": "Truncated TCP Packet",
+    "SURICATA UDP packet too short": "Truncated UDP Packet",
+    
+    # TLS/SSL
+    "SURICATA TLS invalid record type": "TLS Protocol Violation (Invalid Record)",
+    "SURICATA TLS invalid version": "Legacy/Invalid TLS Version Detected",
+    
+    # HTTP
+    "SURICATA HTTP request line too long": "HTTP Flood/Buffer Exhaustion Attempt",
+    "SURICATA HTTP invalid header name": "Malformed HTTP Header",
+}
+
+def normalize_signature(sig: str) -> str:
+    """Cleans up cryptic Suricata signatures into readable text."""
+    if not sig: return sig
+    if sig in SIGNATURE_MAP:
+        return SIGNATURE_MAP[sig]
+    # Fallback: Strip SURICATA prefix and title-case
+    if sig.startswith("SURICATA "):
+        cleaned = sig.replace("SURICATA ", "").replace("_", " ").strip()
+        return cleaned.title()
+    return sig
+
 def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) -> dict:
     """
     Build a normalised alert dict from a raw Suricata event and an ML prediction.
@@ -29,7 +62,7 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         final_confidence = max(final_confidence, 90.0)
 
     # Dynamic Signature Enrichment
-    sig = alert_info.get("signature")
+    sig = alert_info.get("signature") or event.get("alert_signature")
     if not sig:
         etype = event.get("event_type", "flow")
         if etype == "dns":
@@ -41,9 +74,9 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         elif etype == "ssh":
             sig = "SSH Connection Attempt"
         else:
-            proto = event.get("proto") or "TCP"
-            port = event.get("dest_port", "")
-            is_malicious = final_classification in {"attack", "zero-day anomaly"}
+            proto = event.get("protocol") or event.get("proto") or "TCP"
+            port = event.get("dst_port") or event.get("dest_port") or ""
+            is_malicious = final_classification in {"attack", "suspicious", "zero-day anomaly"}
             sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
 
     if event_id is None:
@@ -54,14 +87,19 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         "timestamp": event.get("timestamp"),
         "event_type": event.get("event_type"),
         "src_ip": event.get("src_ip"),
+        "dst_ip": event.get("dst_ip") or event.get("dest_ip"),
         "src_port": event.get("src_port"),
-        "dest_ip": event.get("dest_ip"),
-        "dest_port": event.get("dest_port"),
-        "protocol": event.get("proto") or "unknown",
-        "alert_sig": sig,
+        "dst_port": event.get("dst_port") or event.get("dest_port"),
+        "protocol": event.get("protocol") or event.get("proto") or "unknown",
+        "alert_sig": normalize_signature(sig),
         "prediction": final_classification,
         "confidence": final_confidence,
         "severity": alert_info.get("severity", 4),
         "category": alert_info.get("category", "ML Detection"),
+        "mitigation": None,
+        "is_mitigated": False,
+        "processing_time_ms": 0.0,
+        "alert_source": event.get("alert_source"),
+        "is_simulation": event.get("is_simulation"),
         "raw_event": event,
     }

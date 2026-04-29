@@ -1,274 +1,158 @@
 import json
-import logging
 import time
 import asyncio
-import collections
-import sqlite3
-import sys
-from typing import Optional, List
-from pathlib import Path
-
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from ml_engine import redis_client
-from ml_engine.firewall import ActiveFirewall
+import structlog
+from typing import Optional, List, Callable
 from common.config import REDIS_QUEUE_NAME, BATCH_SIZE, BATCH_FLUSH_INTERVAL
-from common.database import batch_add_alerts
-from common.net_utils import get_local_ip, get_gateway_ip
+from ml_engine import redis_client as rc
+from ml_engine.firewall import ActiveFirewall
+from ml_engine.engine import MLEngine
 from common.alert_builder import build_alert_payload
 
-logger = logging.getLogger(__name__)
-
+logger = structlog.get_logger(__name__)
 
 class WorkerPool:
     """
-    Async Worker Pool that consumes from Redis queue and processes events.
-    
-    Each worker task:
-    1. Pops event from Redis queue (async)
-    2. Extracts features + ML prediction
-    3. Immediate WebSocket broadcast (async)
-    4. Accumulates in batch buffer for SQLite persistence
+    Async Worker Pool for processing Redis Streams.
+    Orchestrates: Consume -> ML Engine -> Decision -> IPS Mitigation -> Broadcast.
     """
 
-    def __init__(self, worker_count=4, ml_engine=None, broadcast_func=None, loop=None):
+    def __init__(self, 
+                 worker_count: int = 4, 
+                 ml_engine: MLEngine = None, 
+                 broadcast_func: Callable = None):
+        
         self.worker_count = worker_count
-        self.ml_engine = ml_engine
+        self.ml_engine = ml_engine or MLEngine()
         self.broadcast_func = broadcast_func
-        self._loop = loop  # Resolved lazily if None
         
-        self.batch_buffer = []
-        self.batch_lock = asyncio.Lock()
-        self.batch_flush_interval = BATCH_FLUSH_INTERVAL
-        
-        self.worker_tasks = []
-        self.flusher_task = None
         self.running = False
+        self.worker_tasks = []
         
-        # --- Stateful Flow Correlation (IPS) ---
-        self.flow_history = collections.defaultdict(list)
-        self.port_history = collections.defaultdict(dict)
-        self.correlation_lock = asyncio.Lock()
-        self.WINDOW_SIZE = 10.0  
-        self.PORT_SCAN_THRESHOLD = 25   
-        self.DOS_FLOW_THRESHOLD = 100   
-        
-        # Metrics (atomic via GIL — no lock needed for simple int increments)
-        self.events_processed = 0
-        self.events_flushed = 0
-        self.errors = 0
+        # Stats
+        self.processed_count = 0
+        self.error_count = 0
+        self.start_time = time.time()
 
-    def start(self):
-        """Start async worker tasks and flusher."""
-        if self.running:
-            return
-            
+    async def start(self):
+        """Start async worker tasks."""
+        if self.running: return
         self.running = True
         
-        # Start worker tasks
-        for i in range(self.worker_count):
-            task = asyncio.create_task(self._worker_loop(f"Worker-{i}"))
-            self.worker_tasks.append(task)
-        
-        # Start flusher task
-        self.flusher_task = asyncio.create_task(self._batch_flusher())
-        
-        logger.info(f"[WorkerPool] Started {self.worker_count} async workers")
+        # Ensure Redis is ready
+        if not rc.async_redis_client:
+            await rc.init_async_redis()
 
-    async def _worker_loop(self, worker_name):
-        """Async worker loop: non-blocking pop from Redis."""
-        # Ensure async redis is initialized
-        if redis_client.async_redis_client is None:
-            await redis_client.init_async_redis()
+        # Start workers
+        for i in range(self.worker_count):
+            task = asyncio.create_task(self._worker_loop(f"worker-{i}"))
+            self.worker_tasks.append(task)
             
+        logger.info("Worker pool started", count=self.worker_count)
+
+    async def _worker_loop(self, worker_id: str):
+        """Main loop: XREADGROUP -> Batch Process -> ACK."""
+        group_name = "sentinel_workers"
+        
+        # Ensure group exists
+        try:
+            await rc.async_redis_client.xgroup_create(
+                REDIS_QUEUE_NAME, group_name, id="0", mkstream=True
+            )
+        except Exception:
+            pass # Already exists
+
         while self.running:
             try:
-                # Async blocking pop (wait up to 1s)
-                if redis_client.async_redis_client is None:
-                    await asyncio.sleep(1)
-                    continue
-                    
-                res = await redis_client.async_redis_client.blpop(REDIS_QUEUE_NAME, timeout=1)
+                # 1. Read Batch
+                streams = await rc.async_redis_client.xreadgroup(
+                    group_name, worker_id, {REDIS_QUEUE_NAME: ">"}, count=BATCH_SIZE, block=100
+                )
                 
-                if not res:
+                if not streams:
                     continue
                 
-                pop_ts = time.time()
-                event_json = res[1]
-                event = json.loads(event_json)
+                logger.debug("Worker received batch", worker=worker_id, count=len(streams[0][1]))
+                batch_msgs = []
+                batch_ids = []
                 
-                if event.get("_tracer"):
-                    event["_worker_pop_ts"] = pop_ts
-                    logger.info(f"[TRACER] T3a Worker pop at {pop_ts:.6f}")
-                
-                processed = await self._process_event(event, worker_name)
-                
-                if processed:
-                    # 1. Immediate Broadcast
-                    if self.broadcast_func:
+                # Unpack Stream Response
+                for _, messages in streams:
+                    for msg_id, data in messages:
                         try:
-                            await self.broadcast_func(json.dumps(processed))
-                        except (ConnectionError, BrokenPipeError) as exc:
-                            logger.error(f"[{worker_name}] Broadcast error: {exc}")
-                        except Exception as exc: # Fallback for unknown broadcast issues
-                            logger.error(f"[{worker_name}] Broadcast unexpected error: {exc}")
-
-                    async with self.batch_lock:
-                        self.batch_buffer.append(processed)
-                        self.events_processed += 1
-                        
-                        # Threshold flush
-                        if len(self.batch_buffer) >= 20: # Slightly larger threshold for async
-                            await self._flush_batch()
+                            # data["event"] is the JSON payload from ingestion
+                            event_data = json.loads(data["event"])
+                            batch_msgs.append(event_data)
+                            batch_ids.append(msg_id)
+                        except Exception as e:
+                            logger.error("Failed to parse event", error=str(e), msg_id=msg_id)
+                            await rc.async_redis_client.xack(REDIS_QUEUE_NAME, group_name, msg_id)
                 
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                logger.error(f"[{worker_name}] Data format error: {exc}")
-                self.errors += 1
-            except Exception as exc:
-                logger.error(f"[{worker_name}] Runtime error: {exc}")
-                self.errors += 1
-                await asyncio.sleep(0.1)
+                if not batch_msgs:
+                    continue
 
-    async def _process_event(self, event, worker_name):
-        """Process event, correlate, and enrich."""
-        try:
-            src_ip = event.get("src_ip")
-            dest_ip = event.get("dest_ip")
-            src_port = event.get("src_port")
-            dest_port = event.get("dest_port")
-            event_type = event.get("event_type")
-            
-            # --- Noise Filtering ---
-            CONTROL_PORTS = {3000, 3001, 5000, 5001, 6379, 8765, 8766, 8777}
-            local_ip = get_local_ip() or "127.0.0.1"
-            gateway_ip = get_gateway_ip() or "172.25.16.1"
-            INTERNAL_IPS = {"127.0.0.1", "::1", local_ip, gateway_ip}
-            
-            is_internal_bridge = (src_ip in INTERNAL_IPS and dest_ip in INTERNAL_IPS)
-            is_control_port = (src_port in CONTROL_PORTS or dest_port in CONTROL_PORTS)
-            
-            if (is_control_port or is_internal_bridge or src_ip == "127.0.0.1") and event_type != "alert":
-                return None
-            
-            # --- Tracer Bypass ---
-            if event.get("_tracer"):
-                worker_done_ts = time.time()
-                alert_info = event.get("alert", {})
-                alert = {
-                    "timestamp": event.get("timestamp"),
-                    "src_ip": event.get("src_ip"),
-                    "dest_ip": event.get("dest_ip"),
-                    "src_port": event.get("src_port"),
-                    "dest_port": event.get("dest_port"),
-                    "event_type": event.get("event_type"),
-                    "alert_sig": alert_info.get("signature", "SENTINEL_LATENCY_PROBE"),
-                    "protocol": event.get("proto") or "TCP",
-                    "prediction": "normal",
-                    "confidence": 100.0,
-                    "severity": alert_info.get("severity", 3),
-                    "category": alert_info.get("category", "Diagnostic"),
-                    "id": event.get("_tracer_id"), # Use id for tracers if present
-                    "_tracer": True,
-                    "_tracer_id": event.get("_tracer_id"),
-                    "_tracer_inject_ts": event.get("_tracer_inject_ts"),
-                    "_watcher_read_ts": event.get("_watcher_read_ts"),
-                    "_redis_push_ts": event.get("_redis_push_ts"),
-                    "_worker_pop_ts": event.get("_worker_pop_ts"),
-                    "_worker_done_ts": worker_done_ts,
-                    "raw_event": event
-                }
-                return alert
-
-            # --- ML Engine Inference ---
-            feature_vector = self.ml_engine.extract_features(event)
-            if not feature_vector:
-                return None
-            
-            prediction = self.ml_engine.predict(feature_vector)
-            if prediction.get("classification") == "error":
-                prediction = {"classification": "normal", "confidence": 0.0, "layer": "error_fallback"}
-
-            # --- Build alert using shared utility ---
-            alert = build_alert_payload(event, prediction)
-            
-            # Filter out benign flow events that the shared builder marked as normal flows
-            if event.get("event_type") == "flow" and alert["prediction"] == "normal":
-                if not alert["prediction"] in {"attack", "zero-day anomaly"}:
-                    return None
-            
-            # --- Stateful Flow Correlation ---
-            if src_ip and src_ip not in INTERNAL_IPS:
-                now = time.time()
-                async with self.correlation_lock:
-                    self.flow_history[src_ip].append(now)
-                    if dest_port: self.port_history[src_ip][str(dest_port)] = now
+                # 2. Process Batch via ML Engine
+                t_batch_start = time.time()
+                results = self.ml_engine.predict_batch(batch_msgs)
+                t_batch_end = time.time()
+                batch_lat = (t_batch_end - t_batch_start) * 1000 / (len(results) or 1)
+                
+                # 3. Finalize Alerts and Mitigation
+                alerts_to_send = []
+                for i, res in enumerate(results):
+                    raw_event = batch_msgs[i]
                     
-                    # Prune
-                    cutoff = now - self.WINDOW_SIZE
-                    self.flow_history[src_ip] = [ts for ts in self.flow_history[src_ip] if ts >= cutoff]
-                    self.port_history[src_ip] = {p: ts for p, ts in self.port_history[src_ip].items() if ts >= cutoff}
+                    # Create standard alert payload
+                    alert = build_alert_payload(raw_event, res)
+                    alert["processing_time_ms"] = batch_lat
                     
-                    # Fix: Delete empty IP keys to prevent slow memory leak
-                    if not self.flow_history[src_ip]:
-                        del self.flow_history[src_ip]
-                    if src_ip in self.port_history and not self.port_history[src_ip]:
-                        del self.port_history[src_ip]
+                    # Apply Mitigation Logic
+                    await self._apply_mitigation(alert, res)
                     
-                    # Only proceed if IP still in history (wasn't just deleted)
-                    if src_ip in self.port_history and len(self.port_history[src_ip]) > self.PORT_SCAN_THRESHOLD:
-                        alert.update({"prediction": "attack", "confidence": 99.0, "category": "Reconnaissance", "alert_sig": f"Port Scan ({len(self.port_history[src_ip])} ports)"})
-                        self.port_history[src_ip].clear()
-                    elif src_ip in self.flow_history and len(self.flow_history[src_ip]) > self.DOS_FLOW_THRESHOLD:
-                        alert.update({"prediction": "attack", "confidence": 98.0, "category": "Resource Exhaustion", "alert_sig": "DoS Pattern Detected"})
+                    alerts_to_send.append(alert)
+                    self.processed_count += 1
+                
+                # 4. Broadcast
+                if self.broadcast_func:
+                    for alert in alerts_to_send:
+                        await self.broadcast_func(json.dumps(alert))
+                
+                # 5. ACK Batch
+                if batch_ids:
+                    await rc.async_redis_client.xack(REDIS_QUEUE_NAME, group_name, *batch_ids)
 
-            # --- IPS Actions ---
-            if alert["prediction"] in {"attack", "zero-day anomaly"} and alert["confidence"] >= 95.0:
-                ActiveFirewall.block(alert["src_ip"])
-                alert["category"] = f"IPS Blocked - {alert['category']}"
-            
-            return alert
-        except (KeyError, TypeError, ValueError) as exc:
-            logger.error(f"[{worker_name}] Processing logic error: {exc}")
-            return None
-        except Exception as exc:
-            logger.error(f"[{worker_name}] Processing unexpected error: {exc}")
-            return None
+            except Exception as e:
+                logger.error("Worker loop error", error=str(e), worker=worker_id)
+                self.error_count += 1
+                await asyncio.sleep(1)
 
-    async def _batch_flusher(self):
-        """Periodic background flush to database."""
-        while self.running:
-            await asyncio.sleep(self.batch_flush_interval)
-            async with self.batch_lock:
-                if self.batch_buffer:
-                    await self._flush_batch()
-
-    async def _flush_batch(self):
-        """Offload SQLite write to thread pool executor to avoid blocking loop."""
-        if not self.batch_buffer:
-            return
+    async def _apply_mitigation(self, alert: dict, res: dict):
+        """Interface with ActiveFirewall for IPS actions."""
+        src_ip = alert.get("src_ip")
+        if not src_ip: return
         
-        batch = list(self.batch_buffer)
-        self.batch_buffer.clear()
+        # Calculate reputation delta from decision engine
+        delta = self.ml_engine.decision_engine.get_reputation_delta(
+            res["prediction"], res["final_score"]
+        )
         
-        loop = asyncio.get_running_loop()
-        try:
-            # SQLite is blocking; run in executor
-            await loop.run_in_executor(None, batch_add_alerts, batch)
-            self.events_flushed += len(batch)
-        except sqlite3.Error as exc:
-            logger.error(f"[BatchFlusher] Database error: {exc}")
-        except Exception as exc:
-            logger.error(f"[BatchFlusher] Flush unexpected error: {exc}")
+        # Trigger firewall
+        action = ActiveFirewall.process_incident(src_ip, delta)
+        
+        if action in {"permanent_block", "temp_block", "rate_limit"}:
+            alert["mitigation"] = action.replace('_', ' ').upper()
+            alert["is_mitigated"] = True
+            alert["category"] = f"IPS {action.replace('_', ' ').title()} - {alert.get('category', 'Threat')}"
+            logger.warning("IPS Mitigation Triggered", ip=src_ip, action=action, score=res["final_score"])
 
     def stop(self):
-        """Stop all tasks."""
         self.running = False
-        for task in self.worker_tasks:
-            task.cancel()
-        if self.flusher_task:
-            self.flusher_task.cancel()
-        logger.info("[WorkerPool] Async workers stopped")
+        for t in self.worker_tasks: t.cancel()
+        logger.info("Worker pool stopped")
 
     def get_status(self):
-        return f"Processed: {self.events_processed}, Flushed: {self.events_flushed}, Buffered: {len(self.batch_buffer)}, Errors: {self.errors}"
+        return {
+            "processed": self.processed_count,
+            "errors": self.error_count,
+            "uptime": round(time.time() - self.start_time, 2)
+        }

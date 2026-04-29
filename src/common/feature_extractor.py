@@ -21,6 +21,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_CACHED_FEATURES = None
 
 def load_feature_names(features_path: str | Path = None) -> list:
     """
@@ -38,6 +39,10 @@ def load_feature_names(features_path: str | Path = None) -> list:
     
     features_path = Path(features_path)
     
+    global _CACHED_FEATURES
+    if _CACHED_FEATURES is not None:
+        return _CACHED_FEATURES
+
     try:
         with open(features_path, 'r', encoding='utf-8') as f:
             features = json.load(f)
@@ -49,6 +54,7 @@ def load_feature_names(features_path: str | Path = None) -> list:
             logger.warning(f"Expected 77 features, but got {len(features)}. " 
                          "Model may have been trained on different feature set.")
         
+        _CACHED_FEATURES = features
         return features
     except FileNotFoundError:
         logger.error(f"features.json not found at {features_path}")
@@ -76,7 +82,10 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     if features is None:
         features = load_feature_names()
     
+    # Standardized schema fallback
     flow = event.get('flow', {})
+    if not flow and 'raw_event' in event:
+        flow = event['raw_event'].get('flow', {})
     
     # ===== BASIC FLOW METRICS =====
     fwd_pkts = float(flow.get('pkts_toserver', 0))
@@ -138,11 +147,21 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     flow_bytes_per_sec = total_bytes / safe_age
     
     # ===== TCP FLAG COUNTS =====
-    # Suricata doesn't expose individual flags in flow events, so we use 0
-    # In production, capture this at packet level
-    syn_flag_count = 0  # Would need packet capture to get this
-    fwd_psh_flags = 0
-    urg_flag_count = 0
+    # Suricata includes tcp flags in the event.tcp object or raw_event.tcp object
+    tcp_info = event.get('tcp', {})
+    if not tcp_info and 'raw_event' in event:
+        tcp_info = event['raw_event'].get('tcp', {})
+        
+    syn_flag_count = 1.0 if tcp_info.get('syn') else 0.0
+    fin_flag_count = 1.0 if tcp_info.get('fin') else 0.0
+    rst_flag_count = 1.0 if tcp_info.get('rst') else 0.0
+    psh_flag_count = 1.0 if tcp_info.get('psh') else 0.0
+    ack_flag_count = 1.0 if tcp_info.get('ack') else 0.0
+    urg_flag_count = 1.0 if tcp_info.get('urg') else 0.0
+    cwe_flag_count = 1.0 if tcp_info.get('cwr') else 0.0 # Note: CICIDS uses CWE, Suricata uses CWR
+    ece_flag_count = 1.0 if tcp_info.get('ece') else 0.0
+    
+    fwd_psh_flags = psh_flag_count  # Simple approximation, as directional flags aren't always split in standard EVE
     
     # ===== SEGMENT SIZES =====
     fwd_header_length = 20 if fwd_pkts > 0 else 0  # TCP header is 20 bytes (IPv4)
@@ -181,7 +200,7 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     packet_length_mean = avg_pkt_len
     
     # ===== PROTOCOL MAPPING =====
-    proto_str = (event.get('proto') or event.get('protocol', 'TCP')).upper()
+    proto_str = (event.get('protocol') or event.get('proto') or 'TCP').upper()
     proto_map = {"TCP": 6, "UDP": 17, "ICMP": 1, "HOPOPT": 0, "IPV6-ICMP": 58}
     protocol_num = float(proto_map.get(proto_str, 0))
 
@@ -230,14 +249,14 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         "Packet Length Mean": packet_length_mean,
         "Packet Length Std": pkt_len_std,
         "Packet Length Variance": pkt_len_variance,
-        "FIN Flag Count": 0.0,
+        "FIN Flag Count": fin_flag_count,
         "SYN Flag Count": syn_flag_count,
-        "RST Flag Count": 0.0,
-        "PSH Flag Count": 0.0,
-        "ACK Flag Count": 0.0,
+        "RST Flag Count": rst_flag_count,
+        "PSH Flag Count": psh_flag_count,
+        "ACK Flag Count": ack_flag_count,
         "URG Flag Count": urg_flag_count,
-        "CWE Flag Count": 0.0,
-        "ECE Flag Count": 0.0,
+        "CWE Flag Count": cwe_flag_count,
+        "ECE Flag Count": ece_flag_count,
         "Down/Up Ratio": bwd_pkts / max(fwd_pkts, 1),
         "Avg Packet Size": avg_packet_size,
         "Avg Fwd Segment Size": avg_fwd_segment_size,
@@ -277,7 +296,24 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
 def validate_feature_vector(vector: list) -> bool:
     if not isinstance(vector, list):
         return False
-    if len(vector) not in [57, 77]: # Support both legacy and new models during transition
-        logger.error(f"Feature vector length mismatch: expected 57 or 77, got {len(vector)}")
+    # Enforce strict 77-feature dimension as required by production models
+    if len(vector) != 77:
+        logger.error(f"Feature vector length mismatch: expected 77, got {len(vector)}")
         return False
     return True
+
+def extract_features_batch(events: list[dict], features: list = None) -> list[list | None]:
+    """
+    Extract features for a batch of events efficiently.
+    
+    Args:
+        events: List of Suricata EVE JSON event dictionaries
+        features: List of feature names
+        
+    Returns:
+        List containing the feature vector or None for each event.
+    """
+    if features is None:
+        features = load_feature_names()
+        
+    return [extract_features_from_eve(event, features) for event in events]

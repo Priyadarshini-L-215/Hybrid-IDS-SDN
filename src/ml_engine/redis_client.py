@@ -85,15 +85,32 @@ async def test_async_redis():
 
 
 def get_queue_depth(queue_name):
-    """Get current depth of a queue."""
+    """Get current depth of a queue (handles both Lists and Streams)."""
     if redis_client is None:
         return -1
     try:
-        depth = redis_client.llen(queue_name)
-        return depth
+        ktype = redis_client.type(queue_name)
+        if ktype == "list":
+            return redis_client.llen(queue_name)
+        elif ktype == "stream":
+            return redis_client.xlen(queue_name)
+        elif ktype == "none":
+            return 0
+        return -1
     except Exception as e:
         logger.error(f"[Redis] Failed to get queue depth: {e}")
         return -1
+
+def sanitize_stream_key(key_name):
+    """Ensures a key is either a stream or deleted if it's the wrong type."""
+    if redis_client is None: return
+    try:
+        ktype = redis_client.type(key_name)
+        if ktype != "stream" and ktype != "none":
+            logger.warning(f"[Redis] Removing key {key_name} (Type mismatch: expected stream, got {ktype})")
+            redis_client.delete(key_name)
+    except Exception:
+        pass
 
 
 def flush_queue(queue_name):

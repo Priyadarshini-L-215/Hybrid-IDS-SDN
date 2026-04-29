@@ -1,469 +1,835 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import {
-  ShieldAlert, ShieldCheck, Activity,
-  Target, Loader, Search,
-  Clock, Cpu, Zap, BarChart3
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  Shield, 
+  Activity, 
+  Zap, 
+  Database, 
+  Terminal, 
+  Settings, 
+  AlertTriangle, 
+  CheckCircle2, 
+  Server, 
+  Globe, 
+  Lock, 
+  Unlock,
+  Cpu,
+  RefreshCcw,
+  Search,
+  Filter,
+  ArrowRight,
+  Play,
+  StopCircle,
+  Clock,
+  ExternalLink,
+  Info
 } from 'lucide-react';
-import {
-  ComposedChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
+import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer 
 } from 'recharts';
 import './App.css';
 
-// ─────────────────────────────────────────────────────────────────
-//  Constants & Helpers
-// ─────────────────────────────────────────────────────────────────
-const SEVERITY_MAP = {
-  1: { label: 'Critical', class: 'badge-danger' },
-  2: { label: 'High', class: 'badge-danger' },
-  3: { label: 'Medium', class: 'badge-primary' },
-  4: { label: 'Low', class: 'badge-primary' },
-  0: { label: 'Unknown', class: 'badge-primary' },
-};
+// --- UI COMPONENTS ---
 
-function formatTimestamp(ts) {
-  if (!ts) return '—';
-  try {
-    const d = new Date(ts);
-    return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-  } catch {
-    return ts;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  Components
-// ─────────────────────────────────────────────────────────────────
-
-const StatCard = ({ title, value, icon: Icon, type, trend }) => (
-  <div className={`stat-card glass glass-interactive fade-in ${type}`}>
-    <div className="stat-header">
-      <div className="stat-icon">
-        <Icon size={20} />
-      </div>
-      {trend && <span className="stat-trend badge badge-primary">{trend}</span>}
-    </div>
-    <div className="stat-title">{title}</div>
-    <div className="stat-value">{value}</div>
-  </div>
+const Badge = ({ children, variant = 'info' }) => (
+  <span className={`badge badge-${variant}`}>
+    <span className="badge-dot" style={{ backgroundColor: 'currentColor' }} />
+    {children}
+  </span>
 );
 
-const AlertRow = React.memo(({ alert }) => {
-  const isAttack = alert.prediction?.toLowerCase() === 'attack';
-  const rowKey = alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${alert.src_port || ''}-${alert.dest_port || ''}`;
-  
-  return (
-    <tr className={`alert-row ${isAttack ? 'critical' : 'normal'}`}>
-      <td>
-        <div className="cell-time">
-          <Clock size={12} /> {formatTimestamp(alert.timestamp)}
+const GlassCard = ({ children, className = '', title, icon: Icon, actions }) => (
+  <motion.div 
+    initial={{ opacity: 0, y: 20 }}
+    animate={{ opacity: 1, y: 0 }}
+    className={`glass-card ${className}`}
+  >
+    {title && (
+      <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+        <div className="panel-title" style={{ marginBottom: 0 }}>
+          {Icon && <Icon size={18} className="text-primary" />}
+          <span className="gradient-text">{title}</span>
         </div>
-      </td>
-      <td className="mono">{alert.src_ip}</td>
-      <td className="mono">{alert.dest_ip}</td>
-      <td className="sig-text">{alert.alert_sig}</td>
-      <td>
-        <span className={`badge ${isAttack ? 'badge-danger' : 'badge-primary'}`}>
-          {alert.prediction?.toUpperCase()}
-        </span>
-      </td>
-      <td>
-        <div className="mono" style={{ color: isAttack ? 'var(--danger)' : 'var(--primary)' }}>
-          {alert.confidence}%
-        </div>
-      </td>
-    </tr>
-  );
-});
-
-const AlertsTable = ({ alerts, filter, onFilterChange }) => {
-  const filteredAlerts = useMemo(() => {
-    let list = [...alerts].reverse();
-    if (filter === 'attack') list = list.filter(a => a.prediction?.toLowerCase() === 'attack');
-    if (filter === 'normal') list = list.filter(a => a.prediction?.toLowerCase() === 'normal');
-    return list;
-  }, [alerts, filter]);
-
-  return (
-    <div className="alerts-table-section glass fade-in">
-      <div className="table-header">
-        <div className="table-title">
-          <Activity size={18} className="text-primary" />
-          <h3>Real-time Event Stream</h3>
-          <span className="table-badge">{filteredAlerts.length} Active</span>
-        </div>
-        <div className="filter-group">
-          <button className={`filter-btn ${filter === 'all' ? 'active' : ''}`} onClick={() => onFilterChange('all')}>All</button>
-          <button className={`filter-btn ${filter === 'attack' ? 'active' : ''}`} onClick={() => onFilterChange('attack')}>Threats</button>
-          <button className={`filter-btn ${filter === 'normal' ? 'active' : ''}`} onClick={() => onFilterChange('normal')}>Safe</button>
-        </div>
+        {actions && <div className="panel-actions">{actions}</div>}
       </div>
-      <div className="table-scroll">
-        <table className="alerts-table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Origin</th>
-              <th>Target</th>
-              <th>Signature</th>
-              <th>Analysis</th>
-              <th>Confidence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredAlerts.length === 0 ? (
-              <tr><td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '3rem' }}>Waiting for network events...</td></tr>
-            ) : (
-              filteredAlerts.map((alert, idx) => (
-                <AlertRow key={alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}-${idx}`} alert={alert} />
-              ))
-            )}
-          </tbody>
-        </table>
+    )}
+    {children}
+  </motion.div>
+);
+
+const StatCard = ({ label, value, icon: Icon, color = 'var(--primary)', trend }) => (
+  <GlassCard className="stat-card">
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div className="stat-label">{label}</div>
+      <div style={{ padding: '8px', borderRadius: '10px', background: `${color}15`, color }}>
+        <Icon size={20} />
       </div>
     </div>
-  );
-};
+    <div className="stat-value-large">{value}</div>
+  </GlassCard>
+);
 
-const AttackLab = ({ alerts }) => {
-  const [target, setTarget] = useState("172.25.24.205");
-  const [profile, setProfile] = useState("quick");
+// --- MAIN APPLICATION ---
+
+function App() {
+  const [alerts, setAlerts] = useState([]);
+  const [stats, setStats] = useState({ 
+    processed_total: 0, 
+    attacks: 0, 
+    normal: 0,
+    displayed_total: 0 
+  });
+  const [health, setHealth] = useState(null);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [connected, setConnected] = useState(false);
+  
+  // Lab State
+  const [scanTarget, setScanTarget] = useState('127.0.0.1');
+  const [scanProfile, setScanProfile] = useState('quick');
   const [scanning, setScanning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [profiles, setProfiles] = useState([
-    { id: 'quick', label: 'Quick Identification' },
-    { id: 'stealth_syn', label: 'Stealth SYN Scan' },
-    { id: 'aggressive', label: 'Full Aggressive Scan' },
-    { id: 'vuln', label: 'Vulnerability Audit' },
-  ]);
+  const [scanResult, setScanResult] = useState(null);
+  const [latency, setLatency] = useState(4);
+  
+  const [chartData, setChartData] = useState([]);
+  const [attackers, setAttackers] = useState({});
+  const lastStats = useRef({ processed: 0, attacks: 0 });
+  
+  const ws = useRef(null);
 
-  // Fetch profiles from backend for accurate sync
+  // Fetch status via REST
+  const fetchStatus = async () => {
+    try {
+      const res = await fetch('/api/pipeline/status');
+      const data = await res.json();
+      setHealth(data);
+    } catch (err) {
+      console.error("Status fetch failed:", err);
+    }
+  };
+
+  const fetchAlerts = async () => {
+    try {
+      const res = await fetch('/api/alerts');
+      const data = await res.json();
+      if (data.alerts) {
+        setAlerts(data.alerts);
+        setStats(prev => ({
+          ...prev,
+          processed_total: data.total_processed,
+          attacks: data.attack_total,
+          normal: data.normal_total
+        }));
+      }
+    } catch (err) {
+      console.error("Alerts fetch failed:", err);
+    }
+  };
+
   useEffect(() => {
-    fetch('/api/nmap/profiles')
-      .then(r => r.json())
-      .then(data => {
-        if (data.profiles && data.profiles.length) {
-          setProfiles(data.profiles);
-        }
-      })
-      .catch(() => { }); // Keep defaults on failure
+    fetchStatus();
+    fetchAlerts();
+    const timer = setInterval(fetchStatus, 3000);
+    return () => clearInterval(timer);
   }, []);
 
+  // WebSocket Connection
+  useEffect(() => {
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/alerts`;
+      
+      ws.current = new WebSocket(wsUrl);
+
+      ws.current.onopen = () => {
+        setConnected(true);
+        console.log("[WS] Connected to Sentinel Relay");
+      };
+
+      ws.current.onmessage = (event) => {
+        try {
+          const alert = JSON.parse(event.data);
+          setAlerts(prev => [alert, ...prev].slice(0, 100));
+
+          if (alert.processing_time_ms !== undefined) {
+            setLatency(alert.processing_time_ms);
+          }
+          
+          const isAttack = alert.prediction?.toLowerCase().includes('attack');
+          if (isAttack) {
+            setAttackers(prev => {
+              const ip = alert.src_ip;
+              const existing = prev[ip] || { count: 0, maxConf: 0, lastSig: '', category: '' };
+              return {
+                ...prev,
+                [ip]: {
+                  ip,
+                  count: existing.count + 1,
+                  maxConf: Math.max(existing.maxConf, alert.confidence || 0),
+                  lastSig: alert.alert_sig,
+                  category: alert.category
+                }
+              };
+            });
+          }
+
+          setStats(prev => ({
+            ...prev,
+            processed_total: prev.processed_total + 1,
+            attacks: isAttack ? prev.attacks + 1 : prev.attacks,
+            normal: alert.prediction?.toLowerCase().includes('normal') ? prev.normal + 1 : prev.normal
+          }));
+        } catch (err) {
+          console.error("[WS] Message error:", err);
+        }
+      };
+
+      ws.current.onclose = () => {
+        setConnected(false);
+        setTimeout(connect, 3000);
+      };
+    };
+
+    connect();
+    return () => ws.current?.close();
+  }, []);
+
+  const statsRef = useRef(stats);
+  useEffect(() => { statsRef.current = stats; }, [stats]);
+
+  // Update Chart Data (Fixed 2s Interval)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      // Access current stats via ref to avoid useEffect dependency churn
+      const currentStats = statsRef.current;
+      
+      // Don't record deltas until we have initial baseline
+      if (currentStats.processed_total === 0 && lastStats.current.processed === 0) return;
+
+      setChartData(prev => {
+        const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        
+        const deltaTotal = currentStats.processed_total - lastStats.current.processed;
+        const deltaAttacks = currentStats.attacks - lastStats.current.attacks;
+        const deltaNormal = Math.max(0, deltaTotal - deltaAttacks);
+        
+        // Sync for next interval
+        lastStats.current = { 
+          processed: currentStats.processed_total, 
+          attacks: currentStats.attacks 
+        };
+
+        const newEntry = {
+          time: now,
+          normal: deltaNormal,
+          attacks: deltaAttacks
+        };
+        
+        // Safety: If it's the first data point and it's huge, skip it
+        if (prev.length === 0 && deltaTotal > 100) return prev;
+
+        return [...prev, newEntry].slice(-30);
+      });
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []); // Run once on mount
+
+  // Initial data seed
+  useEffect(() => {
+    fetch('/api/alerts')
+      .then(r => r.json())
+      .then(data => {
+        if (data.alerts) {
+          setAlerts(data.alerts);
+          // Initialize attackers from historical alerts
+          const initAttackers = data.alerts.reduce((acc, alert) => {
+            if (!alert.prediction?.toLowerCase().includes('attack')) return acc;
+            const ip = alert.src_ip;
+            if (!acc[ip]) acc[ip] = { ip, count: 0, maxConf: 0, lastSig: '', category: '' };
+            acc[ip].count += 1;
+            acc[ip].maxConf = Math.max(acc[ip].maxConf, alert.confidence || 0);
+            acc[ip].lastSig = alert.alert_sig;
+            acc[ip].category = alert.category;
+            return acc;
+          }, {});
+          setAttackers(initAttackers);
+        }
+        setStats({
+          processed_total: data.total_processed,
+          attacks: data.attack_total,
+          normal: data.normal_total,
+          displayed_total: data.displayed_total
+        });
+        lastStats.current = { 
+          processed: data.total_processed, 
+          attacks: data.attack_total 
+        };
+      });
+  }, []);
+
+  // Lab Actions
   const runScan = async () => {
+    if (!scanTarget) return;
     setScanning(true);
-    setResult(null);
+    setScanResult(null);
     try {
       const res = await fetch('/api/nmap/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target, profile }),
+        body: JSON.stringify({ target: scanTarget, profile: scanProfile })
       });
       const data = await res.json();
-      setResult(data);
-    } catch (e) {
-      setResult({ success: false, error: String(e) });
+      setScanResult(data);
+    } catch (err) {
+      setScanResult({ success: false, error: "Network error triggering scan" });
     } finally {
       setScanning(false);
     }
   };
 
-  return (
-    <div className="attack-lab fade-in">
-      <div className="lab-grid">
-        <div className="lab-card glass">
-          <div className="table-title" style={{ marginBottom: '1.5rem' }}>
-            <Target size={18} className="text-danger" />
-            <h3>Attack Simulation Module</h3>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Target Network/IP</label>
-            <input className="form-input" value={target} onChange={e => setTarget(e.target.value)} placeholder="192.168.1.1" />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Scan Profile</label>
-            <select className="form-select" value={profile} onChange={e => setProfile(e.target.value)}>
-              {profiles.map(p => (
-                <option key={p.id} value={p.id}>{p.label}</option>
-              ))}
-            </select>
-          </div>
-          <button className="btn-primary" onClick={runScan} disabled={scanning}>
-            {scanning ? <><Loader size={16} className="spin" style={{ marginRight: '8px' }} /> Initializing...</> : 'Execute Attack Simulation'}
-          </button>
-        </div>
-        <div className="lab-card glass">
-          <div className="table-title" style={{ marginBottom: '1.5rem' }}>
-            <Search size={18} className="text-primary" />
-            <h3>Scanner Raw Output</h3>
-          </div>
-          <div className="output-window">
-            {result ? result.raw_output || result.error : 'Awaiting simulation initialization...'}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────────
-//  Main App
-// ─────────────────────────────────────────────────────────────────
-function App() {
-  const [data, setData] = useState({
-    alerts: [],
-    chart_points: [],
-    total_processed: 0,
-    attack_total: 0,
-    normal_total: 0,
-    last_updated: null
-  });
-  const [activeView, setActiveView] = useState('ids');
-  const [filter, setFilter] = useState('all');
-  const [connectionState, setConnectionState] = useState('connecting');
-  const wsRef = useRef(null);
-  const pendingAlertsRef = useRef([]); // Batching queue for high-frequency events
-  const eventIdSetRef = useRef(new Set()); // O(1) duplicate detection
-
-  // Data Pipeline: WebSocket logic
-  useEffect(() => {
-    let retryCount = 0;
-    let ws = null;
-    let retryTimeout = null;
-    let shouldReconnect = true;
-    const retryDelays = [2000, 5000, 10000];
-
-    // Batch processor: updates state every 250ms to prevent UI lockup during bursts
-    const flushInterval = setInterval(() => {
-      if (pendingAlertsRef.current.length === 0) return;
-
-      const batch = [...pendingAlertsRef.current];
-      pendingAlertsRef.current = [];
-
-      setData(prev => {
-        let nextAlerts = [...prev.alerts];
-        let nextAttacks = prev.attack_total;
-        let nextNormal = prev.normal_total;
-
-        batch.forEach(alert => {
-          // O(1) duplicate detection via Set
-          const alertKey = alert.event_id || alert.id || `${alert.timestamp}-${alert.src_ip}-${alert.dest_ip}`;
-          if (eventIdSetRef.current.has(alertKey)) return;
-          eventIdSetRef.current.add(alertKey);
-
-          const isAttack = alert.prediction?.toLowerCase() === 'attack';
-          nextAlerts.push(alert);
-          if (isAttack) nextAttacks++; else nextNormal++;
-        });
-
-        const nextPoints = [...prev.chart_points, ...batch.map(a => ({
-          time: formatTimestamp(a.timestamp),
-          threat: a.prediction?.toLowerCase() === 'attack' ? a.confidence : 0,
-          safe: a.prediction?.toLowerCase() === 'normal' ? a.confidence : 0,
-        }))].slice(-100);
-
-        return {
-          ...prev,
-          alerts: nextAlerts.slice(-100),
-          chart_points: nextPoints,
-          total_processed: prev.total_processed + batch.length,
-          attack_total: nextAttacks,
-          normal_total: nextNormal,
-          last_updated: new Date().toLocaleTimeString('en-GB')
-        };
+  const runDDoS = async () => {
+    if (!scanTarget) return;
+    setScanning(true);
+    setScanResult(null);
+    try {
+      const res = await fetch('/api/attack/ddos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: scanTarget })
       });
-    }, 250);
+      const data = await res.json();
+      setScanResult({
+        success: data.success,
+        raw_output: data.message || data.error,
+        target: scanTarget,
+        duration_sec: 1.0
+      });
+    } catch (err) {
+      setScanResult({ success: false, error: "DDoS simulation failed" });
+    } finally {
+      setScanning(false);
+    }
+  };
 
-    const getWebSocketUrl = () => {
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      // In dev mode (Vite), the WS proxy may not be configured — fall back to Flask directly
-      const host = window.location.port === '3000' ? 'localhost:5000' : window.location.host;
-      return `${proto}//${host}/ws/alerts`;
-    };
+  const runPayload = async () => {
+    if (!scanTarget) return;
+    setScanning(true);
+    setScanResult(null);
+    try {
+      const res = await fetch('/api/attack/payload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: scanTarget })
+      });
+      const data = await res.json();
+      setScanResult({
+        success: data.success,
+        raw_output: data.message || data.error,
+        target: scanTarget,
+        duration_sec: 0.5
+      });
+    } catch (err) {
+      setScanResult({ success: false, error: "Payload simulation failed" });
+    } finally {
+      setScanning(false);
+    }
+  };
 
-    const connectWS = () => {
-      const wsUrl = getWebSocketUrl();
-      setConnectionState(retryCount === 0 ? 'connecting' : 'retrying');
-      ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        retryCount = 0; // Reset backoff on success
-        setConnectionState('connected');
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const alert = JSON.parse(event.data);
-          
-          // --- TRACER: Pipeline latency measurement ---
-          if (alert._tracer && alert._tracer_inject_ts) {
-            const T6 = Date.now() / 1000;
-            const T0 = alert._tracer_inject_ts;
-            const T1 = alert._watcher_read_ts;
-            const T4 = alert._ws_send_ts;
-            const T5b = alert._relay_fwd_ts;
-            const ms = (a, b) => a && b ? ((b - a) * 1000).toFixed(1) : '-';
-            const cum = (t) => t ? ((t - T0) * 1000).toFixed(1) : '-';
-            
-            console.log(
-              `%c[PIPELINE] Latency: ${((T6-T0)*1000).toFixed(1)}ms | Read: +${ms(T0,T1)}ms | Relay: +${ms(T4,T5b)}ms | Net: +${ms(T5b,T6)}ms`,
-              'color: #00e676; font-family: monospace;'
-            );
-          }
-
-          // Queue for batching instead of immediate state update
-          pendingAlertsRef.current.push(alert);
-        } catch (e) {
-          console.error('[Pipeline] WebSocket parse error:', e);
-        }
-      };
-
-      ws.onclose = () => {
-        if (!shouldReconnect) {
-          return;
-        }
-        const delay = retryDelays[Math.min(retryCount, retryDelays.length - 1)];
-        setConnectionState('retrying');
-        retryCount++;
-        retryTimeout = setTimeout(connectWS, delay);
-      };
-
-      ws.onerror = (err) => {
-        setConnectionState('error');
-        console.error('[Pipeline] WebSocket error:', err);
-      };
-    };
-
-    connectWS();
-    return () => {
-      shouldReconnect = false;
-      clearTimeout(retryTimeout);
-      clearInterval(flushInterval);
-      ws?.close();
-    };
-  }, []);
-
-  // Data Pipeline: Initial Seeding
-  useEffect(() => {
-    const seedData = async () => {
-      try {
-        console.log("[Pipeline] Fetching historical state...");
-        const response = await fetch('/api/alerts');
-        const json = await response.json();
-
-        setData(prev => {
-          // Create a merged list of unique alerts
-          const existingIds = new Set(prev.alerts.map(a => a.event_id || a.id || `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
-          const newHistorical = json.alerts.filter(a => !existingIds.has(a.event_id || a.id || `${a.timestamp}-${a.src_ip}-${a.dest_ip}`));
-
-          const allAlerts = [...newHistorical, ...prev.alerts].slice(-100);
-          return {
-            ...json,
-            alerts: allAlerts,
-            chart_points: allAlerts.map(a => ({
-              time: formatTimestamp(a.timestamp),
-              threat: a.prediction?.toLowerCase() === 'attack' ? a.confidence : 0,
-              safe: a.prediction?.toLowerCase() === 'normal' ? a.confidence : 0,
-            })),
-            total_processed: Math.max(json.total_processed, prev.total_processed),
-            attack_total: Math.max(json.attack_total, prev.attack_total),
-            normal_total: Math.max(json.normal_total, prev.normal_total)
-          };
-        });
-      } catch (error) {
-        console.error("[Pipeline] Seeding error:", error);
+  const unblockIp = async (ip) => {
+    try {
+      const res = await fetch('/api/mitigation/unblock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip })
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchStatus(); // Refresh status
       }
-    };
-    seedData();
-  }, []);
+    } catch (err) {
+      console.error("Failed to unblock IP:", err);
+    }
+  };
 
-  const chartData = data.chart_points;
+  const blockIp = async (ip) => {
+    try {
+      const res = await fetch('/api/mitigation/block', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip })
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchStatus(); // Refresh status
+      }
+    } catch (err) {
+      console.error("Failed to block IP:", err);
+    }
+  };
+
+
 
   return (
     <div className="dashboard-container">
-      <div className="app-bg-glow" />
+      {/* Background blobs */}
+      <div className="bg-blobs">
+        <div className="blob blob-1" />
+        <div className="blob blob-2" />
+        <div className="blob blob-3" />
+      </div>
 
-      <header className="header-section fade-in">
+      {/* Header */}
+      <header className="header-section animate-fade-in">
         <div className="title-group">
-          <h1>Sentinel Core</h1>
-          <p>Next-Gen Hybrid Machine Learning Network Defense</p>
+          <h1>
+            <Shield className="text-primary pulse" size={32} />
+            <span className="gradient-text">SENTINEL</span>
+            <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>CORE</span>
+          </h1>
         </div>
 
-        <div className="nav-tabs">
-          <button className={`nav-tab ${activeView === 'ids' ? 'active' : ''}`} onClick={() => setActiveView('ids')}>
-            <Activity size={16} /> Monitoring
+        <div className="tabs-navigation">
+          <button 
+            className={`tab-button ${activeTab === 'overview' ? 'active' : ''}`}
+            onClick={() => setActiveTab('overview')}
+          >
+            <Activity size={16} /> Overview
           </button>
-          <button className={`nav-tab ${activeView === 'lab' ? 'active' : ''}`} onClick={() => setActiveView('lab')}>
-            <Target size={16} /> Attack Lab
+          <button 
+            className={`tab-button ${activeTab === 'mitigation' ? 'active' : ''}`}
+            onClick={() => setActiveTab('mitigation')}
+          >
+            <Lock size={16} /> Mitigation
+          </button>
+          <button 
+            className={`tab-button ${activeTab === 'lab' ? 'active' : ''}`}
+            onClick={() => setActiveTab('lab')}
+          >
+            <Cpu size={16} /> Attack Lab
           </button>
         </div>
 
-        <div className="status-indicator">
-          <div
-            className="status-dot"
-            style={{
-              backgroundColor:
-                connectionState === 'connected'
-                  ? (data.attack_total > 0 ? 'var(--danger)' : 'var(--primary)')
-                  : connectionState === 'error'
-                    ? 'var(--danger)'
-                    : 'var(--warning)',
-            }}
-          />
-          <span>
-            {connectionState === 'connected'
-              ? (data.last_updated ? `LIVE: ${data.last_updated}` : 'CONNECTED')
-              : connectionState === 'error'
-                ? 'CONNECTION ERROR'
-                : connectionState === 'reconnecting'
-                  ? 'RECONNECTING...'
-                  : 'CONNECTING...'}
-          </span>
+        <div className="status-container" style={{ position: 'absolute', top: '2.5rem', right: '4rem', zIndex: 100 }}>
+          <div className="status-hover-wrapper">
+            <Badge variant={connected ? 'success' : 'danger'}>
+              {connected ? 'LIVE FEED' : 'OFFLINE'}
+            </Badge>
+            
+            <div className="engine-tooltip glass">
+              <div style={{ marginBottom: '1rem', fontWeight: 800, fontSize: '0.8rem', color: 'var(--primary)', letterSpacing: '0.1em' }}>ENGINE INTEGRITY</div>
+              {[
+                { label: 'ML Model Engine', status: health?.checks?.consumer_running, val: 'ACTIVE' },
+                { label: 'Redis Stream', status: health?.checks?.redis_ok, val: 'SYNCED' },
+                { label: 'WebSocket Relay', status: health?.checks?.ws_port_open, val: 'LISTENING' },
+                { label: 'Ipset Mitigation', status: true, val: 'HARDENED' }
+              ].map(item => (
+                <div key={item.label} className="health-item" style={{ padding: '0.5rem 0' }}>
+                   <span className="health-label" style={{ fontSize: '0.75rem' }}>{item.label}</span>
+                   <span style={{ fontWeight: 800, fontSize: '0.75rem', color: item.status ? 'var(--success)' : 'var(--danger)' }}>
+                      {item.status ? item.val : 'FAILURE'}
+                   </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </header>
 
-      <section className="stats-row">
-        <StatCard title="Active Threats" value={data.attack_total} icon={ShieldAlert} type="attack" trend={data.attack_total > 0 ? "+CRITICAL" : "STABLE"} />
-        <StatCard title="Safe Traffic" value={data.normal_total} icon={ShieldCheck} type="success" trend="VERIFIED" />
-        <StatCard title="Processed Flows" value={data.total_processed} icon={Cpu} />
-        <StatCard title="Detection Rate" value={`${data.total_processed > 0 ? ((data.attack_total / data.total_processed) * 100).toFixed(1) : 0}%`} icon={Zap} />
-      </section>
 
-      {activeView === 'ids' ? (
-        <div className="ids-main-layout">
-          <div className="viz-card glass fade-in">
-            <div className="table-title" style={{ marginBottom: '1.5rem' }}>
-              <BarChart3 size={18} className="text-secondary" />
-              <h3>Traffic Analysis Baseline</h3>
-            </div>
-            <ResponsiveContainer width="100%" height={240}>
-              <ComposedChart data={chartData}>
-                <defs>
-                  <linearGradient id="colorThreat" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--danger)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="var(--danger)" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorSafe" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="var(--primary)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                <XAxis dataKey="time" stroke="var(--text-muted)" fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis stroke="var(--text-muted)" fontSize={11} tickLine={false} axisLine={false} />
-                <Tooltip
-                  contentStyle={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '8px' }}
-                  itemStyle={{ fontSize: '12px' }}
-                />
-                <Area type="monotone" dataKey="safe" stroke="var(--primary)" fillOpacity={1} fill="url(#colorSafe)" />
-                <Area type="monotone" dataKey="threat" stroke="var(--danger)" fillOpacity={1} fill="url(#colorThreat)" />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-          <AlertsTable alerts={data.alerts} filter={filter} onFilterChange={setFilter} />
+
+      {/* Stats Grid */}
+      <div className="stats-grid animate-fade-in" style={{ animationDelay: '0.1s' }}>
+        <StatCard 
+          label="Ingested Events" 
+          value={stats.processed_total?.toLocaleString()} 
+          icon={Database} 
+        />
+        <StatCard 
+          label="Malicious Attacks" 
+          value={stats.attacks?.toLocaleString()} 
+          icon={AlertTriangle} 
+          color="var(--danger)"
+        />
+        <StatCard 
+          label="Pipeline Latency" 
+          value={`${latency.toFixed(1)}ms`} 
+          icon={Zap} 
+          color="var(--primary)"
+        />
+        <StatCard 
+          label="Mitigated Hosts" 
+          value={health?.ipset?.permanent || 0} 
+          icon={Shield} 
+          color="var(--success)"
+        />
+      </div>
+
+      <main className="main-layout animate-fade-in" style={{ animationDelay: '0.2s' }}>
+        <div className="content-stack">
+          <AnimatePresence mode="wait">
+            {activeTab === 'overview' && (
+              <motion.div key="overview" className="content-stack">
+                {/* Real-time Graph */}
+                <GlassCard title="Network Activity (Live)" icon={Activity}>
+                  <div style={{ height: '240px', width: '100%', paddingRight: '20px' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(0, 255, 0, 0.1)" vertical={true} />
+                        <XAxis 
+                          dataKey="time" 
+                          stroke="var(--text-muted)" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false} 
+                          hide={true}
+                        />
+                        <YAxis 
+                          stroke="rgba(0, 255, 0, 0.3)" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false} 
+                          domain={[0, 'auto']}
+                        />
+                        <Tooltip 
+                          contentStyle={{ background: 'rgba(15, 23, 42, 0.95)', border: '1px solid #10b981', borderRadius: '4px' }}
+                          itemStyle={{ fontSize: '0.8rem', color: '#10b981' }}
+                          cursor={{ stroke: '#10b981', strokeWidth: 1 }}
+                        />
+                        <Line 
+                          type="monotone" 
+                          dataKey="normal" 
+                          stroke="#10b981" 
+                          strokeWidth={2}
+                          dot={false}
+                          isAnimationActive={false}
+                        />
+                        <Line 
+                          type="monotone" 
+                          dataKey="attacks" 
+                          stroke="#ef4444" 
+                          strokeWidth={2}
+                          dot={false}
+                          isAnimationActive={false}
+                        />
+
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </GlassCard>
+
+
+
+                {/* Live Alerts */}
+                <div className="table-container glass">
+                  <div className="table-header">
+                    <div className="panel-title" style={{ marginBottom: 0 }}>
+                      <Terminal size={18} className="text-primary" />
+                      <span className="gradient-text">Real-time Behavioral Stream</span>
+                    </div>
+                  </div>
+
+                  
+                  <div className="table-scroller">
+                    <table className="alerts-table">
+                      <thead>
+                        <tr>
+                          <th>Time</th>
+                          <th>Source (Blocked IP)</th>
+                          <th>Destination</th>
+                          <th>Risk Level</th>
+                          <th>Score</th>
+                          <th>Action / Signature</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {alerts.map((alert, i) => {
+                          const isBlocked = alert.is_mitigated || 
+                                           alert.category?.toLowerCase().includes('ips') || 
+                                           alert.prediction?.toLowerCase().includes('attack');
+                          return (
+                            <tr key={alert.event_id || i} className={`alert-row ${isBlocked ? 'alert-row-danger' : ''}`}>
+                              <td style={{ opacity: 0.6 }}>{alert.timestamp?.split('T')[1]?.split('.')[0]}</td>
+                              <td className="ip-address">
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  {(isBlocked || alert.is_mitigated) && <Lock size={12} className="text-danger" />}
+                                  {alert.src_ip}
+                                </div>
+                              </td>
+                              <td className="ip-address">{alert.dst_ip || 'Internal'}</td>
+                              <td>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                  <Badge variant={
+                                    alert.prediction?.toLowerCase().includes('attack') ? 'danger' :
+                                    alert.prediction?.toLowerCase().includes('suspicious') ? 'warning' : 'success'
+                                  }>
+                                    {alert.prediction?.toUpperCase()}
+                                  </Badge>
+                                  {alert.is_mitigated && (
+                                    <span style={{ 
+                                      fontSize: '0.65rem', 
+                                      fontWeight: 800, 
+                                      color: 'var(--warning)', 
+                                      letterSpacing: '0.05em',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '4px'
+                                    }}>
+                                      <Zap size={10} /> {alert.mitigation}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td style={{ fontWeight: 800 }}>{alert.confidence?.toFixed(1)}%</td>
+                              <td style={{ fontSize: '0.8rem' }}>
+                                {alert.category?.startsWith('IPS') ? (
+                                  <span className="text-danger" style={{ fontWeight: 700 }}>[{alert.category.split(' - ')[0]}] </span>
+                                ) : null}
+                                {alert.alert_sig}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'mitigation' && (
+              <motion.div key="mitigation" className="content-stack">
+                <GlassCard title="Active Threat Intelligence" icon={AlertTriangle}>
+                  <div className="table-scroller">
+                    <table className="alerts-table">
+                      <thead>
+                        <tr>
+                          <th>Attacker IP</th>
+                          <th>Total Attacks</th>
+                          <th>Peak Risk</th>
+                          <th>Action Required</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.values(attackers)
+                          .sort((a, b) => b.count - a.count)
+                          .map((threat) => {
+                            const isBlocked = health?.ipset_detailed?.permanent_ips?.includes(threat.ip) || 
+                                             health?.ipset_detailed?.temporary_ips?.includes(threat.ip);
+                            return (
+                              <tr key={threat.ip} className="alert-row">
+                                <td className="ip-address">{threat.ip}</td>
+                                <td style={{ fontWeight: 800 }}>{threat.count} events</td>
+                                <td>
+                                  <Badge variant="danger">{threat.maxConf?.toFixed(1)}% High</Badge>
+                                </td>
+                                <td>
+                                  <div style={{ display: 'flex', gap: '10px' }}>
+                                    {isBlocked ? (
+                                      <button 
+                                        onClick={() => unblockIp(threat.ip)}
+                                        className="glass"
+                                        style={{ padding: '6px 12px', borderRadius: '8px', fontSize: '0.7rem', color: 'var(--success)', border: '1px solid var(--success)', cursor: 'pointer', fontWeight: 800 }}
+                                      >
+                                        UNBLOCK
+                                      </button>
+                                    ) : (
+                                      <button 
+                                        onClick={() => blockIp(threat.ip)}
+                                        className="glass"
+                                        style={{ padding: '6px 12px', borderRadius: '8px', fontSize: '0.7rem', color: 'var(--danger)', border: '1px solid var(--danger)', cursor: 'pointer', fontWeight: 800 }}
+                                      >
+                                        BLOCK IP
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                    {alerts.filter(a => a.prediction?.toLowerCase().includes('attack')).length === 0 && (
+                      <div style={{ textAlign: 'center', padding: '2rem', opacity: 0.4 }}>
+                        <p>No active threats identified.</p>
+                      </div>
+                    )}
+                  </div>
+                </GlassCard>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                  <GlassCard title="Mitigation Policy: ipset" icon={Shield}>
+                    <div className="ip-list">
+                      {[
+                        ...(health?.ipset_detailed?.permanent_ips || []).map(ip => ({ ip, type: 'Permanent' })),
+                        ...(health?.ipset_detailed?.temporary_ips || []).map(ip => ({ ip, type: 'Temporary' }))
+                      ].length > 0 ? (
+                        [
+                          ...(health?.ipset_detailed?.permanent_ips || []).map(ip => ({ ip, type: 'Permanent' })),
+                          ...(health?.ipset_detailed?.temporary_ips || []).map(ip => ({ ip, type: 'Temporary' }))
+                        ].map(({ ip, type }) => (
+                          <div key={ip} className="ip-item">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                              <Lock size={16} className={type === 'Permanent' ? "text-danger" : "text-warning"} />
+                              <div>
+                                <div className="ip-address">{ip}</div>
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{type} Restriction</div>
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                              <Badge variant={type === 'Permanent' ? "danger" : "warning"}>{type}</Badge>
+                              <button 
+                                onClick={() => unblockIp(ip)}
+                                className="glass"
+                                style={{ padding: '6px 12px', borderRadius: '8px', fontSize: '0.7rem', color: 'var(--text-primary)', border: '1px solid var(--border)', cursor: 'pointer' }}
+                              >
+                                Unblock
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: '3rem', opacity: 0.5 }}>
+                          <Unlock size={48} />
+                          <p style={{ marginTop: '1rem' }}>No restrictions active.</p>
+                        </div>
+                      )}
+                    </div>
+                  </GlassCard>
+
+                  <GlassCard title="Reputation Analysis" icon={Globe}>
+                    <div className="ip-list">
+                      {Object.entries(health?.ipset_detailed?.reputation || {})
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 10)
+                        .map(([ip, score]) => (
+                          <div key={ip} className="ip-item">
+                            <span className="ip-address">{ip}</span>
+                            <div style={{ flex: 1, margin: '0 2rem' }}>
+                              <div className="meter-bar-bg">
+                                <div 
+                                  className="meter-bar-fill" 
+                                  style={{ 
+                                    width: `${Math.min((score/50)*100, 100)}%`, 
+                                    background: score > 40 ? 'var(--danger)' : score > 20 ? 'var(--warning)' : 'var(--primary)' 
+                                  }} 
+                                />
+                              </div>
+                            </div>
+                            <span style={{ fontSize: '0.75rem', fontWeight: 800, minWidth: '30px', textAlign: 'right' }}>{score.toFixed(1)}</span>
+                          </div>
+                      ))}
+                      {Object.keys(health?.ipset_detailed?.reputation || {}).length === 0 && (
+                        <div style={{ textAlign: 'center', padding: '2rem', opacity: 0.4, fontSize: '0.9rem' }}>No IPs being tracked.</div>
+                      )}
+                    </div>
+                  </GlassCard>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'lab' && (
+              <motion.div key="lab" className="content-stack">
+                <GlassCard title="Attack Simulation Lab" icon={Cpu}>
+                  <div style={{ padding: '1rem' }}>
+                    <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem' }}>
+                      <div className="glass" style={{ flex: 1, padding: '1rem', borderRadius: '12px' }}>
+                        <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Target IP / Host</label>
+                        <input 
+                          type="text" 
+                          value={scanTarget}
+                          onChange={(e) => setScanTarget(e.target.value)}
+                          className="glass"
+                          style={{ width: '100%', border: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', color: 'white', padding: '12px', borderRadius: '8px', fontSize: '1rem' }}
+                        />
+                      </div>
+                      <div className="glass" style={{ flex: 1, padding: '1rem', borderRadius: '12px' }}>
+                        <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Scan Profile</label>
+                        <select 
+                          value={scanProfile}
+                          onChange={(e) => setScanProfile(e.target.value)}
+                          className="glass"
+                          style={{ width: '100%', border: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', color: 'white', padding: '12px', borderRadius: '8px' }}
+                        >
+                          <option value="ping">Ping Sweep (Stealth)</option>
+                          <option value="quick">Quick Scan (Fast)</option>
+                          <option value="service">Service Discovery</option>
+                          <option value="os_detect">OS Fingerprinting</option>
+                          <option value="aggressive">Aggressive (A-Scan)</option>
+                          <option value="vuln">Vulnerability Script</option>
+                        </select>
+                      </div>
+                      <button 
+                        onClick={runScan}
+                        disabled={scanning}
+                        className="glass"
+                        style={{ padding: '0 2rem', borderRadius: '12px', background: 'var(--primary)', color: 'white', fontWeight: 800, cursor: scanning ? 'not-allowed' : 'pointer', border: 'none', display: 'flex', alignItems: 'center', gap: '10px' }}
+                      >
+                        {scanning ? <RefreshCcw size={20} className="spin" /> : <Play size={20} />}
+                        {scanning ? 'SCANNING...' : 'START ATTACK'}
+                      </button>
+                    </div>
+
+                    {scanResult && (
+                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="glass" style={{ padding: '1.5rem', borderRadius: '16px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                          <h3 className="gradient-text">Scan Result</h3>
+                          <Badge variant={scanResult.success ? 'success' : 'danger'}>{scanResult.success ? 'COMPLETED' : 'FAILED'}</Badge>
+                        </div>
+                        <div style={{ maxHeight: '300px', overflowY: 'auto', background: 'rgba(0,0,0,0.3)', padding: '1rem', borderRadius: '8px', fontFamily: 'monospace', fontSize: '0.85rem', color: '#a5f3fc', whiteSpace: 'pre-wrap' }}>
+                          {scanResult.raw_output || scanResult.error}
+                        </div>
+                        <div style={{ marginTop: '1rem', display: 'flex', gap: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                          <span>Duration: {scanResult.duration_sec}s</span>
+                          <span>Target: {scanResult.target}</span>
+                        </div>
+                      </motion.div>
+                    )}
+                  </div>
+                </GlassCard>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1.5rem' }}>
+                   <GlassCard title="DDoS Stressor" icon={Zap}>
+                     <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>Simulate high-velocity packet floods from a virtual botnet.</p>
+                     <button 
+                        onClick={runDDoS}
+                        disabled={scanning}
+                        className="glass"
+                        style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid var(--danger)', fontWeight: 700, cursor: 'pointer' }}
+                     >
+                       Launch Flood
+                     </button>
+                   </GlassCard>
+                   <GlassCard title="Payload Injector" icon={Database}>
+                     <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>Test regex and behavioral signatures against malicious strings.</p>
+                     <button 
+                        onClick={runPayload}
+                        disabled={scanning}
+                        className="glass"
+                        style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', color: 'var(--primary)', border: '1px solid var(--primary)', fontWeight: 700, cursor: 'pointer' }}
+                     >
+                       Inject Payload
+                     </button>
+                   </GlassCard>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
-      ) : (
-        <AttackLab alerts={data.alerts} />
-      )}
+
+        <aside className="side-stack">
+          {/* Engine Integrity moved to Live Badge Hover */}
+        </aside>
+
+      </main>
+
+      <footer style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)', fontSize: '0.75rem', opacity: 0.6 }}>
+        Sentinel Core IDS/IPS — Integrated Behavioral Defense System — {new Date().getFullYear()}
+      </footer>
     </div>
   );
 }

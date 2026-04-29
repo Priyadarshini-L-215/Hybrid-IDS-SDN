@@ -5,74 +5,84 @@ echo "================================================================="
 echo "            SENTINEL CORE DIAGNOSTICS"
 echo "================================================================="
 
+# Color codes
+GREEN='\e[32m'
+RED='\e[31m'
+YELLOW='\e[33m'
+RESET='\e[0m'
+
 check_process() {
     if pgrep -f "$1" > /dev/null; then
-        echo -e "[\e[32mOK\e[0m] Process running: $2"
+        echo -e "[${GREEN}OK${RESET}] Process running: $2"
     else
-        echo -e "[\e[31mFAIL\e[0m] Process stopped: $2"
+        echo -e "[${RED}FAIL${RESET}] Process stopped: $2"
     fi
 }
 
 check_port() {
     if nc -z 127.0.0.1 "$1" 2>/dev/null; then
-        echo -e "[\e[32mOK\e[0m] Port $1 open: $2"
+        echo -e "[${GREEN}OK${RESET}] Port $1 open: $2"
     else
-        echo -e "[\e[31mFAIL\e[0m] Port $1 closed: $2"
+        echo -e "[${RED}FAIL${RESET}] Port $1 closed: $2"
     fi
 }
 
 echo "[+] Checking Services..."
 check_process "suricata" "Suricata IDS"
+check_process "src/ml_engine/ingestion.py" "Ingestion Bridge"
 check_process "redis-server" "Redis Queue"
 check_process "src/ml_engine/consumer.py" "ML Consumer"
-check_process "flask" "Flask Relay"
+check_process "src.relay.app" "Relay API (FastAPI)"
 check_process "npm" "React UI"
 
 echo ""
 echo "[+] Checking Ports..."
 check_port 6379 "Redis"
 # Dynamically get WS port from config
-source .venv/bin/activate
-WS_PORT=$(python3 -c "from src.common.config import WS_PORT; print(WS_PORT)")
-check_port $WS_PORT "Consumer WebSocket"
-check_port 5000 "Flask Relay API"
+# WebSocket is now integrated into FastAPI on port 5000
+check_port 5000 "Relay API & WebSocket"
 check_port 3000 "React UI"
 
 echo ""
-echo "[+] Checking External Tools..."
-if which nmap > /dev/null; then
-    echo -e "[\e[32mOK\e[0m] Nmap installed at $(which nmap)"
+echo "[+] Checking Redis Streams..."
+STREAM_LAG=$(redis-cli xlen sentinel_alerts_stream 2>/dev/null || echo "0")
+echo -e "[${GREEN}INFO${RESET}] sentinel_alerts_stream depth: $STREAM_LAG"
+QUEUE_DEPTH=$(redis-cli xlen sentinel_alerts_queue 2>/dev/null || echo "0")
+echo -e "[${GREEN}INFO${RESET}] sentinel_alerts_queue depth: $QUEUE_DEPTH"
+LAG=$(redis-cli xinfo groups sentinel_alerts_queue 2>/dev/null | grep -A 1 "lag" | tail -n 1 | awk '{print $1}' || echo "0")
+echo -e "[${GREEN}INFO${RESET}] Consumer Group Lag: $LAG"
+
+echo ""
+echo "[+] Checking Firewall & Mitigation..."
+if sudo ipset list sentinel_blocks > /dev/null 2>&1; then
+    BLOCK_COUNT=$(sudo ipset list sentinel_blocks | grep "Number of entries:" | awk '{print $4}')
+    echo -e "[${GREEN}OK${RESET}] Ipset 'sentinel_blocks' active ($BLOCK_COUNT entries)"
 else
-    echo -e "[\e[31mFAIL\e[0m] Nmap not found"
+    echo -e "[${RED}FAIL${RESET}] Ipset 'sentinel_blocks' NOT found"
+fi
+
+if sudo iptables -L SENTINEL_IPS -n > /dev/null 2>&1; then
+    echo -e "[${GREEN}OK${RESET}] Iptables chain 'SENTINEL_IPS' is active"
+else
+    echo -e "[${RED}FAIL${RESET}] Iptables chain 'SENTINEL_IPS' NOT found"
 fi
 
 echo ""
-echo "[+] Checking Data Flow..."
-EVE_LOG="/var/log/suricata/eve.json"
+echo "[+] Checking Data Integrity..."
+# Use venv python to avoid structlog import error
+PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+EVE_LOG=$("$PROJECT_ROOT/.venv/bin/python" -c "import sys; sys.path.insert(0,'$PROJECT_ROOT/src'); from common.config import EVE_LOG; print(EVE_LOG)" 2>/dev/null || echo "")
 if [ -f "$EVE_LOG" ]; then
     LAST_MOD=$(stat -c %Y "$EVE_LOG")
     NOW=$(date +%s)
     DIFF=$((NOW - LAST_MOD))
     if [ $DIFF -lt 60 ]; then
-        echo -e "[\e[32mOK\e[0m] Suricata log is live (modified ${DIFF}s ago)"
+        echo -e "[${GREEN}OK${RESET}] Suricata log is live (modified ${DIFF}s ago)"
     else
-        echo -e "[\e[33mWARN\e[0m] Suricata log stale (${DIFF}s ago). Is traffic flowing?"
+        echo -e "[${YELLOW}WARN${RESET}] Suricata log stale (${DIFF}s ago). Is traffic flowing?"
     fi
 else
-    echo -e "[\e[31mFAIL\e[0m] Suricata log not found at $EVE_LOG"
-fi
-
-echo ""
-echo "[+] Checking Virtual Environment..."
-if [ -d ".venv" ]; then
-    echo -e "[\e[32mOK\e[0m] .venv exists"
-    if python3 -c "import torch, sklearn, flask, redis, websockets" >/dev/null 2>&1; then
-         echo -e "[\e[32mOK\e[0m] All python dependencies verified"
-    else
-         echo -e "[\e[31mFAIL\e[0m] Missing python dependencies (run ./setup.sh)"
-    fi
-else
-    echo -e "[\e[31mFAIL\e[0m] .venv not found (run ./setup.sh)"
+    echo -e "[${RED}FAIL${RESET}] Suricata log not found at $EVE_LOG"
 fi
 
 echo "================================================================="

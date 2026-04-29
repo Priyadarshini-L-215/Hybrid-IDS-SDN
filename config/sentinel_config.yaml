@@ -1,0 +1,36 @@
+# Sentinel IDS Global Configuration
+
+system:
+  log_level: "INFO"
+  use_json_logging: false
+  worker_count: 4
+  batch_size: 5
+  batch_flush_interval: 0.25
+
+network:
+  ws_port: 8777
+  redis_host: "127.0.0.1"
+  redis_port: 6379
+
+detection:
+  # Stateful Flow Correlation (IPS)
+  port_scan_threshold: 25
+  dos_threshold: 100
+  correlation_window: 10.0
+
+  # Decision Engine (Tri-Layer Rebuild)
+  decision_engine:
+    weights:
+      signature: 1.0
+      ml: 0.5
+      anomaly: 0.3
+    thresholds:
+      attack: 0.85
+      suspicious: 0.6
+
+mitigation:
+  reputation_limit: 10.0
+  reputation_temp_block: 25.0
+  reputation_perm_block: 50.0
+  block_ttl: 300 # seconds
+  rate_limit_per_sec: 5

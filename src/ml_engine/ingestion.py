@@ -1,0 +1,176 @@
+import asyncio
+import json
+import os
+import sys
+import time
+from pathlib import Path
+import structlog
+from datetime import datetime
+
+# Add src directory to path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.config import SURICATA_SOCKET, REDIS_QUEUE_NAME, setup_logging
+from common.schemas import RawEvent
+from ml_engine import redis_client as rc
+from ml_engine.flow_aggregator import FlowAggregator
+
+# Initialize structured logging
+setup_logging("ingestion")
+logger = structlog.get_logger("ingestion")
+
+_RUNNING = True
+_STATS = {
+    "packets_received": 0,
+    "flows_aggregated": 0,
+    "alerts_passed": 0,
+    "errors": 0,
+    "start_time": time.time()
+}
+
+async def emit_heartbeat():
+    """Periodically logs system health for monitoring."""
+    heartbeat_path = Path("data/logs/heartbeat.jsonl")
+    while _RUNNING:
+        await asyncio.sleep(10)
+        uptime = time.time() - _STATS["start_time"]
+        heartbeat = {
+            "ts": datetime.utcnow().isoformat(),
+            "component": "ingestion",
+            "uptime_sec": round(uptime, 2),
+            "packets": _STATS["packets_received"],
+            "flows": _STATS["flows_aggregated"],
+            "errors": _STATS["errors"],
+            "redis_ok": rc.async_redis_client is not None
+        }
+        try:
+            heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(heartbeat_path, "a") as f:
+                f.write(json.dumps(heartbeat) + "\n")
+        except Exception as e:
+            logger.error("Failed to write heartbeat", error=str(e))
+
+async def push_to_redis(data_list: list):
+    """Pushes a list of events/flows to Redis Stream with MAXLEN policy."""
+    if not rc.async_redis_client:
+        await rc.init_async_redis()
+        if not rc.async_redis_client:
+            return False
+            
+    try:
+        pipe = rc.async_redis_client.pipeline()
+        for item in data_list:
+            # item is a pydantic model or dict
+            payload = item.model_dump_json() if hasattr(item, "model_dump_json") else json.dumps(item)
+            pipe.xadd(REDIS_QUEUE_NAME, {"event": payload}, maxlen=10000, approximate=True)
+        await pipe.execute()
+        return True
+    except Exception as e:
+        logger.error("Redis push failed", error=str(e))
+        _STATS["errors"] += 1
+        return False
+
+def normalize_eve(event: dict) -> RawEvent:
+    """Standardizes Suricata EVE JSON into a RawEvent schema."""
+    return RawEvent(
+        event_type=event.get("event_type", "unknown"),
+        src_ip=event.get("src_ip", "0.0.0.0"),
+        dst_ip=event.get("dest_ip") or event.get("dst_ip") or "0.0.0.0",
+        src_port=event.get("src_port") or 0,
+        dst_port=event.get("dest_port") or event.get("dst_port") or 0,
+        proto=str(event.get("proto") or "TCP"),
+        packet_count=event.get("flow", {}).get("pkts_toserver", 0) + event.get("flow", {}).get("pkts_toclient", 0),
+        byte_count=event.get("flow", {}).get("bytes_toserver", 0) + event.get("flow", {}).get("bytes_toclient", 0),
+        alert_signature=event.get("alert", {}).get("signature") if event.get("alert") else None,
+        raw=event
+    )
+
+async def handle_suricata_stream(reader, writer):
+    """Parses NDJSON stream and routes to aggregator or direct-push."""
+    peer = writer.get_extra_info('peername')
+    logger.info("New connection accepted", peer=peer)
+    
+    aggregator = FlowAggregator()
+    
+    # Run aggregator cleanup in background for THIS connection
+    # (Or globally if preferred, but per-connection is safer for scope)
+    async def aggregator_callback(agg_flow):
+        await push_to_redis([agg_flow])
+        _STATS["flows_aggregated"] += 1
+    
+    cleanup_task = asyncio.create_task(aggregator.cleanup_loop(aggregator_callback))
+    
+    try:
+        async for line in reader:
+            if not _RUNNING: break
+            
+            try:
+                raw_data = json.loads(line)
+                _STATS["packets_received"] += 1
+                
+                event = normalize_eve(raw_data)
+                
+                # Routing logic
+                if event.event_type == "alert":
+                    # Alerts bypass aggregation for immediate response
+                    await push_to_redis([event])
+                    _STATS["alerts_passed"] += 1
+                else:
+                    # Everything else goes through aggregation
+                    flushed = await aggregator.add_event(event)
+                    if flushed:
+                        await push_to_redis([flushed])
+                        _STATS["flows_aggregated"] += 1
+                        
+            except json.JSONDecodeError:
+                continue
+            except Exception as e:
+                logger.error("Event processing error", error=str(e))
+                _STATS["errors"] += 1
+
+    except Exception as e:
+        logger.error("Connection handler error", error=str(e))
+    finally:
+        cleanup_task.cancel()
+        writer.close()
+        await writer.wait_closed()
+        logger.info("Connection closed", peer=peer)
+
+async def main():
+    global _RUNNING
+    logger.info("Ingestion Service Starting", socket=str(SURICATA_SOCKET))
+    
+    await rc.init_async_redis()
+    
+    # Sanitize Redis keys to prevent WRONGTYPE errors
+    from ml_engine.redis_client import sanitize_stream_key
+    from common.config import REDIS_QUEUE_NAME
+    sanitize_stream_key(REDIS_QUEUE_NAME)
+    
+    if SURICATA_SOCKET.exists():
+        os.remove(SURICATA_SOCKET)
+    SURICATA_SOCKET.parent.mkdir(parents=True, exist_ok=True)
+
+    server = await asyncio.start_unix_server(handle_suricata_stream, path=str(SURICATA_SOCKET))
+    os.chmod(SURICATA_SOCKET, 0o777)
+    
+    # Start heartbeat task
+    asyncio.create_task(emit_heartbeat())
+
+    async with server:
+        logger.info("Server listening", path=str(SURICATA_SOCKET))
+        try:
+            await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _RUNNING = False
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.critical("Fatal crash", error=str(e))
+        sys.exit(1)
