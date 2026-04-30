@@ -17,7 +17,8 @@ except ImportError:
 
 from common.config import (
     RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, 
-    MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS
+    MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
+    ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
 )
 from common.feature_extractor import extract_features_batch, load_feature_names
 from ml_engine.decision_engine import DecisionEngine
@@ -66,7 +67,8 @@ class MLEngine:
             from common.config import (
                 ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE,
                 ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
-                ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES
+                ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES,
+                ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
             )
             
             # Update Decision Engine
@@ -84,6 +86,9 @@ class MLEngine:
             if hasattr(self, 'anomaly_scorer'):
                 self.anomaly_scorer.percentile = ANOMALY_PERCENTILE
                 self.anomaly_scorer.min_samples = ANOMALY_MIN_SAMPLES
+            
+            # Reload Models
+            self._load_models()
                 
             logger.info("MLEngine configuration reloaded successfully")
         except Exception as e:
@@ -102,18 +107,23 @@ class MLEngine:
                 self.feature_order = load_feature_names()
                 
             # 2. Load Scaler
-            if Path(SCALER_PATH).exists():
-                self.scaler = joblib.load(SCALER_PATH)
-                logger.info("Scaler loaded", path=str(SCALER_PATH))
+            from common.config import ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, MODELS_DIR
             
-            # 3. Load RF (Check ONNX first)
-            onnx_path = MODELS_DIR / "rf_pipeline.onnx"
-            if ONNX_AVAILABLE and onnx_path.exists():
-                self.rf_session = ort.InferenceSession(str(onnx_path))
-                logger.info("ONNX RF Pipeline loaded", path=str(onnx_path))
-            elif Path(RF_MODEL_PATH).exists():
-                self.rf_model = joblib.load(RF_MODEL_PATH)
-                logger.info("Pkl RF Model loaded", path=str(RF_MODEL_PATH))
+            scaler_path = MODELS_DIR / ACTIVE_SCALER_FILE
+            if scaler_path.exists():
+                self.scaler = joblib.load(scaler_path)
+                logger.info("Scaler loaded", path=str(scaler_path))
+            
+            # 3. Load RF (Check extension)
+            model_path = MODELS_DIR / ACTIVE_MODEL_FILE
+            if ONNX_AVAILABLE and model_path.suffix == ".onnx" and model_path.exists():
+                self.rf_session = ort.InferenceSession(str(model_path))
+                self.rf_model = None
+                logger.info("ONNX RF Pipeline loaded", path=str(model_path))
+            elif model_path.exists():
+                self.rf_model = joblib.load(model_path)
+                self.rf_session = None
+                logger.info("Pkl RF Model loaded", path=str(model_path))
             
             if (self.rf_model or self.rf_session) and self.scaler:
                 self.is_ready = True

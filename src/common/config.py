@@ -38,7 +38,7 @@ def get_cfg(path, default=None):
 
 def refresh_config():
     """Reloads the YAML config from disk and updates global state."""
-    global YAML_CONFIG, API_PORT, UI_PORT, REDIS_HOST, REDIS_PORT, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, BLOCK_TTL, RATE_LIMIT_PER_SEC
+    global YAML_CONFIG, API_PORT, UI_PORT, REDIS_HOST, REDIS_PORT, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
     
     YAML_CONFIG = _load_yaml_config()
     
@@ -68,6 +68,9 @@ def refresh_config():
     BLOCK_TTL = get_cfg("mitigation.block_ttl", 300)
     RATE_LIMIT_PER_SEC = get_cfg("mitigation.rate_limit_per_sec", 5)
     
+    ACTIVE_MODEL_FILE = get_cfg("detection.ml.active_model", "rf_pipeline.onnx")
+    ACTIVE_SCALER_FILE = get_cfg("detection.ml.active_scaler", "scaler.pkl")
+    
     # print(f"Config refreshed from {CONFIG_PATH}")
 
 # Initialize with defaults before first refresh
@@ -87,6 +90,8 @@ REPUTATION_TEMP_BLOCK = 25.0
 REPUTATION_PERM_BLOCK = 50.0
 BLOCK_TTL = 300
 RATE_LIMIT_PER_SEC = 5
+ACTIVE_MODEL_FILE = "rf_pipeline.onnx"
+ACTIVE_SCALER_FILE = "scaler.pkl"
 
 refresh_config()
 

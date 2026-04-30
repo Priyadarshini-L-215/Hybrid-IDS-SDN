@@ -23,7 +23,11 @@ import {
   Clock,
   ExternalLink,
   Info,
-  ChevronDown
+  ChevronDown,
+  FileText,
+  Upload,
+  Link,
+  BarChart3
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -105,6 +109,15 @@ function App() {
   const [saveStatus, setSaveStatus] = useState(null);
   const lastStats = useRef({ processed: 0, attacks: 0 });
   
+  // Eval State
+  const [modelList, setModelList] = useState({ models: [], scalers: [], active_model: '', active_scaler: '' });
+  const [evalPath, setEvalPath] = useState('');
+  const [evalFile, setEvalFile] = useState(null);
+  const [evalLabel, setEvalLabel] = useState('Label');
+  const [evalType, setEvalType] = useState('path'); // 'path' or 'upload'
+  const [evaluating, setEvaluating] = useState(false);
+  const [evalResult, setEvalResult] = useState(null);
+  
   const ws = useRef(null);
 
   // Fetch status via REST
@@ -167,10 +180,65 @@ function App() {
     }
   };
 
+  const fetchModels = async () => {
+    try {
+      const res = await fetch('/api/models');
+      const data = await res.json();
+      setModelList(data);
+    } catch (err) {
+      console.error("Models fetch failed:", err);
+    }
+  };
+
+  const swapModel = async (model, scaler) => {
+    try {
+      const res = await fetch('/api/models/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_file: model, scaler_file: scaler })
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchModels();
+      }
+    } catch (err) {
+      console.error("Model swap failed:", err);
+    }
+  };
+
+  const runEvaluation = async () => {
+    if (evalType === 'path' && !evalPath) return;
+    if (evalType === 'upload' && !evalFile) return;
+
+    setEvaluating(true);
+    setEvalResult(null);
+    try {
+      const formData = new FormData();
+      if (evalType === 'upload' && evalFile) {
+        formData.append('file', evalFile);
+      } else {
+        formData.append('dataset_path', evalPath);
+      }
+      formData.append('label_column', evalLabel);
+
+      const res = await fetch('/api/evaluate/dataset', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      setEvalResult(data);
+    } catch (err) {
+      setEvalResult({ success: false, error: "Evaluation request failed" });
+    } finally {
+      setEvaluating(false);
+    }
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchAlerts();
     fetchConfig();
+    fetchModels();
     const timer = setInterval(fetchStatus, 3000);
     return () => clearInterval(timer);
   }, []);
@@ -453,6 +521,12 @@ function App() {
             onClick={() => setActiveTab('lab')}
           >
             <Cpu size={16} /> Attack Lab
+          </button>
+          <button 
+            className={`tab-button ${activeTab === 'eval' ? 'active' : ''}`}
+            onClick={() => setActiveTab('eval')}
+          >
+            <BarChart3 size={16} /> Evaluation
           </button>
           <button 
             className={`tab-button ${activeTab === 'settings' ? 'active' : ''}`}
@@ -955,6 +1029,212 @@ function App() {
                        Inject Payload
                      </button>
                    </GlassCard>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'eval' && (
+              <motion.div key="eval" className="content-stack">
+                <div style={{ display: 'grid', gridTemplateColumns: '0.8fr 1.2fr', gap: '1.5rem' }}>
+                  <div className="content-stack">
+                    <GlassCard title="Model Management" icon={Cpu}>
+                      <div className="content-stack" style={{ gap: '1rem' }}>
+                        <div>
+                          <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Active ML Model</label>
+                          <select 
+                            value={modelList.active_model}
+                            onChange={(e) => swapModel(e.target.value, modelList.active_scaler)}
+                            className="glass"
+                            style={{ width: '100%', border: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', color: 'white', padding: '12px', borderRadius: '8px' }}
+                          >
+                            {modelList.models.map(m => <option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Active Scaler</label>
+                          <select 
+                            value={modelList.active_scaler}
+                            onChange={(e) => swapModel(modelList.active_model, e.target.value)}
+                            className="glass"
+                            style={{ width: '100%', border: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', color: 'white', padding: '12px', borderRadius: '8px' }}
+                          >
+                            {modelList.scalers.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </div>
+                        <div style={{ padding: '0.75rem', background: 'rgba(59, 130, 246, 0.05)', borderRadius: '8px', fontSize: '0.75rem', opacity: 0.8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--primary)', fontWeight: 800, marginBottom: '4px' }}>
+                            <Info size={14} /> MODEL INFO
+                          </div>
+                          Model swapping is instantaneous and affects both this lab and real-time detection.
+                        </div>
+                      </div>
+                    </GlassCard>
+
+                    <GlassCard title="Dataset Configuration" icon={Database}>
+                      <div className="content-stack" style={{ gap: '1.25rem' }}>
+                        <div style={{ display: 'flex', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px' }}>
+                          <button 
+                            onClick={() => setEvalType('path')}
+                            className={`glass ${evalType === 'path' ? 'active' : ''}`}
+                            style={{ flex: 1, padding: '8px', border: 'none', borderRadius: '6px', fontSize: '0.75rem', cursor: 'pointer', background: evalType === 'path' ? 'var(--primary)' : 'transparent', color: 'white', fontWeight: 700 }}
+                          >
+                            Local Path
+                          </button>
+                          <button 
+                            onClick={() => setEvalType('upload')}
+                            className={`glass ${evalType === 'upload' ? 'active' : ''}`}
+                            style={{ flex: 1, padding: '8px', border: 'none', borderRadius: '6px', fontSize: '0.75rem', cursor: 'pointer', background: evalType === 'upload' ? 'var(--primary)' : 'transparent', color: 'white', fontWeight: 700 }}
+                          >
+                            Upload
+                          </button>
+                        </div>
+
+                        {evalType === 'path' ? (
+                          <div>
+                            <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Dataset CSV Path</label>
+                            <div style={{ position: 'relative' }}>
+                              <Link size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', opacity: 0.5 }} />
+                              <input 
+                                type="text" 
+                                placeholder="/home/user/data/test.csv"
+                                value={evalPath}
+                                onChange={(e) => setEvalPath(e.target.value)}
+                                className="glass"
+                                style={{ width: '100%', border: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', color: 'white', padding: '12px 12px 12px 40px', borderRadius: '8px', fontSize: '0.9rem' }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Upload CSV</label>
+                            <label className="glass" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', padding: '1.5rem', border: '2px dashed var(--border)', borderRadius: '12px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)' }}>
+                              <Upload size={24} className="text-primary" />
+                              <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>{evalFile ? evalFile.name : 'Click to select CSV file'}</span>
+                              <input 
+                                type="file" 
+                                accept=".csv"
+                                onChange={(e) => setEvalFile(e.target.files[0])}
+                                style={{ display: 'none' }}
+                              />
+                            </label>
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="stat-label" style={{ display: 'block', marginBottom: '8px' }}>Ground Truth Label Column</label>
+                          <input 
+                            type="text" 
+                            value={evalLabel}
+                            onChange={(e) => setEvalLabel(e.target.value)}
+                            className="glass"
+                            style={{ width: '100%', border: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', color: 'white', padding: '12px', borderRadius: '8px', fontSize: '0.9rem' }}
+                          />
+                        </div>
+
+                        <button 
+                          onClick={runEvaluation}
+                          disabled={evaluating}
+                          className="glass"
+                          style={{ width: '100%', padding: '14px', borderRadius: '12px', background: 'var(--primary)', color: 'white', fontWeight: 800, cursor: evaluating ? 'not-allowed' : 'pointer', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}
+                        >
+                          {evaluating ? <RefreshCcw size={18} className="spin" /> : <Play size={18} />}
+                          {evaluating ? 'EVALUATING...' : 'RUN BENCHMARK'}
+                        </button>
+                      </div>
+                    </GlassCard>
+                  </div>
+
+                  <div className="content-stack">
+                    <GlassCard title="Evaluation Results" icon={BarChart3}>
+                      {!evalResult && !evaluating && (
+                        <div style={{ textAlign: 'center', padding: '5rem 2rem', opacity: 0.3 }}>
+                          <FileText size={48} style={{ margin: '0 auto 1.5rem' }} />
+                          <p>Configure a dataset and run the benchmark to see metrics.</p>
+                        </div>
+                      )}
+
+                      {evaluating && (
+                        <div style={{ textAlign: 'center', padding: '5rem 2rem' }}>
+                          <RefreshCcw size={48} className="spin text-primary" style={{ margin: '0 auto 1.5rem' }} />
+                          <p className="gradient-text" style={{ fontWeight: 800 }}>Analyzing Dataset Structure...</p>
+                          <p style={{ fontSize: '0.8rem', opacity: 0.5 }}>This may take a moment for large CSV files.</p>
+                        </div>
+                      )}
+
+                      {evalResult && !evalResult.success && (
+                        <div className="animate-fade-in" style={{ padding: '1.5rem', background: 'rgba(239, 68, 68, 0.05)', border: '1px solid var(--danger)', borderRadius: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'var(--danger)', fontWeight: 800, marginBottom: '1rem' }}>
+                            <AlertTriangle size={20} /> COMPATIBILITY ERROR
+                          </div>
+                          <p style={{ fontSize: '0.9rem', marginBottom: '1.5rem' }}>{evalResult.error}</p>
+                          
+                          {evalResult.incompatibility_details?.missing_features && (
+                            <div>
+                              <div style={{ fontSize: '0.7rem', opacity: 0.6, fontWeight: 800, marginBottom: '0.5rem', letterSpacing: '0.05em' }}>MISSING FEATURES IN DATASET:</div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                                {evalResult.incompatibility_details.missing_features.map(f => (
+                                  <span key={f} style={{ fontSize: '0.65rem', background: 'rgba(239, 68, 68, 0.2)', padding: '2px 8px', borderRadius: '4px' }}>{f}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {evalResult && evalResult.success && (
+                        <div className="animate-fade-in content-stack">
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                            <div className="glass" style={{ padding: '1rem', textAlign: 'center', borderRadius: '12px' }}>
+                              <div style={{ fontSize: '0.7rem', opacity: 0.5, marginBottom: '4px' }}>SAMPLES</div>
+                              <div style={{ fontSize: '1.2rem', fontWeight: 900 }}>{evalResult.summary.total_samples.toLocaleString()}</div>
+                            </div>
+                            <div className="glass" style={{ padding: '1rem', textAlign: 'center', borderRadius: '12px' }}>
+                              <div style={{ fontSize: '0.7rem', opacity: 0.5, marginBottom: '4px' }}>ACCURACY</div>
+                              <div className="text-success" style={{ fontSize: '1.2rem', fontWeight: 900 }}>{(evalResult.summary.accuracy * 100).toFixed(1)}%</div>
+                            </div>
+                            <div className="glass" style={{ padding: '1rem', textAlign: 'center', borderRadius: '12px' }}>
+                              <div style={{ fontSize: '0.7rem', opacity: 0.5, marginBottom: '4px' }}>VERSION</div>
+                              <div style={{ fontSize: '0.9rem', fontWeight: 900, marginTop: '4px' }}>{evalResult.summary.model_version}</div>
+                            </div>
+                          </div>
+
+                          <div className="table-container glass" style={{ border: 'none', background: 'transparent' }}>
+                            <table className="alerts-table">
+                              <thead>
+                                <tr>
+                                  <th>Class Name</th>
+                                  <th>Precision</th>
+                                  <th>Recall</th>
+                                  <th>F1-Score</th>
+                                  <th>Support</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {Object.entries(evalResult.metrics)
+                                  .filter(([key]) => !['accuracy', 'macro avg', 'weighted avg'].includes(key))
+                                  .map(([name, m]) => (
+                                    <tr key={name} className="alert-row">
+                                      <td style={{ fontWeight: 800 }}>{name}</td>
+                                      <td>{(m.precision * 100).toFixed(1)}%</td>
+                                      <td>{(m.recall * 100).toFixed(1)}%</td>
+                                      <td>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                          <div style={{ flex: 1, height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
+                                            <div style={{ width: `${m['f1-score'] * 100}%`, height: '100%', background: m['f1-score'] > 0.8 ? 'var(--success)' : m['f1-score'] > 0.5 ? 'var(--warning)' : 'var(--danger)' }} />
+                                          </div>
+                                          {(m['f1-score'] * 100).toFixed(1)}%
+                                        </div>
+                                      </td>
+                                      <td style={{ opacity: 0.6 }}>{m.support}</td>
+                                    </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </GlassCard>
+                  </div>
                 </div>
               </motion.div>
             )}

@@ -65,6 +65,8 @@ The system utilizes a high-performance native Linux architecture:
 *   **MITRE ATT&CK Integration**: Automatic mapping of signatures to the MITRE knowledge base for tactical context.
 *   **Concept Drift Monitoring**: Integrated `river.ADWIN` detector flags ML performance decay in real-time.
 *   **SOC Administrative Console**: Persistent settings management for ML thresholds, IPS policies, and system tuning.
+*   **ML Pipeline Evaluation**: Robust benchmarking framework for validating model performance against datasets (e.g., CIC-IDS2017) with per-class metrics.
+*   **Schema Validation**: Intelligent feature compatibility checks to ensure data integrity between ingestion and active ML models.
 *   **Cold-Start Persistence**: Automatic re-population of kernel blocklists from Redis on system reboot.
 *   **Integrated Diagnostics**: Built-in tools for pipeline health, tracer probes, and connection testing.
 *   **System Observability**: `/api/pipeline/status` returns a live snapshot for debugging relay state, recent alert sources, and current stats.
@@ -107,4 +109,4 @@ chmod +x setup.sh start.sh stop.sh diag.sh
 | **Pipeline Status** | `http://localhost:5000/api/pipeline/status` |
 
 ## 🏗️ Technical Deep Dive
-For architecture diagrams and module details, see [STARTUP_OPTIMIZATION_PLAN.md](./STARTUP_OPTIMIZATION_PLAN.md).
+For architecture diagrams, dependency ordering, and resiliency details, see [STARTUP_OPTIMIZATION_PLAN.md](./STARTUP_OPTIMIZATION_PLAN.md).

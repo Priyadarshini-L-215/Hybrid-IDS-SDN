@@ -4,13 +4,15 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import structlog
 import yaml
+import io
 
 # Add project root to path
 import sys
@@ -24,12 +26,40 @@ from common.database import get_recent_alerts, get_stats
 from ml_engine import redis_client as rc
 from relay.ws_manager import ConnectionManager
 from ml_engine.firewall import ActiveFirewall
+from ml_engine.engine import MLEngine
+from ml_engine.evaluator import validate_dataset, evaluate_dataset
+from common.config import MODELS_DIR
 
 # Initialize logging
 setup_logging("relay")
 logger = structlog.get_logger("relay")
 
-app = FastAPI(title="Sentinel Core Relay", version="3.0.0")
+# ML Engine instance for evaluation
+_relay_ml_engine = None
+
+def get_ml_engine():
+    global _relay_ml_engine
+    if _relay_ml_engine is None:
+        try:
+            # Note: MLEngine expects models/ dir in project root
+            _relay_ml_engine = MLEngine()
+        except Exception as e:
+            logger.error("Failed to initialize Relay MLEngine", error=str(e))
+    return _relay_ml_engine
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handles startup and shutdown events."""
+    asyncio.create_task(redis_stream_listener())
+    logger.info("Relay startup complete")
+    yield
+    logger.info("Relay shutting down")
+
+app = FastAPI(
+    title="Sentinel Core Relay", 
+    version="3.0.0",
+    lifespan=lifespan
+)
 manager = ConnectionManager()
 
 # Middleware
@@ -77,10 +107,7 @@ async def redis_stream_listener():
             logger.error("Stream listener error", error=str(e), exc_info=True)
             await asyncio.sleep(2)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(redis_stream_listener())
-    logger.info("Relay startup complete")
+# Startup logic moved to lifespan handler
 
 # --- REST API ---
 
@@ -182,6 +209,120 @@ async def block_ip(request: Dict[str, Any]):
     logger.info("Manual block requested", ip=ip)
     ActiveFirewall.block(ip)
     return {"success": True, "message": f"IP {ip} blocked"}
+
+# --- MODEL & EVALUATION ---
+
+@app.get("/api/models")
+async def list_models():
+    """Lists available models and scalers."""
+    try:
+        from common.config import ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
+        
+        models = [f.name for f in MODELS_DIR.glob("*.onnx")] + \
+                 [f.name for f in MODELS_DIR.glob("*.pkl") if "scaler" not in f.name]
+        scalers = [f.name for f in MODELS_DIR.glob("*scaler*.pkl")]
+        
+        return {
+            "models": sorted(list(set(models))),
+            "scalers": sorted(list(set(scalers))),
+            "active_model": ACTIVE_MODEL_FILE,
+            "active_scaler": ACTIVE_SCALER_FILE
+        }
+    except Exception as e:
+        logger.error("Failed to list models", error=str(e))
+        return {"models": [], "scalers": [], "error": str(e)}
+
+@app.post("/api/models/active")
+async def set_active_model(request: Dict[str, str]):
+    """Updates the active model in config and reloads the engine."""
+    model_file = request.get("model_file")
+    scaler_file = request.get("scaler_file")
+    
+    if not model_file or not scaler_file:
+        raise HTTPException(status_code=400, detail="model_file and scaler_file are required")
+        
+    try:
+        # Load existing config
+        cfg = {}
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+                
+        # Update model paths
+        if "detection" not in cfg: cfg["detection"] = {}
+        if "ml" not in cfg["detection"]: cfg["detection"]["ml"] = {}
+        
+        cfg["detection"]["ml"]["active_model"] = model_file
+        cfg["detection"]["ml"]["active_scaler"] = scaler_file
+        
+        # Save config
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False)
+            
+        # 1. Reload local engine
+        engine = get_ml_engine()
+        if engine:
+            engine.reload_config()
+            
+        # 2. Signal consumer to reload
+        try:
+            import subprocess
+            import signal
+            pid_res = subprocess.run(["pgrep", "-f", "src/ml_engine/consumer.py"], capture_output=True, text=True)
+            if pid_res.returncode == 0:
+                for pid in pid_res.stdout.split():
+                    os.kill(int(pid), signal.SIGHUP)
+                logger.info("Signaled consumer to reload model")
+        except Exception as e:
+            logger.warning("Failed to signal consumer", error=str(e))
+            
+        return {"success": True, "message": f"Active model swapped to {model_file}"}
+    except Exception as e:
+        logger.error("Failed to swap model", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/evaluate/dataset")
+async def run_evaluation(
+    file: Optional[UploadFile] = File(None),
+    dataset_path: Optional[str] = Form(None),
+    label_column: str = Form("Label")
+):
+    """Evaluates a dataset (uploaded or local) and returns metrics."""
+    engine = get_ml_engine()
+    if not engine or not engine.is_ready:
+         return {"success": False, "error": "ML Engine is not ready or in fallback mode."}
+         
+    source = None
+    try:
+        if file:
+            content = await file.read()
+            source = io.BytesIO(content)
+            logger.info("Evaluating uploaded file", filename=file.filename)
+        elif dataset_path:
+            path = Path(dataset_path)
+            if not path.exists():
+                return {"success": False, "error": f"Path not found: {dataset_path}"}
+            source = path
+            logger.info("Evaluating local path", path=dataset_path)
+        else:
+            return {"success": False, "error": "No dataset provided (upload a file or provide a local path)"}
+            
+        # 1. Validate features
+        v_res = validate_dataset(source, engine.feature_order)
+        if not v_res["compatible"]:
+            return {
+                "success": False, 
+                "error": "Dataset incompatible with current model features.",
+                "incompatibility_details": v_res
+            }
+            
+        # 2. Run evaluation
+        e_res = evaluate_dataset(source, engine, label_column=label_column)
+        return e_res
+        
+    except Exception as e:
+        logger.error("Evaluation endpoint error", error=str(e))
+        return {"success": False, "error": str(e)}
 
 
 # --- WEBSOCKET ---

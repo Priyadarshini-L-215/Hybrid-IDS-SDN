@@ -4,9 +4,9 @@ A high-performance, real-time security telemetry interface for the **Sentinel Co
 
 ## 🚀 Enterprise Features
 
-*   **Sentinel Neural Stream**: Low-latency WebSocket integration with the Flask relay for instantaneous threat visibility.
-*   **Active Mitigation Feedback**: Real-time status indicators for IPS blocking actions and stateful correlation alerts.
-*   **Professional SOC Aesthetic**: A premium "Sentinel Core" glassmorphic design system optimized for modern cybersecurity operations.
+*   **Sentinel Neural Stream**: Low-latency WebSocket integration with the **FastAPI** relay for instantaneous threat visibility.
+*   **Active Mitigation Feedback**: Real-time status indicators for IPS blocking actions (ipset) and stateful correlation alerts.
+*   **Professional SOC Aesthetic**: A premium "Sentinel Core" glassmorphic design system built with **React 19** and optimized for modern cybersecurity operations.
 *   **Attack Lab**: Integrated Nmap orchestration interface with automated analysis capabilities.
 *   **Simulation Labeling**: Attack Lab rows are tagged as simulation data so they do not get confused with real Suricata alerts.
 *   **Resilient Architecture**: Automated reconnection logic and background status monitoring to ensure mission-critical availability.
