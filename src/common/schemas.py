@@ -25,6 +25,7 @@ class RawEvent(BaseMessage):
 
 class FlowAggregate(BaseMessage):
     """Schema for aggregated flow data passed to ML."""
+    event_type: str = "flow"
     flow_id: str
     src_ip: str
     dst_ip: str
@@ -36,7 +37,7 @@ class FlowAggregate(BaseMessage):
     byte_count: int
     pps: float  # Packets per second
     bps: float  # Bytes per second
-    features: List[float] = Field(description="Normalized 77-feature vector")
+    features: Optional[List[float]] = Field(default=None, description="Normalized 77-feature vector")
 
 class AlertPayload(BaseMessage):
     """Schema for final processed alerts sent to UI."""

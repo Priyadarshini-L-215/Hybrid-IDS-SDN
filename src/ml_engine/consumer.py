@@ -56,9 +56,9 @@ async def main():
     try:
         loop.add_signal_handler(signal.SIGHUP, trigger_reload)
         logger.info("SIGHUP handler registered for config reloading")
-    except AttributeError:
-        # Windows doesn't have SIGHUP
-        pass
+    except (AttributeError, NotImplementedError):
+        # Windows doesn't have SIGHUP or add_signal_handler(SIGHUP)
+        logger.warning("SIGHUP signal handler NOT registered. Config reloading via signal disabled (expected on Windows).")
 
     # 3. Start workers
     await pool.start()

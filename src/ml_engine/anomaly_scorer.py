@@ -26,6 +26,10 @@ class AnomalyScorer:
         self.min_samples = min_samples
         # Per-protocol error history: {"tcp": deque, "udp": deque, ...}
         self._error_windows: dict[str, collections.deque] = {}
+        # Per-protocol threshold cache to avoid expensive percentile calls
+        self._threshold_cache: dict[str, float] = {}
+        self._update_counter: dict[str, int] = {}
+        
         # Latent space covariance matrix for Mahalanobis (updated periodically)
         self._latent_cov_inv: Optional[np.ndarray] = None
         self._latent_mean: Optional[np.ndarray] = None
@@ -38,12 +42,24 @@ class AnomalyScorer:
         return self._error_windows[proto]
 
     def _dynamic_threshold(self, protocol: str) -> float:
-        """Returns the current percentile-based threshold for this protocol."""
+        """Returns the current percentile-based threshold for this protocol (with caching)."""
+        proto = (protocol or "unknown").lower()
+        
+        # Return cached threshold if we've updated it recently
+        if proto in self._threshold_cache and self._update_counter.get(proto, 0) < 100:
+            self._update_counter[proto] += 1
+            return self._threshold_cache[proto]
+
         window = self._get_window(protocol)
         if len(window) < self.min_samples:
             # Not enough samples yet — return a permissive default
             return float("inf")
-        return float(np.percentile(list(window), self.percentile))
+        
+        # Expensive operation: convert deque to list and calculate percentile
+        threshold = float(np.percentile(list(window), self.percentile))
+        self._threshold_cache[proto] = threshold
+        self._update_counter[proto] = 0
+        return threshold
 
     def update_latent_stats(self, latent_vectors: np.ndarray):
         """

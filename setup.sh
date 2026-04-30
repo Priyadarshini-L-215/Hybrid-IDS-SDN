@@ -384,6 +384,36 @@ EOF
     log_success "Created .env file at $PROJECT_ROOT/.env"
 }
 
+setup_logrotate() {
+    if is_complete "logrotate"; then
+        log_info "Logrotate already configured (skipping)"
+        return 0
+    fi
+
+    log_info "Configuring log rotation..."
+    local lr_file="/etc/logrotate.d/sentinel_core"
+    
+    # Use copytruncate because our Python/Shell loggers keep handles open
+    if sudo tee "$lr_file" >/dev/null << EOF
+$PROJECT_ROOT/data/logs/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    missingok
+    copytruncate
+    create 0644 $USER $USER
+}
+EOF
+    then
+        log_success "Logrotate configuration created at $lr_file"
+        mark_complete "logrotate"
+    else
+        log_warn "Failed to create logrotate config (requires sudo)"
+    fi
+}
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -419,6 +449,7 @@ main() {
     setup_suricata_config || { log_error "Suricata configuration failed"; exit 1; }
     setup_suricata_rules
     setup_services || { log_error "Service setup failed"; exit 1; }
+    setup_logrotate
     create_env_file
 
     echo ""

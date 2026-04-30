@@ -23,6 +23,29 @@ logger = logging.getLogger(__name__)
 
 _CACHED_FEATURES = None
 
+DEFAULT_FEATURES = [
+    "Protocol", "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
+    "Fwd Packets Length Total", "Bwd Packets Length Total", "Fwd Packet Length Max",
+    "Fwd Packet Length Min", "Fwd Packet Length Mean", "Fwd Packet Length Std",
+    "Bwd Packet Length Max", "Bwd Packet Length Min", "Bwd Packet Length Mean",
+    "Bwd Packet Length Std", "Flow Bytes/s", "Flow Packets/s", "Flow IAT Mean",
+    "Flow IAT Std", "Flow IAT Max", "Flow IAT Min", "Fwd IAT Total", "Fwd IAT Mean",
+    "Fwd IAT Std", "Fwd IAT Max", "Fwd IAT Min", "Bwd IAT Total", "Bwd IAT Mean",
+    "Bwd IAT Std", "Bwd IAT Max", "Bwd IAT Min", "Fwd PSH Flags", "Bwd PSH Flags",
+    "Fwd URG Flags", "Bwd URG Flags", "Fwd Header Length", "Bwd Header Length",
+    "Fwd Packets/s", "Bwd Packets/s", "Packet Length Min", "Packet Length Max",
+    "Packet Length Mean", "Packet Length Std", "Packet Length Variance",
+    "FIN Flag Count", "SYN Flag Count", "RST Flag Count", "PSH Flag Count",
+    "ACK Flag Count", "URG Flag Count", "CWE Flag Count", "ECE Flag Count",
+    "Down/Up Ratio", "Avg Packet Size", "Avg Fwd Segment Size", "Avg Bwd Segment Size",
+    "Fwd Avg Bytes/Bulk", "Fwd Avg Packets/Bulk", "Fwd Avg Bulk Rate",
+    "Bwd Avg Bytes/Bulk", "Bwd Avg Packets/Bulk", "Bwd Avg Bulk Rate",
+    "Subflow Fwd Packets", "Subflow Fwd Bytes", "Subflow Bwd Packets",
+    "Subflow Bwd Bytes", "Init Fwd Win Bytes", "Init Bwd Win Bytes",
+    "Fwd Act Data Packets", "Fwd Seg Size Min", "Active Mean", "Active Std",
+    "Active Max", "Active Min", "Idle Mean", "Idle Std", "Idle Max", "Idle Min"
+]
+
 def load_feature_names(features_path: str | Path = None) -> list:
     """
     Load the ordered list of 77 feature names from features.json.
@@ -44,24 +67,29 @@ def load_feature_names(features_path: str | Path = None) -> list:
         return _CACHED_FEATURES
 
     try:
+        if not features_path.exists():
+            logger.warning(f"features.json not found at {features_path}. Using default 77 features.")
+            _CACHED_FEATURES = DEFAULT_FEATURES
+            return DEFAULT_FEATURES
+
         with open(features_path, 'r', encoding='utf-8') as f:
             features = json.load(f)
         
         if not isinstance(features, list):
-            raise ValueError(f"features.json must contain a JSON array, got {type(features)}")
+            logger.error(f"features.json must contain a JSON array, got {type(features)}. Falling back to defaults.")
+            _CACHED_FEATURES = DEFAULT_FEATURES
+            return DEFAULT_FEATURES
         
         if len(features) != 77:
-            logger.warning(f"Expected 77 features, but got {len(features)}. " 
-                         "Model may have been trained on different feature set.")
+            logger.error(f"Expected 77 features, but got {len(features)}. Mismatch may cause model failure.")
+            # We still return it, but validate_feature_vector will catch it later if it's strictly enforced
         
         _CACHED_FEATURES = features
         return features
-    except FileNotFoundError:
-        logger.error(f"features.json not found at {features_path}")
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in features.json: {e}")
-        raise
+    except (json.JSONDecodeError, PermissionError) as e:
+        logger.error(f"Error loading features.json: {e}. Falling back to defaults.")
+        _CACHED_FEATURES = DEFAULT_FEATURES
+        return DEFAULT_FEATURES
 
 
 def extract_features_from_eve(event: dict, features: list = None) -> list | None:
@@ -82,17 +110,19 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     if features is None:
         features = load_feature_names()
     
-    # Standardized schema fallback
+    # Standardized schema fallback: Suricata puts data in 'flow', 
+    # but our RawEvent puts original data in 'raw'
     flow = event.get('flow', {})
-    if not flow and 'raw_event' in event:
-        flow = event['raw_event'].get('flow', {})
+    if not flow and 'raw' in event:
+        flow = event['raw'].get('flow', {})
     
     # ===== BASIC FLOW METRICS =====
-    fwd_pkts = float(flow.get('pkts_toserver', 0))
-    bwd_pkts = float(flow.get('pkts_toclient', 0))
-    fwd_bytes = float(flow.get('bytes_toserver', 0))
-    bwd_bytes = float(flow.get('bytes_toclient', 0))
-    flow_age_sec = float(flow.get('age', 0))
+    # If nested flow object is missing, try root level (for FlowAggregate or RawEvent)
+    fwd_pkts = float(flow.get('pkts_toserver', event.get('packet_count', 0) / 2))
+    bwd_pkts = float(flow.get('pkts_toclient', event.get('packet_count', 0) / 2))
+    fwd_bytes = float(flow.get('bytes_toserver', event.get('byte_count', 0) / 2))
+    bwd_bytes = float(flow.get('bytes_toclient', event.get('byte_count', 0) / 2))
+    flow_age_sec = float(flow.get('age', event.get('duration', 0)))
     flow_age_us = flow_age_sec * 1_000_000  # Convert to microseconds
     
     total_pkts = fwd_pkts + bwd_pkts
@@ -109,10 +139,11 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     avg_pkt_len = total_bytes / max(total_pkts, 1)
     
     # For std dev, we use simplified calculation (assuming Gaussian distribution)
-    # In production, you'd want to capture this at packet capture time
-    fwd_pkt_len_std = fwd_avg_pkt_len * 0.1  # Placeholder: 10% of mean
-    bwd_pkt_len_std = bwd_avg_pkt_len * 0.1
-    pkt_len_variance = (fwd_pkt_len_std ** 2 + bwd_pkt_len_std ** 2)
+    # Fallback: check if standard deviation is already provided in expanded logs
+    fwd_pkt_len_std = float(flow.get('fwd_pkt_len_std', fwd_avg_pkt_len * 0.1))
+    bwd_pkt_len_std = float(flow.get('bwd_pkt_len_std', bwd_avg_pkt_len * 0.1))
+    
+    pkt_len_variance = float(flow.get('pkt_len_var', (fwd_pkt_len_std ** 2 + bwd_pkt_len_std ** 2)))
     pkt_len_std = (pkt_len_variance) ** 0.5
     
     # ===== INTER-ARRIVAL TIME (IAT) STATISTICS =====
@@ -122,23 +153,23 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     else:
         flow_iat_mean = 0
     
-    flow_iat_std = flow_iat_mean * 0.2  # Placeholder
-    flow_iat_max = flow_age_us if total_pkts > 0 else 0
-    flow_iat_min = flow_iat_mean if total_pkts > 1 else 0
+    flow_iat_std = float(flow.get('iat_std', flow_iat_mean * 0.2))
+    flow_iat_max = float(flow.get('iat_max', flow_age_us if total_pkts > 0 else 0))
+    flow_iat_min = float(flow.get('iat_min', flow_iat_mean if total_pkts > 1 else 0))
     
     # Forward IAT
     fwd_iat_total = flow_age_us if fwd_pkts > 1 else 0
     fwd_iat_mean = fwd_iat_total / max(fwd_pkts - 1, 1) if fwd_pkts > 1 else 0
-    fwd_iat_std = fwd_iat_mean * 0.15
-    fwd_iat_max = flow_age_us if fwd_pkts > 0 else 0
-    fwd_iat_min = fwd_iat_mean if fwd_pkts > 1 else 0
+    fwd_iat_std = float(flow.get('fwd_iat_std', fwd_iat_mean * 0.15))
+    fwd_iat_max = float(flow.get('fwd_iat_max', flow_age_us if fwd_pkts > 0 else 0))
+    fwd_iat_min = float(flow.get('fwd_iat_min', fwd_iat_mean if fwd_pkts > 1 else 0))
     
     # Backward IAT
     bwd_iat_total = flow_age_us if bwd_pkts > 1 else 0
     bwd_iat_mean = bwd_iat_total / max(bwd_pkts - 1, 1) if bwd_pkts > 1 else 0
-    bwd_iat_std = bwd_iat_mean * 0.15
-    bwd_iat_max = flow_age_us if bwd_pkts > 0 else 0
-    bwd_iat_min = bwd_iat_mean if bwd_pkts > 1 else 0
+    bwd_iat_std = float(flow.get('bwd_iat_std', bwd_iat_mean * 0.15))
+    bwd_iat_max = float(flow.get('bwd_iat_max', flow_age_us if bwd_pkts > 0 else 0))
+    bwd_iat_min = float(flow.get('bwd_iat_min', bwd_iat_mean if bwd_pkts > 1 else 0))
     
     # ===== PACKET RATES =====
     fwd_pkts_per_sec = fwd_pkts / safe_age
@@ -149,8 +180,8 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     # ===== TCP FLAG COUNTS =====
     # Suricata includes tcp flags in the event.tcp object or raw_event.tcp object
     tcp_info = event.get('tcp', {})
-    if not tcp_info and 'raw_event' in event:
-        tcp_info = event['raw_event'].get('tcp', {})
+    if not tcp_info and 'raw' in event:
+        tcp_info = event['raw'].get('tcp', {})
         
     syn_flag_count = 1.0 if tcp_info.get('syn') else 0.0
     fin_flag_count = 1.0 if tcp_info.get('fin') else 0.0
@@ -177,9 +208,10 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     subflow_bwd_packets = bwd_pkts
     subflow_bwd_bytes = bwd_bytes
     
-    # ===== WINDOW SIZES (TCP-specific, not in Suricata flow events) =====
-    init_fwd_win_bytes = 0  # Would need TCP capture
-    init_bwd_win_bytes = 0
+    # ===== WINDOW SIZES (TCP-specific, not in standard Suricata flow events) =====
+    # Check if present in tcp object (requires expanded logging or custom fields)
+    init_fwd_win_bytes = float(tcp_info.get('fwd_window_size', 0))
+    init_bwd_win_bytes = float(tcp_info.get('bwd_window_size', 0))
     
     # ===== ACTIVE/IDLE TIME (Simplified) =====
     # Active time: time from first to last packet
@@ -201,8 +233,36 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     
     # ===== PROTOCOL MAPPING =====
     proto_str = (event.get('protocol') or event.get('proto') or 'TCP').upper()
-    proto_map = {"TCP": 6, "UDP": 17, "ICMP": 1, "HOPOPT": 0, "IPV6-ICMP": 58}
-    protocol_num = float(proto_map.get(proto_str, 0))
+    proto_map = {
+        "HOPOPT": 0, "ICMP": 1, "IGMP": 2, "GGP": 3, "IPV4": 4, "ST": 5, "TCP": 6,
+        "CBT": 7, "EGP": 8, "IGP": 9, "BBN-RCC-MON": 10, "NVP-II": 11, "PUP": 12,
+        "ARGUS": 13, "EMCON": 14, "XNET": 15, "CHAOS": 16, "UDP": 17, "MUX": 18,
+        "DCN-MEAS": 19, "HMP": 20, "PRM": 21, "XNS-IDP": 22, "TRUNK-1": 23,
+        "TRUNK-2": 24, "LEAF-1": 25, "LEAF-2": 26, "RDP": 27, "IRTP": 28,
+        "ISO-TP4": 29, "NETBLT": 30, "MFE-NSP": 31, "MERIT-INP": 32, "DCCP": 33,
+        "3PC": 34, "IDPR": 35, "XTP": 36, "DDP": 37, "IDPR-CMTP": 38, "TP++": 39,
+        "IL": 40, "IPV6": 41, "SDRP": 42, "IPV6-ROUTE": 43, "IPV6-FRAG": 44,
+        "IDRP": 45, "RSVP": 46, "GRE": 47, "DSR": 48, "BNA": 49, "ESP": 50,
+        "AH": 51, "I-NLSP": 52, "SWIPE": 53, "NARP": 54, "MOBILE": 55, "TLSP": 56,
+        "SKIP": 57, "IPV6-ICMP": 58, "IPV6-NONXT": 59, "IPV6-OPTS": 60, "CFTP": 62,
+        "SAT-EXPAK": 64, "KRYPTOLAN": 65, "RVD": 66, "IPPC": 67, "SAT-MON": 69,
+        "VISA": 70, "IPCV": 71, "CPNX": 72, "CPHB": 73, "WSN": 74, "PVP": 75,
+        "BR-SAT-MON": 76, "SUN-ND": 77, "WB-MON": 78, "WB-EXPAK": 79, "ISO-IP": 80,
+        "VMTP": 81, "SECURE-VMTP": 82, "VINES": 83, "TTP": 84, "NSFNET-IGP": 85,
+        "DGP": 86, "TCF": 87, "EIGRP": 88, "OSPFIGP": 89, "SPRITE-RPC": 90,
+        "LARP": 91, "MTP": 92, "AX.25": 93, "IPIP": 94, "MICP": 95, "SCC-SP": 96,
+        "ETHERIP": 97, "ENCAP": 98, "GMTP": 100, "IFMP": 101, "PNNI": 102,
+        "PIM": 103, "ARIS": 104, "SCPS": 105, "QNX": 106, "A/N": 107, "IPCOMP": 108,
+        "SNP": 109, "COMPAQ-PEER": 110, "IPX-IN-IP": 111, "VRRP": 112, "PGM": 113,
+        "L2TP": 115, "DDX": 116, "IATP": 117, "STP": 118, "SRP": 119, "UTI": 120,
+        "SMP": 121, "SM": 122, "PTP": 123, "ISIS OVER IPV4": 124, "FIRE": 125,
+        "CRTP": 126, "CRUDP": 127, "SSCOPMCE": 128, "IPLT": 129, "SPS": 130,
+        "PIPE": 131, "SCTP": 132, "FC": 133, "RSVP-E2E-IGNORE": 134,
+        "MOBILITY HEADER": 135, "UDPLITE": 136, "MPLS-IN-IP": 137, "MANET": 138,
+        "HIP": 139, "SHIM6": 140, "WESP": 141, "ROHC": 142
+    }
+    # Fallback to 255 (Reserved/Unknown) for protocols not in map
+    protocol_num = float(proto_map.get(proto_str, 255))
 
     # ===== BUILD FEATURE DICTIONARY (77 FEATURES) =====
     feature_dict = {
@@ -257,7 +317,7 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         "URG Flag Count": urg_flag_count,
         "CWE Flag Count": cwe_flag_count,
         "ECE Flag Count": ece_flag_count,
-        "Down/Up Ratio": bwd_pkts / max(fwd_pkts, 1),
+        "Down/Up Ratio": bwd_pkts / fwd_pkts if fwd_pkts > 0 else 0.0,
         "Avg Packet Size": avg_packet_size,
         "Avg Fwd Segment Size": avg_fwd_segment_size,
         "Avg Bwd Segment Size": avg_bwd_segment_size,
@@ -287,9 +347,18 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     
     # ===== BUILD FEATURE VECTOR IN EXACT ORDER =====
     feature_vector = []
+    missing_features = []
+    
     for feature_name in features:
-        value = feature_dict.get(feature_name, 0.0)
-        feature_vector.append(float(value))
+        if feature_name in feature_dict:
+            value = feature_dict[feature_name]
+            feature_vector.append(float(value))
+        else:
+            feature_vector.append(0.0)
+            missing_features.append(feature_name)
+            
+    if missing_features:
+        logger.warning(f"Event missing {len(missing_features)} features: {missing_features[:5]}...")
     
     return feature_vector
 

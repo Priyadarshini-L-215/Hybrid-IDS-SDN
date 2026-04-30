@@ -10,6 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import structlog
+import yaml
 
 # Add project root to path
 import sys
@@ -279,8 +280,8 @@ async def run_ddos_simulation(request: Dict[str, Any]):
                 port = random.randint(1, 65535)
                 try:
                     sock.sendto(bytes_payload, (target, port))
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to send UDP packet in simulation", error=str(e))
             time.sleep(0.1)
         sock.close()
 
@@ -311,8 +312,8 @@ async def run_payload_simulation(request: Dict[str, Any]):
                 try:
                     # We send it to port 5000 (ourselves)
                     await client.get(f"http://{target}:5000/api/health?id={p}", timeout=1.0)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to send HTTP payload in simulation", error=str(e))
                 
         return {"success": True, "message": f"Malicious payloads ({len(payloads)}) injected towards {target}"}
     except Exception as e:

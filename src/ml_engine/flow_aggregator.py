@@ -96,8 +96,6 @@ class FlowAggregator:
         pps = data["packet_count"] / duration
         bps = data["byte_count"] / duration
         
-        features = [0.0] * 77 
-        
         logger.debug("Flow flushed", key=key, duration=round(duration, 2), packets=data["packet_count"])
         
         return FlowAggregate(
@@ -111,8 +109,7 @@ class FlowAggregator:
             packet_count=data["packet_count"],
             byte_count=data["byte_count"],
             pps=pps,
-            bps=bps,
-            features=features
+            bps=bps
         )
 
     def get_status(self):

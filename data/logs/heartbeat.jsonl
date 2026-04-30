@@ -1898,3 +1898,4 @@
 {"ts": "2026-04-29T14:20:15.234355", "component": "ingestion", "uptime_sec": 58.77, "packets": 17, "flows": 5, "errors": 0, "redis_ok": true}
 {"ts": "2026-04-29T14:20:24.045212", "component": "ingestion", "uptime_sec": 67.58, "packets": 18, "flows": 8, "errors": 0, "redis_ok": true}
 {"ts": "2026-04-29T14:20:34.048227", "component": "ingestion", "uptime_sec": 77.59, "packets": 19, "flows": 9, "errors": 0, "redis_ok": true}
+{"ts": "2026-04-30T12:40:19.296685", "component": "ingestion", "uptime_sec": 120.03, "packets": 36, "flows": 24, "errors": 0, "redis_ok": true}

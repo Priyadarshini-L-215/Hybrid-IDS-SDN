@@ -55,6 +55,8 @@ async def push_to_redis(data_list: list):
     if not rc.async_redis_client:
         await rc.init_async_redis()
         if not rc.async_redis_client:
+            logger.critical("Redis client initialization failed - events will be lost")
+            _STATS["errors"] += len(data_list)
             return False
             
     try:
@@ -67,7 +69,7 @@ async def push_to_redis(data_list: list):
         return True
     except Exception as e:
         logger.error("Redis push failed", error=str(e))
-        _STATS["errors"] += 1
+        _STATS["errors"] += len(data_list)
         return False
 
 def normalize_eve(event: dict) -> RawEvent:
@@ -123,6 +125,7 @@ async def handle_suricata_stream(reader, writer):
                         _STATS["flows_aggregated"] += 1
                         
             except json.JSONDecodeError:
+                logger.debug("Skipping invalid JSON line")
                 continue
             except Exception as e:
                 logger.error("Event processing error", error=str(e))

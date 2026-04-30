@@ -123,20 +123,27 @@ class ActiveFirewall:
             if not cls._redis_client: continue
             
             try:
-                # 1. Get all reputation scores
-                reputation = cls._redis_client.hgetall(cls.REDIS_REPUTATION_KEY)
-                if not reputation: continue
-                
-                # 2. Decay scores and update
+                # 1. Get all reputation scores using scan to avoid blocking Redis with HGETALL
                 pipe = cls._redis_client.pipeline()
-                for ip, score in reputation.items():
+                count = 0
+                
+                # hscan_iter is much safer for large datasets
+                for ip, score in cls._redis_client.hscan_iter(cls.REDIS_REPUTATION_KEY):
                     new_score = float(score) * 0.9
                     if new_score < 0.1:
                         pipe.hdel(cls.REDIS_REPUTATION_KEY, ip)
                     else:
                         pipe.hset(cls.REDIS_REPUTATION_KEY, ip, new_score)
+                    
+                    count += 1
+                    # Execute in chunks to avoid massive pipelines
+                    if count % 500 == 0:
+                        pipe.execute()
+                        pipe = cls._redis_client.pipeline()
+                
                 pipe.execute()
-                logger.debug("Shared reputation scores decayed", count=len(reputation))
+                if count > 0:
+                    logger.debug("Shared reputation scores decayed", count=count)
             except Exception as e:
                 logger.error("Decay loop failed", error=str(e))
 

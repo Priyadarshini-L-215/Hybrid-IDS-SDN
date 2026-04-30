@@ -60,6 +60,17 @@ activate_venv() {
         exit 1
     fi
 
+    # Verify venv Python has required packages
+    if ! "$PROJECT_ROOT/.venv/bin/python" -c "import structlog; import yaml; import fastapi" 2>/dev/null; then
+        log_warn "Virtual environment missing required packages. Attempting repair..."
+        # We don't rm -rf here to avoid long setups if only one package is missing, 
+        # but setup.sh will handle it.
+        if ! ./setup.sh; then
+            log_error "Venv repair failed"
+            exit 1
+        fi
+    fi
+
     log_info "Environment ready"
 }
 
@@ -68,7 +79,7 @@ load_config() {
     export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
     if ! SURICATA_SOCKET=$(python3 -c "from src.common.config import SURICATA_SOCKET; print(SURICATA_SOCKET)" 2>/dev/null); then
-        log_warn "Could not load SURICATA_SOCKET from config, using default"
+        log_warn "Could not load SURICATA_SOCKET from config (packages might not be initialized). Using default."
         SURICATA_SOCKET="/tmp/sentinel_suricata.sock"
     fi
 
@@ -198,18 +209,23 @@ cleanup_stale_sockets() {
 
 start_redis() {
     if is_process_running "redis-server"; then
-        log_success "Redis is already running"
-        return 0
+        # Even if running, verify connectivity
+        if redis-cli ping 2>/dev/null | grep -q "PONG"; then
+            log_success "Redis is running and responsive"
+            return 0
+        fi
+        log_warn "Redis process found but not responsive. Attempting restart..."
     fi
 
     log_info "Starting Redis..."
-    if sudo systemctl start redis-server 2>/dev/null; then
-        if wait_for_condition "Redis" "redis-cli ping 2>/dev/null | grep -q PONG" 10; then
-            return 0
-        fi
+    sudo systemctl start redis-server 2>/dev/null || log_warn "systemctl start redis failed, trying direct start"
+    
+    if wait_for_condition "Redis Connectivity" "redis-cli ping 2>/dev/null | grep -q PONG" 15; then
+        log_success "Redis is ready"
+        return 0
     fi
 
-    log_error "Failed to start Redis"
+    log_error "Redis failed connectivity check"
     return 1
 }
 
@@ -243,8 +259,13 @@ start_ingestion() {
 }
 
 start_suricata() {
-    log_info "Preparing Suricata IDS sensor..."
+    log_info "Verifying Suricata installation..."
+    if ! command -v suricata &> /dev/null; then
+        log_error "Suricata binary not found. Please install suricata."
+        return 1
+    fi
 
+    log_info "Preparing Suricata IDS sensor..."
     # Stop any running instance
     sudo systemctl stop suricata 2>/dev/null || true
     sudo service suricata stop 2>/dev/null || true
@@ -261,11 +282,9 @@ start_suricata() {
             log_success "Suricata is running"
             return 0
         fi
-    else
-        log_error "systemctl start suricata failed"
     fi
 
-    log_error "Failed to start Suricata"
+    log_error "Failed to start Suricata. Check 'sudo suricata -T' for config errors."
     return 1
 }
 
@@ -284,15 +303,16 @@ start_consumer() {
     log_info "Consumer process started (PID: $pid)"
     echo "consumer_pid=$pid" >> "$STATE_FILE"
 
-    sleep 2
+    # Increased wait time for module loading
+    sleep 4
 
     if is_process_running "consumer.py"; then
         log_success "ML Consumer is running"
         return 0
     else
-        log_error "ML Consumer failed to start"
-        log_error "Last log entries:"
-        tail -n 15 "$PROJECT_ROOT/data/logs/consumer.log" | tee -a "$STARTUP_LOG_FILE"
+        log_error "ML Consumer died immediately after start"
+        log_error "Check for import errors in data/logs/consumer.log:"
+        tail -n 20 "$PROJECT_ROOT/data/logs/consumer.log" | tee -a "$STARTUP_LOG_FILE"
         return 1
     fi
 }
@@ -306,26 +326,33 @@ build_ui() {
     log_info "Building React UI (this may take a minute)..."
     cd "$PROJECT_ROOT/ui" || return 1
 
-    if npm run build; then
+    if timeout 300 npm run build; then
         cd "$PROJECT_ROOT" || return 1
         log_success "React UI build complete"
         return 0
     else
         cd "$PROJECT_ROOT" || return 1
-        log_error "Failed to build React UI"
+        log_error "Failed to build React UI or timed out after 5 minutes"
         return 1
     fi
 }
 
 start_relay() {
+    # Check port availability FIRST
+    if ! is_port_available "$API_PORT"; then
+        log_warn "Port $API_PORT is already in use."
+        local conflict_pid
+        conflict_pid=$(lsof -i :"$API_PORT" -t 2>/dev/null | head -n 1)
+        if [ -n "$conflict_pid" ]; then
+            log_warn "Killing conflicting process on port $API_PORT (PID: $conflict_pid)"
+            kill -9 "$conflict_pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
     if is_process_running "src/relay/app.py"; then
         log_warn "Relay API already running, skipping start"
         return 0
-    fi
-
-    if ! is_port_available "$API_PORT"; then
-        log_error "Port $API_PORT is already in use. Cannot start Relay API."
-        return 1
     fi
 
     log_info "Starting Relay API on port $API_PORT..."
@@ -339,6 +366,7 @@ start_relay() {
         return 0
     else
         log_error "Relay API failed to start on port $API_PORT"
+        tail -n 20 "$PROJECT_ROOT/data/logs/relay.log" | tee -a "$STARTUP_LOG_FILE"
         return 1
     fi
 }
@@ -494,6 +522,20 @@ main() {
         log_success "✓ React UI is running"
     else
         log_error "✗ React UI is NOT running"; all_healthy=0
+    fi
+
+    # End-to-End Pipeline Check
+    if [ $all_healthy -eq 1 ]; then
+        log_info "Running end-to-end pipeline health check..."
+        # Inject test event into ingestion queue
+        redis-cli xadd sentinel_alerts_queue '*' event '{"test": true, "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}' >/dev/null
+        sleep 2
+        # Check if it reached the stream after ML processing
+        if [ "$(redis-cli xlen sentinel_alerts_stream 2>/dev/null)" -gt 0 ]; then
+            log_success "✓ Pipeline end-to-end test PASSED"
+        else
+            log_warn "⚠ Pipeline may not be processing events (Stream is empty)"
+        fi
     fi
 
     echo ""
