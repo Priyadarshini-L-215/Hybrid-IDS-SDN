@@ -217,10 +217,52 @@ start_ingestion() {
 
 start_suricata() {
     log_info "Starting Suricata sensor..."
-    sudo systemctl stop suricata 2>/dev/null || true
-    sudo systemctl start suricata 2>/dev/null || true
+
+    cleanup_stale_suricata_pidfile() {
+        local pidfile=$1
+        if [ ! -f "$pidfile" ]; then
+            return 0
+        fi
+
+        local pid
+        pid=$(tr -d '[:space:]' < "$pidfile" 2>/dev/null || true)
+
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_info "Suricata pidfile is active: $pidfile (PID $pid)"
+            return 0
+        fi
+
+        log_warn "Removing stale Suricata pidfile: $pidfile"
+        sudo rm -f "$pidfile"
+    }
+
+    cleanup_stale_suricata_pidfile "/tmp/suricata_sentinel.pid"
+    cleanup_stale_suricata_pidfile "/var/run/suricata.pid"
+    cleanup_stale_suricata_pidfile "/run/suricata.pid"
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_error "systemctl not found; cannot manage Suricata service on this system"
+        return 1
+    fi
+
+    sudo systemctl stop suricata >/dev/null 2>&1 || true
+    if ! sudo systemctl start suricata >/dev/null 2>&1; then
+        log_error "systemctl could not start Suricata service"
+        sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
+        sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
+        return 1
+    fi
+
     sleep 3
-    is_process_running "suricata"
+    if sudo systemctl is-active --quiet suricata && is_process_running "suricata"; then
+        log_success "Suricata service is active"
+        return 0
+    fi
+
+    log_error "Suricata service is not active after startup"
+    sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
+    sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
+    return 1
 }
 
 start_consumer() {

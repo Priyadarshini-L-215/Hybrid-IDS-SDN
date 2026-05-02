@@ -4,9 +4,6 @@
 
 set -euo pipefail
 
-PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-cd "$PROJECT_ROOT"
-
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -183,11 +180,6 @@ main() {
     check_command git
     check_command curl
     check_command sudo
-    check_command hping3
-    check_command nmap
-    
-    echo "[+] Checking Python ML Dependencies..."
-    python3 -c "import river" 2>/dev/null && echo -e "${GREEN}✓${NC} Found: river (drift detection)" || echo -e "${YELLOW}⚠${NC} Missing: river (drift detection will be disabled)"
     echo ""
 
     echo "[+] Checking Versions..."
@@ -198,10 +190,6 @@ main() {
     echo "[+] Checking File Structure..."
     check_file "setup.sh"
     check_file "start.sh"
-    check_file "stop.sh"
-    check_file "diag.sh"
-    check_file "dev.sh"
-    check_file "sdn_setup.sh"
     check_file "requirements.txt"
     check_file "ui/package.json"
     check_directory "config"

@@ -304,13 +304,33 @@ setup_suricata_config() {
         return 1
     fi
 
+    # Keep local copy and also deploy to Suricata's active rule path expected by config.
     if ! sudo cp "$PROJECT_ROOT/config/suricata/signatures.rules" /etc/suricata/signatures.rules; then
         log_error "Failed to deploy signatures.rules"
         rm -f "$temp_config"
         return 1
     fi
 
+    # suricata.yaml uses: default-rule-path: /var/lib/suricata/rules + rule-files: [suricata.rules]
+    # Ensure rule file exists there to avoid startup failure on clean systems.
+    sudo mkdir -p /var/lib/suricata/rules
+    if ! sudo cp "$PROJECT_ROOT/config/suricata/signatures.rules" /var/lib/suricata/rules/suricata.rules; then
+        log_error "Failed to deploy active suricata.rules"
+        rm -f "$temp_config"
+        return 1
+    fi
+
     rm -f "$temp_config"
+
+    # Validate Suricata config before marking setup complete.
+    if command_exists suricata; then
+        if ! sudo suricata -T -c /etc/suricata/suricata.yaml -v >/tmp/suricata_validate.log 2>&1; then
+            log_error "Suricata config validation failed (see /tmp/suricata_validate.log)"
+            return 1
+        fi
+    else
+        log_warn "suricata binary not found during validation step"
+    fi
 
     # Ensure log directory is writable
     sudo mkdir -p "$PROJECT_ROOT/data/logs"
