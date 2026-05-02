@@ -1363,3 +1363,5 @@
 {"ts": "2026-05-02T14:16:04.537072Z", "component": "ingestion", "uptime_sec": 9191.44, "packets": 2377, "flows": 2370, "errors": 0, "redis_ok": true}
 {"ts": "2026-05-02T14:16:14.538749Z", "component": "ingestion", "uptime_sec": 9201.44, "packets": 2380, "flows": 2372, "errors": 0, "redis_ok": true}
 {"ts": "2026-05-02T14:31:34.189511Z", "component": "ingestion", "uptime_sec": 10121.09, "packets": 2667, "flows": 2658, "errors": 0, "redis_ok": true}
+{"ts": "2026-05-02T14:41:17.206142Z", "component": "ingestion", "uptime_sec": 10704.11, "packets": 2850, "flows": 2843, "errors": 0, "redis_ok": true}
+{"ts": "2026-05-02T14:41:26.768256Z", "component": "ingestion", "uptime_sec": 10713.67, "packets": 2854, "flows": 2846, "errors": 0, "redis_ok": true}

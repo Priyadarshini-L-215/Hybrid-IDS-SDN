@@ -54,23 +54,6 @@ source_env_file() {
     fi
 }
 
-# Detect WSL environment
-detect_wsl() {
-    if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
-        return 0
-    fi
-    if [ -f /etc/os-release ] && grep -qi "WSL" /etc/os-release 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-WSL_MODE=false
-if detect_wsl; then
-    WSL_MODE=true
-    log_warn "WSL2 detected: live packet capture and SDN features are disabled"
-fi
-
 # Activate virtual environment (Auto-setup if missing)
 activate_venv() {
     if [ ! -d "$PROJECT_ROOT/.venv" ] || [ ! -d "$PROJECT_ROOT/ui/node_modules" ]; then
@@ -200,20 +183,12 @@ start_redis() {
 }
 
 start_sdn_infrastructure() {
-    if [ "$WSL_MODE" = "true" ]; then
-        log_warn "Skipping SDN Infrastructure on WSL2 (not supported)"
-        return 0
-    fi
     if [ "$SDN_ENABLED" != "true" ]; then return 0; fi
     log_info "Starting SDN Infrastructure (OVS Setup)..."
     sudo ./sdn_setup.sh
 }
 
 start_ryu_controller() {
-    if [ "$WSL_MODE" = "true" ]; then
-        log_warn "Skipping Ryu SDN Controller on WSL2 (not supported)"
-        return 0
-    fi
     if [ "$SDN_ENABLED" != "true" ]; then return 0; fi
     log_info "Starting Ryu SDN Controller..."
     ryu-manager src/sdn/sentinel_controller.py --ofp-tcp-listen-port 6653 >> data/logs/ryu.log 2>&1 &
@@ -223,10 +198,6 @@ start_ryu_controller() {
 }
 
 start_honeypot() {
-    if [ "$WSL_MODE" = "true" ]; then
-        log_warn "Skipping Honeypot on WSL2 (not supported)"
-        return 0
-    fi
     if [ "$SDN_ENABLED" != "true" ]; then return 0; fi
     log_info "Starting Dionaea Honeypot Sink..."
     # Start in the honeypot namespace
@@ -241,23 +212,10 @@ start_ingestion() {
     "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/ingestion.py" >> "$PROJECT_ROOT/data/logs/ingestion.log" 2>&1 &
     local pid=$!
     echo "ingestion_pid=$pid" >> "$STATE_FILE"
-    
-    if [ "$WSL_MODE" = "true" ]; then
-        log_warn "Skipping Suricata socket check on WSL2 (live capture disabled)"
-        sleep 2
-        return 0
-    fi
-    
     wait_for_condition "Ingestion Socket" "test -S $SURICATA_SOCKET" 30
 }
 
 start_suricata() {
-    if [ "$WSL_MODE" = "true" ]; then
-        log_warn "Skipping Suricata live capture on WSL2 (af-packet not supported)"
-        log_info "You can still use Suricata for offline pcap analysis"
-        return 0
-    fi
-
     log_info "Starting Suricata sensor..."
 
     cleanup_stale_suricata_pidfile() {
