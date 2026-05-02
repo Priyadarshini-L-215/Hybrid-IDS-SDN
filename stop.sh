@@ -26,6 +26,7 @@ if [ -f "$STATE_FILE" ]; then
 			ingestion_pid) stop_pid "$value" "Ingestion Service" ;;
 			honeypot_pid) stop_pid "$value" "Dionaea Honeypot" ;;
 			ryu_pid) stop_pid "$value" "Ryu SDN Controller" ;;
+			suricata_pid) stop_pid "$value" "Suricata Sensor" ;;
 			ui_pid) stop_pid "$value" "Dashboard UI" ;;
 		esac
 	done < "$STATE_FILE"

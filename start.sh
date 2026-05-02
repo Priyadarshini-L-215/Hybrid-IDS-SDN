@@ -240,28 +240,60 @@ start_suricata() {
     cleanup_stale_suricata_pidfile "/var/run/suricata.pid"
     cleanup_stale_suricata_pidfile "/run/suricata.pid"
 
-    if ! command -v systemctl >/dev/null 2>&1; then
-        log_error "systemctl not found; cannot manage Suricata service on this system"
+    local suricata_cmd
+    suricata_cmd=$(command -v suricata 2>/dev/null || true)
+    if [ -z "$suricata_cmd" ]; then
+        log_error "suricata binary not found"
         return 1
     fi
 
-    sudo systemctl stop suricata >/dev/null 2>&1 || true
-    if ! sudo systemctl start suricata >/dev/null 2>&1; then
-        log_error "systemctl could not start Suricata service"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+        sudo systemctl stop suricata >/dev/null 2>&1 || true
+        if ! sudo systemctl start suricata >/dev/null 2>&1; then
+            log_error "systemctl could not start Suricata service"
+            sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
+            sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
+            return 1
+        fi
+
+        sleep 3
+        if sudo systemctl is-active --quiet suricata && is_process_running "suricata"; then
+            log_success "Suricata service is active"
+            return 0
+        fi
+
+        log_error "Suricata service is not active after startup"
         sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
         sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
         return 1
     fi
 
+    log_warn "systemd is not available; starting Suricata directly"
+    sudo pkill -f "suricata -c /etc/suricata/suricata.yaml" >/dev/null 2>&1 || true
+    if [ -f /tmp/suricata_sentinel.pid ]; then
+        local current_pid
+        current_pid=$(tr -d '[:space:]' < /tmp/suricata_sentinel.pid 2>/dev/null || true)
+        if [ -n "$current_pid" ] && kill -0 "$current_pid" 2>/dev/null; then
+            log_info "Suricata already running with PID $current_pid"
+            return 0
+        fi
+    fi
+
+    sudo "$suricata_cmd" -c /etc/suricata/suricata.yaml -D >> "$PROJECT_ROOT/data/logs/suricata-start.log" 2>&1
     sleep 3
-    if sudo systemctl is-active --quiet suricata && is_process_running "suricata"; then
-        log_success "Suricata service is active"
+
+    if is_process_running "suricata" && [ -S "$SURICATA_SOCKET" ]; then
+        local suricata_pid
+        suricata_pid=$(pgrep -f "suricata -c /etc/suricata/suricata.yaml" | head -n 1 || true)
+        if [ -n "$suricata_pid" ]; then
+            echo "suricata_pid=$suricata_pid" >> "$STATE_FILE"
+        fi
+        log_success "Suricata started directly"
         return 0
     fi
 
-    log_error "Suricata service is not active after startup"
-    sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
-    sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
+    log_error "Direct Suricata start failed"
+    tail -n 30 "$PROJECT_ROOT/data/logs/suricata-start.log" >> "$STARTUP_LOG_FILE" 2>&1 || true
     return 1
 }
 
