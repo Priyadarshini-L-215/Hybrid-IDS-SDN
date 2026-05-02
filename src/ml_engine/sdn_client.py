@@ -15,6 +15,12 @@ class SDNClient:
         self.api_url = f"{self.base_url}/sdn"
         self._client = httpx.AsyncClient(timeout=5.0)
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
     async def block(self, ip: str, ttl: int = 0) -> bool:
         """Install DROP flow rule for source IP."""
         try:
@@ -50,7 +56,9 @@ class SDNClient:
         return {"blocked_ips": [], "status": "offline"}
 
     async def close(self):
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     # Synchronous Variants (for use in non-async contexts/nested loops)
     

@@ -78,12 +78,32 @@ async def redis_stream_listener():
             logger.error("Stream listener error", error=str(e), exc_info=True)
             await asyncio.sleep(2)
 
+
+_redis_stream_task = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles startup and shutdown events."""
-    asyncio.create_task(redis_stream_listener())
+    global _redis_stream_task
+    _redis_stream_task = asyncio.create_task(redis_stream_listener())
     logger.info("Relay startup complete")
     yield
+    if _redis_stream_task:
+        _redis_stream_task.cancel()
+        try:
+            await _redis_stream_task
+        except asyncio.CancelledError:
+            pass
+    await rc.close_async_redis()
+    try:
+        from ml_engine.cti_client import close_cti_client
+        await close_cti_client()
+    except Exception:
+        pass
+    try:
+        ActiveFirewall.close()
+    except Exception:
+        pass
     logger.info("Relay shutting down")
 
 app = FastAPI(

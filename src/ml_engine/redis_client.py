@@ -84,6 +84,20 @@ async def test_async_redis():
         return False
 
 
+async def close_async_redis():
+    """Close the async Redis client if it was initialized."""
+    global async_redis_client
+    if async_redis_client is None:
+        return
+
+    try:
+        await async_redis_client.aclose()
+    except Exception as e:
+        logger.warning(f"[Redis] Failed to close async client cleanly: {e}")
+    finally:
+        async_redis_client = None
+
+
 def get_queue_depth(queue_name):
     """Get current depth of a queue (handles both Lists and Streams)."""
     if redis_client is None:

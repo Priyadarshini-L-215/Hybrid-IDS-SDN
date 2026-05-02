@@ -155,7 +155,14 @@ async def run_training(
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(project_root)
             )
-            await conv_process.communicate()
+            try:
+                await asyncio.wait_for(conv_process.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                conv_process.kill()
+                await conv_process.communicate()
+                return {"success": False, "error": "PCAP conversion timed out after 300 seconds"}
+            if conv_process.returncode != 0:
+                return {"success": False, "error": "PCAP conversion failed"}
         
         # 2. Run train.py
         train_script = project_root / "models" / "train.py"
@@ -165,7 +172,12 @@ async def run_training(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(project_root)
         )
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=900)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            return {"success": False, "error": "Training timed out after 900 seconds"}
         
         if process.returncode == 0:
             return {"success": True, "message": "Training complete. Metrics updated.", "output": stdout.decode()[-1000:]}
@@ -209,11 +221,12 @@ async def run_pcap_evaluation(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(project_root)
         )
-        stdout, stderr = await process.communicate()
-        
-        # Clean up temp file
-        if temp_pcap and temp_pcap.exists():
-            temp_pcap.unlink()
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            return {"success": False, "error": "PCAP evaluation timed out after 600 seconds"}
             
         if process.returncode == 0:
             output = stdout.decode()
@@ -225,3 +238,6 @@ async def run_pcap_evaluation(
     except Exception as e:
         logger.error("PCAP evaluation error", error=str(e))
         return {"success": False, "error": str(e)}
+    finally:
+        if temp_pcap and temp_pcap.exists():
+            temp_pcap.unlink()

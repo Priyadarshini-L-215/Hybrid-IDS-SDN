@@ -81,7 +81,21 @@ class CTIClient:
         return min(score, 1.0)
 
     async def close(self):
-        await self.client.aclose()
+        if self.client is not None:
+            await self.client.aclose()
+            self.client = None
+
+
+async def close_cti_client():
+    """Close the process-wide CTI client if it exists."""
+    global _instance
+    if _instance is None:
+        return
+
+    try:
+        await _instance.close()
+    finally:
+        _instance = None
 
 # Global singleton instance
 _instance = None

@@ -13,6 +13,7 @@ STATE_FILE="$PROJECT_ROOT/.sentinel_state"
 STATE_LOCK_FILE="$PROJECT_ROOT/.sentinel.lock"
 STARTUP_LOG_FILE="$PROJECT_ROOT/data/logs/startup.log"
 STARTUP_TIMEOUT=60
+APP_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
 # ============================================================================
 # UTILITIES
@@ -42,6 +43,15 @@ log_warn() {
 setup_logging() {
     mkdir -p "$PROJECT_ROOT/data/logs"
     : > "$STARTUP_LOG_FILE"
+}
+
+source_env_file() {
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        # shellcheck disable=SC1091
+        set -a
+        source "$PROJECT_ROOT/.env"
+        set +a
+    fi
 }
 
 # Activate virtual environment (Auto-setup if missing)
@@ -75,23 +85,24 @@ activate_venv() {
 # Load configuration from Python
 load_config() {
     export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
+    source_env_file
 
-    if ! SURICATA_SOCKET=$(python3 -c "from src.common.config import SURICATA_SOCKET; print(SURICATA_SOCKET)" 2>/dev/null); then
+    if ! SURICATA_SOCKET=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import SURICATA_SOCKET; print(SURICATA_SOCKET)" 2>/dev/null); then
         log_warn "Could not load SURICATA_SOCKET from config. Using default."
         SURICATA_SOCKET="/tmp/sentinel_suricata.sock"
     fi
 
-    if ! API_PORT=$(python3 -c "from src.common.config import API_PORT; print(API_PORT)" 2>/dev/null); then
+    if ! API_PORT=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import API_PORT; print(API_PORT)" 2>/dev/null); then
         log_warn "Could not load API_PORT from config, using default 5000"
         API_PORT=5000
     fi
 
-    if ! UI_PORT=$(python3 -c "from src.common.config import UI_PORT; print(UI_PORT)" 2>/dev/null); then
+    if ! UI_PORT=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import UI_PORT; print(UI_PORT)" 2>/dev/null); then
         log_warn "Could not load UI_PORT from config, using default 3000"
         UI_PORT=3000
     fi
 
-    SDN_ENABLED=$(python3 -c "from src.common.config import SDN_ENABLED; print(str(SDN_ENABLED).lower())" 2>/dev/null || echo "false")
+    SDN_ENABLED=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import SDN_ENABLED; print(str(SDN_ENABLED).lower())" 2>/dev/null || echo "false")
 
     log_info "Loaded config: API_PORT=$API_PORT, UI_PORT=$UI_PORT, SDN_ENABLED=$SDN_ENABLED"
 }
@@ -148,12 +159,18 @@ cleanup_stale_processes() {
     log_info "Cleaning up stale processes..."
     pkill -f "src/ml_engine/consumer.py" 2>/dev/null || true
     pkill -f "src/ml_engine/ingestion.py" 2>/dev/null || true
-    pkill -f "src.relay.app" 2>/dev/null || true
+    pkill -f "relay.app:app" 2>/dev/null || true
+    pkill -f "uvicorn.*relay.app" 2>/dev/null || true
     pkill -f "npm.*dev" 2>/dev/null || true
     pkill -f "ryu-manager" 2>/dev/null || true
     pkill -f "src/sdn/honeypot.py" 2>/dev/null || true
     sleep 1
     log_success "Stale processes cleaned up"
+}
+
+cleanup_on_interrupt() {
+    log_warn "Interrupt received, stopping Sentinel Core..."
+    "$PROJECT_ROOT/stop.sh" >/dev/null 2>&1 || true
 }
 
 start_redis() {
@@ -192,7 +209,7 @@ start_honeypot() {
 
 start_ingestion() {
     log_info "Starting Ingestion Bridge..."
-    python3 "$PROJECT_ROOT/src/ml_engine/ingestion.py" >> "$PROJECT_ROOT/data/logs/ingestion.log" 2>&1 &
+    "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/ingestion.py" >> "$PROJECT_ROOT/data/logs/ingestion.log" 2>&1 &
     local pid=$!
     echo "ingestion_pid=$pid" >> "$STATE_FILE"
     wait_for_condition "Ingestion Socket" "test -S $SURICATA_SOCKET" 30
@@ -208,7 +225,7 @@ start_suricata() {
 
 start_consumer() {
     log_info "Starting ML Consumer..."
-    python3 "$PROJECT_ROOT/src/ml_engine/consumer.py" >> "$PROJECT_ROOT/data/logs/consumer.log" 2>&1 &
+    "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/consumer.py" >> "$PROJECT_ROOT/data/logs/consumer.log" 2>&1 &
     local pid=$!
     echo "consumer_pid=$pid" >> "$STATE_FILE"
     sleep 3
@@ -217,7 +234,7 @@ start_consumer() {
 
 start_relay() {
     log_info "Starting Relay API..."
-    python3 "$PROJECT_ROOT/src/relay/app.py" >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
+    "$APP_PYTHON" -m uvicorn relay.app:app --host 0.0.0.0 --port "$API_PORT" >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
     local pid=$!
     echo "relay_pid=$pid" >> "$STATE_FILE"
     wait_for_condition "Relay API" "nc -z 127.0.0.1 $API_PORT" 15
@@ -257,6 +274,7 @@ main() {
     load_config
     ensure_sudo_access
     cleanup_stale_processes
+    trap cleanup_on_interrupt INT TERM
 
     # Startup sequence
     # Ensure state file is fresh

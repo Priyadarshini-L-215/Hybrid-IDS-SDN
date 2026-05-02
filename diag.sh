@@ -1,6 +1,11 @@
 #!/bin/bash
 # diag.sh - Sentinel Core Diagnostics (Native Linux Optimized)
 
+set -euo pipefail
+
+PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+APP_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+
 echo "================================================================="
 echo "            SENTINEL CORE DIAGNOSTICS"
 echo "================================================================="
@@ -32,7 +37,8 @@ check_process "suricata" "Suricata IDS"
 check_process "src/ml_engine/ingestion.py" "Ingestion Bridge"
 check_process "redis-server" "Redis Queue"
 check_process "src/ml_engine/consumer.py" "ML Consumer"
-check_process "src.relay.app" "Relay API (FastAPI)"
+check_process "relay.app:app" "Relay API (FastAPI)"
+check_process "uvicorn.*relay.app" "Relay API (FastAPI)"
 check_process "npm" "React UI"
 
 echo ""
@@ -54,10 +60,12 @@ fi
 echo ""
 echo "[+] Checking Ports..."
 check_port 6379 "Redis"
-# Dynamically get WS port from config
-# WebSocket is now integrated into FastAPI on port 5000
-check_port 5000 "Relay API & WebSocket"
-check_port 3000 "React UI"
+
+API_PORT=$($APP_PYTHON -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import API_PORT; print(API_PORT)" 2>/dev/null || echo 5000)
+UI_PORT=$($APP_PYTHON -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import UI_PORT; print(UI_PORT)" 2>/dev/null || echo 3000)
+
+check_port "$API_PORT" "Relay API & WebSocket"
+check_port "$UI_PORT" "React UI"
 
 echo ""
 echo "[+] Checking Redis Streams..."
@@ -85,8 +93,6 @@ fi
 
 echo ""
 echo "[+] Checking Data Integrity..."
-# Use venv python to avoid structlog import error
-PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 EVE_LOG=$("$PROJECT_ROOT/.venv/bin/python" -c "import sys; sys.path.insert(0,'$PROJECT_ROOT/src'); from common.config import EVE_LOG; print(EVE_LOG)" 2>/dev/null || echo "")
 if [ -f "$EVE_LOG" ]; then
     LAST_MOD=$(stat -c %Y "$EVE_LOG")

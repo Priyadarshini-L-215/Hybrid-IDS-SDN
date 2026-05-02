@@ -153,6 +153,7 @@ ALERT_CACHE_SIZE = 100
 API_HOST = os.environ.get("API_HOST", "0.0.0.0")
 API_PORT = int(os.environ.get("API_PORT", get_cfg("network.api_port", 5000)))
 UI_PORT = int(os.environ.get("UI_PORT", get_cfg("network.ui_port", 3000)))
+WS_PORT = int(os.environ.get("WS_PORT", "8777"))
 WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{API_PORT}/ws")
 
 # --- LOGGING ---

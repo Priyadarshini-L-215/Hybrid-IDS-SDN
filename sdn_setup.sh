@@ -5,6 +5,7 @@
 set -e
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$PROJECT_ROOT"
 BRIDGE_NAME="br-sentinel"
 HP_NS="honeypot"
 HP_IP="10.99.0.2/24"

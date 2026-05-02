@@ -194,7 +194,8 @@ async def get_node_intelligence(ip: str):
         is_mitigated = False
         try:
             is_mitigated = ActiveFirewall.is_blocked(ip)
-        except Exception: pass
+        except Exception as e:
+            logger.debug("Failed to check blocked state", ip=ip, error=str(e))
 
         return {
             "ip": ip,

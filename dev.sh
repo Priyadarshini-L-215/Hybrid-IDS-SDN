@@ -5,6 +5,7 @@
 set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+APP_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
 # 1. Activate venv
 if [ -d "$PROJECT_ROOT/.venv" ]; then
@@ -22,7 +23,7 @@ echo "================================================================="
 echo "[+] Starting Relay API with hot-reloading (uvicorn --reload)..."
 
 # Find API_PORT from config
-API_PORT=$(python3 -c "from src.common.config import API_PORT; print(API_PORT)" 2>/dev/null || echo 5000)
+API_PORT=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import API_PORT; print(API_PORT)" 2>/dev/null || echo 5000)
 
-cd "$PROJECT_ROOT/src"
-uvicorn relay.app:app --host 127.0.0.1 --port "$API_PORT" --reload
+cd "$PROJECT_ROOT"
+"$APP_PYTHON" -m uvicorn relay.app:app --host 127.0.0.1 --port "$API_PORT" --reload

@@ -22,7 +22,7 @@ from common.config import (
     ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE,
     ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES
 )
-from common.feature_extractor import extract_features_batch, load_feature_names
+from common.feature_extractor import extract_features_batch, load_feature_names, validate_feature_vector
 from ml_engine.decision_engine import DecisionEngine
 from ml_engine.anomaly_scorer import AnomalyScorer
 
@@ -174,13 +174,29 @@ class MLEngine:
         t_extract_start = time.time()
         features_list = extract_features_batch(events, self.feature_order)
         extract_ms = (time.time() - t_extract_start) * 1000
+
+        # Validate feature dimensionality before inference.
+        valid_features = []
+        valid_indices = []
+        invalid_count = 0
+        for idx, feature_vector in enumerate(features_list):
+            if feature_vector is None:
+                continue
+            if validate_feature_vector(feature_vector):
+                valid_features.append(feature_vector)
+                valid_indices.append(idx)
+            else:
+                invalid_count += 1
+
+        if invalid_count:
+            logger.warning(
+                "Skipping malformed feature vectors before inference",
+                invalid_count=invalid_count,
+                expected_dim=len(self.feature_order) if self.feature_order else 77,
+            )
         
         # 2. Inference
         t_infer_start = time.time()
-        
-        # Filter out None features for batch ML call
-        valid_indices = [i for i, f in enumerate(features_list) if f is not None]
-        valid_features = [features_list[i] for i in valid_indices]
         
         ml_scores = [0.0] * len(events)
         

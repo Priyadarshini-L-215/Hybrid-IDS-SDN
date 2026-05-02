@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+import atexit
 import structlog
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any, Optional
@@ -7,6 +8,24 @@ from pathlib import Path
 
 logger = structlog.get_logger("simulation")
 router = APIRouter(prefix="/api/simulation", tags=["Simulation"])
+_spawned_processes = set()
+
+
+def _track_process(process: subprocess.Popen):
+    _spawned_processes.add(process)
+    return process
+
+
+def _cleanup_spawned_processes():
+    for process in list(_spawned_processes):
+        try:
+            if process.poll() is None:
+                process.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_cleanup_spawned_processes)
 
 @router.post("/nmap/scan")
 async def run_nmap_scan(request: Dict[str, Any]):
@@ -41,7 +60,12 @@ async def run_nmap_scan(request: Dict[str, Any]):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            return {"success": False, "error": "Nmap scan timed out after 60 seconds"}
         
         if process.returncode == 0:
             return {
@@ -76,12 +100,12 @@ async def simulate_ddos(request: Dict[str, Any]):
     
     try:
         # Check if hping3 is available
-        hping_check = subprocess.run(["which", "hping3"], capture_output=True)
+        hping_check = subprocess.run(["which", "hping3"], capture_output=True, timeout=10)
         if hping_check.returncode == 0:
             # Run hping3 for 5 seconds
             # -S (SYN), -p 80, --flood
             cmd = ["sudo", "hping3", "-S", "-p", "80", "--flood", "--rand-source", "-c", "5000", target]
-            subprocess.Popen(cmd) # Run in background, don't wait
+            _track_process(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             return {"success": True, "message": f"DDoS Flood (SYN) started against {target} (5000 packets)"}
         else:
             # Fallback to a small scapy-based flood in a separate process
@@ -101,7 +125,7 @@ send(pkt, loop=1, count=1000, verbose=0)
                 with open(script_path, "w") as f:
                     f.write(script_content)
             
-            subprocess.Popen(["python3", str(script_path), target])
+            _track_process(subprocess.Popen(["python3", str(script_path), target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             return {"success": True, "message": f"DDoS Simulation (Scapy) started against {target}"}
             
     except Exception as e:

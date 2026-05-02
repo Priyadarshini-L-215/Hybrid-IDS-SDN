@@ -37,13 +37,15 @@ class WorkerPool:
                  broadcast_func: Callable = None):
         
         self.worker_count = worker_count
+        self.batch_size = BATCH_SIZE
+        self.batch_flush_interval = BATCH_FLUSH_INTERVAL
         self.ml_engine = ml_engine or MLEngine()
         self.broadcast_func = broadcast_func
         
         # De-duplication Engine (Sliding Window)
         import threading
         self.dedup_cache = {} # Key: (src, dst, pred), Value: {last_emit, count}
-        self.dedup_lock = threading.Lock()
+        self.dedup_lock = None
         
         self.running = False
         self.worker_tasks = []
@@ -69,6 +71,8 @@ class WorkerPool:
         """Start async worker tasks."""
         if self.running: return
         self.running = True
+        if self.dedup_lock is None:
+            self.dedup_lock = asyncio.Lock()
         
         # Ensure Redis is ready
         if not rc.async_redis_client:
@@ -104,7 +108,8 @@ class WorkerPool:
                             f"sentinel_heartbeat:{worker_id}", 30, 
                             json.dumps({"ts": time.time(), "status": "active"})
                         )
-                    except Exception: pass
+                    except Exception as e:
+                        logger.debug("Failed to write worker heartbeat", worker=worker_id, error=str(e))
 
                 # 1. Read Batch
                 streams = await rc.async_redis_client.xreadgroup(
@@ -157,7 +162,7 @@ class WorkerPool:
                     now = time.time()
                     should_broadcast = True
                     
-                    with self.dedup_lock:
+                    async with self.dedup_lock:
                         entry = self.dedup_cache.get(dedup_key)
                         if entry and (now - entry['last_emit'] < 5):
                             entry['count'] += 1
@@ -299,9 +304,16 @@ class WorkerPool:
         cti_data = await cti.get_ip_reputation(src_ip)
         alert["enrichment"]["cti"] = cti_data
 
-    def stop(self):
+    async def stop(self):
         self.running = False
-        for t in self.worker_tasks: t.cancel()
+        for t in self.worker_tasks:
+            t.cancel()
+        if self.worker_tasks:
+            await asyncio.gather(*self.worker_tasks, return_exceptions=True)
+        self.worker_tasks = []
+
+        from ml_engine.cti_client import close_cti_client
+        await close_cti_client()
         logger.info("Worker pool stopped")
 
     def get_status(self):

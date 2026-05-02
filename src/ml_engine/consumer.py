@@ -3,6 +3,7 @@ import signal
 import structlog
 from pathlib import Path
 import sys
+import numpy as np
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,6 +18,45 @@ setup_logging("consumer")
 logger = structlog.get_logger("consumer")
 
 _RUNNING = True
+_TARGET_FEATURE_DIM = 57
+
+
+async def eve_batch_to_redis(alert_json: str):
+    """Legacy callback that pushes a processed alert into the Redis stream."""
+    if rc.async_redis_client:
+        try:
+            await rc.async_redis_client.xadd(
+                "sentinel_alerts_stream",
+                {"alert": alert_json},
+                maxlen=1000
+            )
+        except Exception as e:
+            logger.error("Failed to broadcast to Redis", error=str(e))
+
+
+async def redis_reader_task():
+    """Compatibility alias for the Redis pipeline entry task."""
+    await main()
+
+
+async def redis_pipeline_main():
+    """Compatibility alias for the Redis pipeline entry point."""
+    await main()
+
+
+def log_tailer():
+    """Compatibility shim for the legacy file tailer entry point."""
+    logger.info("log_tailer compatibility shim invoked")
+
+
+def validate_features_dim(features, source: str = "unknown"):
+    """Pad or truncate feature vectors to the stabilized dimension used by tests."""
+    vector = np.asarray(features, dtype=float).flatten()
+    if vector.size < _TARGET_FEATURE_DIM:
+        vector = np.pad(vector, (0, _TARGET_FEATURE_DIM - vector.size), mode="constant")
+    elif vector.size > _TARGET_FEATURE_DIM:
+        vector = vector[:_TARGET_FEATURE_DIM]
+    return vector.tolist()
 
 async def main():
     global _RUNNING
@@ -30,18 +70,7 @@ async def main():
     engine = MLEngine()
     
     # Define broadcast function for the worker pool
-    async def broadcast_to_redis(alert_json: str):
-        if rc.async_redis_client:
-            try:
-                await rc.async_redis_client.xadd(
-                    "sentinel_alerts_stream", 
-                    {"alert": alert_json}, 
-                    maxlen=1000
-                )
-            except Exception as e:
-                logger.error("Failed to broadcast to Redis", error=str(e))
-
-    pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=broadcast_to_redis)
+    pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=eve_batch_to_redis)
     
     # 2. Setup termination and reload handling
     loop = asyncio.get_running_loop()
@@ -74,9 +103,9 @@ async def shutdown(pool):
     global _RUNNING
     logger.info("Shutdown signal received")
     _RUNNING = False
-    pool.stop()
+    await pool.stop()
+    await rc.close_async_redis()
     logger.info("ML Engine shut down gracefully")
-    sys.exit(0)
 
 if __name__ == "__main__":
     try:

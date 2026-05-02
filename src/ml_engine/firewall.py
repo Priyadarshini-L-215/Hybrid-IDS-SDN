@@ -73,6 +73,29 @@ class ActiveFirewall:
             logger.info("IPS Firewall initialized", shared_reputation=True, protected_count=len(cls._protected_ips))
 
     @classmethod
+    def close(cls):
+        """Release long-lived mitigation resources when shutting down."""
+        with cls._lock:
+            if cls._sdn_client is None:
+                return
+
+            try:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    loop.create_task(cls._sdn_client.close())
+                else:
+                    asyncio.run(cls._sdn_client.close())
+            except Exception as e:
+                logger.warning("Failed to close SDN client cleanly", error=str(e))
+            finally:
+                cls._sdn_client = None
+
+    @classmethod
     def _setup_kernel_sets(cls):
         """Initialize ipset sets and the custom iptables chain (Legacy mode)."""
         try:

@@ -106,14 +106,20 @@ class DatabaseHandler:
             # Migrations for existing DBs
             try:
                 cursor.execute("ALTER TABLE alerts ADD COLUMN mitigation TEXT")
-            except: pass
+            except sqlite3.Error as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.warning(f"DB migration skipped for mitigation column: {e}")
             try:
                 cursor.execute("ALTER TABLE alerts ADD COLUMN is_mitigated INTEGER DEFAULT 0")
-            except: pass
+            except sqlite3.Error as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.warning(f"DB migration skipped for is_mitigated column: {e}")
             try:
                 cursor.execute("ALTER TABLE alerts ADD COLUMN ja3_hash TEXT")
                 cursor.execute("ALTER TABLE alerts ADD COLUMN ja3_string TEXT")
-            except: pass
+            except sqlite3.Error as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.warning(f"DB migration skipped for ja3 columns: {e}")
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON alerts(timestamp DESC)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_prediction ON alerts(prediction)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip ON alerts(src_ip)')
