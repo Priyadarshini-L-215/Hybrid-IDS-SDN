@@ -138,10 +138,10 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     bwd_avg_pkt_len = bwd_bytes / max(bwd_pkts, 1)
     avg_pkt_len = total_bytes / max(total_pkts, 1)
     
-    # For std dev, we use simplified calculation (assuming Gaussian distribution)
-    # Fallback: check if standard deviation is already provided in expanded logs
-    fwd_pkt_len_std = float(flow.get('fwd_pkt_len_std', fwd_avg_pkt_len * 0.1))
-    bwd_pkt_len_std = float(flow.get('bwd_pkt_len_std', bwd_avg_pkt_len * 0.1))
+    # For std dev, we use Suricata's flow metrics if available, otherwise 0.0
+    # Data Reboot: We no longer 'fabricate' std dev with static multipliers (e.g. 0.1)
+    fwd_pkt_len_std = float(flow.get('fwd_pkt_len_std', 0.0))
+    bwd_pkt_len_std = float(flow.get('bwd_pkt_len_std', 0.0))
     
     pkt_len_variance = float(flow.get('pkt_len_var', (fwd_pkt_len_std ** 2 + bwd_pkt_len_std ** 2)))
     pkt_len_std = (pkt_len_variance) ** 0.5
@@ -213,18 +213,18 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     init_fwd_win_bytes = float(tcp_info.get('fwd_window_size', 0))
     init_bwd_win_bytes = float(tcp_info.get('bwd_window_size', 0))
     
-    # ===== ACTIVE/IDLE TIME (Simplified) =====
-    # Active time: time from first to last packet
-    active_mean = flow_age_us / 2 if flow_age_us > 0 else 0
-    active_std = flow_age_us * 0.1
+    # Active time: time from first to last packet (provided by Suricata as 'age')
+    # Data Reboot: Removed fabricated active_mean (was age/2)
+    active_mean = flow_age_us
+    active_std = 0.0
     active_max = flow_age_us
-    active_min = 0
+    active_min = flow_age_us
     
-    # Idle time: simplified as not having inter-packet gaps
-    idle_mean = 0
-    idle_std = 0
-    idle_max = 0
-    idle_min = 0
+    # Idle time: simplified as not having inter-packet gaps in single flow record
+    idle_mean = 0.0
+    idle_std = 0.0
+    idle_max = 0.0
+    idle_min = 0.0
     
     # ===== PACKET LENGTH STATISTICS (continued) =====
     fwd_act_data_packets = fwd_pkts  # All fwd packets considered data packets

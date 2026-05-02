@@ -5,7 +5,9 @@ Consolidates the duplicated alert-construction logic from consumer.py
 (legacy pipeline) and worker_pool.py (Redis pipeline) into a single
 reusable function.
 """
-from common.mitre_map import get_mitre
+import hashlib
+import json
+from common.mitre_mapper import get_mitre_info
 
 
 SIGNATURE_MAP = {
@@ -54,13 +56,18 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         Alert dict ready for DB insertion and WebSocket broadcast.
     """
     alert_info = event.get("alert", {})
-    final_classification = prediction.get("classification", "normal")
+    final_classification = prediction.get("prediction", prediction.get("classification", "normal"))
     final_confidence = float(prediction.get("confidence") or 0.0)
 
+    # Normalize confidence if it's already in [0, 100]
+    if final_confidence > 1.0:
+        final_confidence = final_confidence / 100.0
+
     # Override ML verdict when Suricata itself flagged the event
-    if event.get("event_type") == "alert":
+    sig_present = event.get("event_type") == "alert"
+    if sig_present:
         final_classification = "attack"
-        final_confidence = max(final_confidence, 90.0)
+        final_confidence = max(final_confidence, 0.9)
 
     # Dynamic Signature Enrichment
     sig = alert_info.get("signature") or event.get("alert_signature")
@@ -83,6 +90,8 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
     if event_id is None:
         event_id = f"{event.get('timestamp')}-{event.get('flow_id', '0')}-{event.get('event_type')}"
 
+    normalized_sig = normalize_signature(sig)
+
     return {
         "event_id": event_id,
         "timestamp": event.get("timestamp"),
@@ -92,18 +101,32 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         "src_port": event.get("src_port"),
         "dst_port": event.get("dst_port") or event.get("dest_port"),
         "protocol": event.get("protocol") or event.get("proto") or "unknown",
-        "alert_sig": normalize_signature(sig),
+        "alert_sig": normalized_sig,
         "prediction": final_classification,
-        "confidence": final_confidence,
+        "confidence": round(final_confidence * 100, 2),
         "severity": alert_info.get("severity", 4),
         "category": alert_info.get("category", "ML Detection"),
         "mitigation": None,
         "is_mitigated": False,
+        "sig_present": sig_present,
         "processing_time_ms": 0.0,
+        "duplicate_count": prediction.get("duplicate_count", 1),
         "alert_source": event.get("alert_source"),
         "is_simulation": event.get("is_simulation"),
-        "mitre": get_mitre(sig),
+        "mitre": get_mitre_info(final_classification, normalized_sig),
         "shap_top3": prediction.get("shap_top3", []),
         "anomaly_score": prediction.get("anomaly_score", 0.0),
+        "ja3_hash": event.get("tls", {}).get("ja3", {}).get("hash"),
+        "ja3_string": event.get("tls", {}).get("ja3", {}).get("string"),
+        "enrichment": {}, # Populated by worker pool
+        "forensics": {
+            "packet_hash": hashlib.sha256(str(event.get("raw", event)).encode()).hexdigest()[:16],
+            "stage_scores": {
+                "signature": 1.0 if sig_present else 0.0,
+                "ml": float(prediction.get("ml_score", 0.0)),
+                "anomaly": float(prediction.get("anomaly_score", 0.0))
+            },
+            "correlation_id": hashlib.md5(f"{event.get('src_ip')}-{event.get('dst_ip')}".encode()).hexdigest()[:8]
+        },
         "raw_event": event,
     }

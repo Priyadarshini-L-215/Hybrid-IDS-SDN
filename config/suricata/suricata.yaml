@@ -47,7 +47,9 @@ outputs:
         - flow
         - http
         - dns
-        - tls
+        - tls:
+            extended: yes
+            ja3-fingerprints: yes
         - ssh
         - stats
   - eve-log:
@@ -60,9 +62,18 @@ outputs:
         - flow
         - http
         - dns
-        - tls
+        - tls:
+            extended: yes
+            ja3-fingerprints: yes
         - ssh
         - stats
+  - pcap-log:
+      enabled: no
+      filename: sentinel.pcap
+      limit: 1000mb
+      max-files: 2000
+      mode: multi
+      dir: __REPO_ROOT__/data/pcaps
 
 af-packet:
   - interface: __SURICATA_INTERFACE__
@@ -74,6 +85,7 @@ app-layer:
   protocols:
     tls:
       enabled: yes
+      ja3-fingerprints: yes
       detection-ports:
         dp: 443
     http:

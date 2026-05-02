@@ -100,6 +100,8 @@ setup_system_packages() {
         "suricata"
         "ipset"
         "software-properties-common"
+        "openvswitch-switch"
+        "hping3"
     )
 
     # Check which packages are missing

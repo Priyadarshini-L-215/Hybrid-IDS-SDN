@@ -21,7 +21,8 @@ class DecisionEngine:
         self.weights = weights or {
             "signature": ML_WEIGHT_SIG,
             "ml": ML_WEIGHT_RF,
-            "anomaly": ML_WEIGHT_AE
+            "anomaly": ML_WEIGHT_AE,
+            "cti": 0.8  # CTI has high influence but not absolute like signatures
         }
         
         self.thresholds = thresholds or {
@@ -36,7 +37,8 @@ class DecisionEngine:
     def decide(self, 
                sig_present: bool, 
                ml_score: float, 
-               anomaly_score: float) -> Tuple[str, float]:
+               anomaly_score: float,
+               cti_score: float = 0.0) -> Tuple[str, float]:
         """
         Calculates final classification and confidence.
         Returns: (classification, final_score)
@@ -50,12 +52,15 @@ class DecisionEngine:
             return "attack", 1.0
 
         # 2. Weighted calculation for behavioral detection
-        # ml_score and anomaly_score should be normalized [0, 1]
+        # ml_score, anomaly_score, and cti_score should be normalized [0, 1]
         final_score = (self.weights["ml"] * ml_score) + \
-                      (self.weights["anomaly"] * anomaly_score)
+                      (self.weights["anomaly"] * anomaly_score) + \
+                      (self.weights["cti"] * cti_score)
         
         # Normalize total score based on weights
-        total_weight = self.weights["ml"] + self.weights["anomaly"]
+        # Always include CTI weight in denominator to maintain scale consistency
+        total_weight = self.weights["ml"] + self.weights["anomaly"] + self.weights["cti"]
+        
         normalized_score = final_score / total_weight if total_weight > 0 else 0
 
         # 3. Categorization

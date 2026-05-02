@@ -15,13 +15,16 @@ except ImportError:
     ort = None
     ONNX_AVAILABLE = False
 
+import shap
 from common.config import (
     RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, 
     MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
-    ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
+    ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE,
+    ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES
 )
 from common.feature_extractor import extract_features_batch, load_feature_names
 from ml_engine.decision_engine import DecisionEngine
+from ml_engine.anomaly_scorer import AnomalyScorer
 
 logger = structlog.get_logger(__name__)
 
@@ -36,12 +39,18 @@ class MLEngine:
         self.rf_model = None
         self.scaler = None
         self.rf_session = None # ONNX
+        self.ae_session = None # ONNX
         
         self.feature_order = []
         self.is_ready = False
         self.fallback_mode = False
         
         self.decision_engine = DecisionEngine()
+        self.anomaly_scorer = AnomalyScorer(
+            percentile=ANOMALY_PERCENTILE, 
+            min_samples=ANOMALY_MIN_SAMPLES
+        )
+        self.shap_explainer = None
         
         self._load_metadata()
         self._load_models()
@@ -124,7 +133,21 @@ class MLEngine:
                 self.rf_model = joblib.load(model_path)
                 self.rf_session = None
                 logger.info("Pkl RF Model loaded", path=str(model_path))
+
+            # 4. Load Autoencoder (Stage 3)
+            ae_path = MODELS_DIR / "autoencoder.onnx"
+            if ONNX_AVAILABLE and ae_path.exists():
+                self.ae_session = ort.InferenceSession(str(ae_path))
+                logger.info("ONNX Autoencoder loaded", path=str(ae_path))
             
+            # 5. Initialize SHAP Explainer (if RF pkl available)
+            if self.rf_model and not self.shap_explainer:
+                try:
+                    self.shap_explainer = shap.TreeExplainer(self.rf_model)
+                    logger.info("SHAP TreeExplainer initialized")
+                except Exception as e:
+                    logger.warning("Failed to init SHAP explainer", error=str(e))
+
             if (self.rf_model or self.rf_session) and self.scaler:
                 self.is_ready = True
                 logger.info("ML Engine is fully READY")
@@ -184,9 +207,37 @@ class MLEngine:
                 
                 for i, idx in enumerate(valid_indices):
                     ml_scores[idx] = float(ml_scores_valid[i])
+                
+                # 2b. Anomaly Detection (Stage 3)
+                if self.ae_session:
+                    ae_inputs = {self.ae_session.get_inputs()[0].name: X}
+                    ae_outputs = self.ae_session.run(None, ae_inputs)
+                    X_recon = ae_outputs[0]
+                    latent = ae_outputs[1] if len(ae_outputs) > 1 else None
+                    
+                    # Update anomaly scorer stats
+                    if latent is not None:
+                        self.anomaly_scorer.update_latent_stats(latent)
+                    
+                    # Calculate MSE and score per event
+                    valid_anomaly_scores = []
+                    for j in range(len(X)):
+                        mse = np.mean((X[j] - X_recon[j])**2)
+                        proto = events[valid_indices[j]].get("proto", "TCP")
+                        # If latent is available, use it for Mahalanobis
+                        l_vec = latent[j] if latent is not None else np.zeros(1)
+                        a_score = self.anomaly_scorer.score(mse, l_vec, proto)
+                        valid_anomaly_scores.append(a_score)
+                    
+                    self.valid_anomaly_scores = valid_anomaly_scores # Cache for assembly
+                else:
+                    self.valid_anomaly_scores = [0.0] * len(valid_features)
                     
             except Exception as e:
                 logger.error("Batch inference failed", error=str(e))
+                self.valid_anomaly_scores = [0.0] * len(valid_features)
+        else:
+            self.valid_anomaly_scores = []
         
         infer_ms = (time.time() - t_infer_start) * 1000
         
@@ -196,8 +247,12 @@ class MLEngine:
         for i, event in enumerate(events):
             sig_present = (event.get("event_type") == "alert")
             
-            # Layer 3: Anomaly (Placeholder)
-            anomaly_score = 0.0 
+            # Layer 3: Anomaly (Real)
+            anomaly_score = 0.0
+            if i in valid_indices:
+                v_idx = valid_indices.index(i)
+                if v_idx < len(self.valid_anomaly_scores):
+                    anomaly_score = self.valid_anomaly_scores[v_idx]
             
             classification, confidence = self.decision_engine.decide(
                 sig_present=sig_present,
@@ -207,10 +262,10 @@ class MLEngine:
             
             results.append({
                 "prediction": classification,
-                "confidence": round(confidence * 100, 2),
-                "final_score": round(confidence, 4),
-                "ml_score": round(ml_scores[i], 4),
-                "anomaly_score": round(anomaly_score, 4),
+                "confidence": round(float(confidence) * 100, 2),
+                "final_score": round(float(confidence), 4),
+                "ml_score": round(float(ml_scores[i]), 4),
+                "anomaly_score": round(float(anomaly_score), 4),
                 "sig_present": sig_present,
                 "model_version": self.meta.get("model_version", "v3.0"),
                 "shap_top3": self._get_shap_top3(features_list[i]) if classification != "normal" else [],
@@ -225,16 +280,37 @@ class MLEngine:
 
     def _get_shap_top3(self, features: Optional[List[float]]) -> List[Dict[str, Any]]:
         """
-        Returns the top 3 most influential features for a prediction.
-        Currently a placeholder to ensure system stability.
+        Returns the top 3 most influential features for a prediction using SHAP.
         """
-        if features is None or not self.is_ready:
+        if features is None or not self.shap_explainer or not self.feature_order:
             return []
             
-        # Implementation Note: SHAP explainers are computationally expensive.
-        # In production, these should be pre-calculated or sampled.
-        return [
-            {"feature": "Flow Duration", "impact": 0.15},
-            {"feature": "Packet Length Mean", "impact": 0.12},
-            {"feature": "Protocol", "impact": 0.08}
-        ]
+        try:
+            X = np.array(features).reshape(1, -1)
+            # TreeExplainer.shap_values returns [expected_value, shap_values] or list for multi-class
+            # For binary RF, it's often a list of [neg, pos]
+            shap_vals = self.shap_explainer.shap_values(X)
+            
+            # Extract values for the 'attack' class (usually index 1)
+            if isinstance(shap_vals, list):
+                vals = shap_vals[1][0] if len(shap_vals) > 1 else shap_vals[0][0]
+            else:
+                # Some versions return a single array for binary
+                vals = shap_vals[0] if shap_vals.ndim == 2 else shap_vals
+
+            # Map to feature names and sort
+            indexed_features = []
+            for i, v in enumerate(vals):
+                if i < len(self.feature_order):
+                    indexed_features.append({
+                        "feature": self.feature_order[i],
+                        "impact": float(abs(v))
+                    })
+            
+            # Sort by impact descending
+            indexed_features.sort(key=lambda x: x["impact"], reverse=True)
+            return indexed_features[:3]
+            
+        except Exception as e:
+            logger.debug("SHAP explanation failed", error=str(e))
+            return []

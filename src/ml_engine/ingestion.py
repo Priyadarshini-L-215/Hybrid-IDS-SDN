@@ -35,7 +35,7 @@ async def emit_heartbeat():
         await asyncio.sleep(10)
         uptime = time.time() - _STATS["start_time"]
         heartbeat = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.utcnow().isoformat() + "Z",
             "component": "ingestion",
             "uptime_sec": round(uptime, 2),
             "packets": _STATS["packets_received"],

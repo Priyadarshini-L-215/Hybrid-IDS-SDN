@@ -36,6 +36,22 @@ check_process "src.relay.app" "Relay API (FastAPI)"
 check_process "npm" "React UI"
 
 echo ""
+echo "[+] Checking Liveness Heartbeats..."
+HEARTBEAT_FILE="$PROJECT_ROOT/data/logs/heartbeat.jsonl"
+if [ -f "$HEARTBEAT_FILE" ]; then
+    HB_MOD=$(stat -c %Y "$HEARTBEAT_FILE")
+    HB_NOW=$(date +%s)
+    HB_DIFF=$((HB_NOW - HB_MOD))
+    if [ $HB_DIFF -lt 30 ]; then
+        echo -e "[${GREEN}OK${RESET}] ML Consumer heartbeat is fresh (${HB_DIFF}s ago)"
+    else
+        echo -e "[${RED}FAIL${RESET}] ML Consumer heartbeat STALE (${HB_DIFF}s ago)"
+    fi
+else
+    echo -e "[${RED}FAIL${RESET}] ML Consumer heartbeat file missing"
+fi
+
+echo ""
 echo "[+] Checking Ports..."
 check_port 6379 "Redis"
 # Dynamically get WS port from config

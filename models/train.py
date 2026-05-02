@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -47,10 +48,11 @@ DATASET_PATH = BASE_DIR / "data" / "dataset.csv"
 SAMPLE_SIZE = 200000  # Limit data to avoid memory issues
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
-MODEL_PATH = MODELS_DIR / "model.pkl"
+MODEL_PATH = MODELS_DIR / "rf_model.pkl"
 FEATURES_PATH = MODELS_DIR / "features.json"
 METRICS_PATH = MODELS_DIR / "metrics.json"
 IMPORTANCE_PATH = MODELS_DIR / "feature_importance.csv"
+SCALER_PATH = MODELS_DIR / "scaler.pkl"
 
 def main():
     try:
@@ -143,6 +145,16 @@ def main():
         logger.info(f"Train set: {len(X_train):,} samples ({len(X_train)/len(X)*100:.1f}%)")
         logger.info(f"Test set:  {len(X_test):,} samples ({len(X_test)/len(X)*100:.1f}%)")
         
+        # ===== STEP 4.5: SCALING =====
+        logger.info("\n" + "=" * 70)
+        logger.info("STEP 4.5: Scaling Features")
+        logger.info("=" * 70)
+        
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        logger.info("[OK] Features scaled using StandardScaler")
+
         # ===== STEP 5: MODEL TRAINING =====
         logger.info("\n" + "=" * 70)
         logger.info("STEP 5: Training Random Forest Model")
@@ -165,7 +177,7 @@ def main():
         )
         
         logger.info("Training...")
-        model.fit(X_train, y_train)
+        model.fit(X_train_scaled, y_train)
         logger.info("[OK] Model training complete")
         
         # ===== STEP 6: FEATURE IMPORTANCE =====
@@ -190,9 +202,9 @@ def main():
         logger.info("STEP 7: Model Evaluation")
         logger.info("=" * 70)
         
-        y_pred = model.predict(X_test)
+        y_pred = model.predict(X_test_scaled)
         accuracy = accuracy_score(y_test, y_pred)
-        roc_auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+        roc_auc = roc_auc_score(y_test, model.predict_proba(X_test_scaled)[:, 1])
         
         logger.info(f"Accuracy:  {accuracy*100:.2f}%")
         logger.info(f"ROC-AUC:   {roc_auc:.4f}")
@@ -231,6 +243,11 @@ def main():
         with open(MODEL_PATH, "wb") as f:
             pickle.dump(model, f)
         logger.info(f"[OK] Saved: {MODEL_PATH}")
+        
+        # Save scaler
+        with open(SCALER_PATH, "wb") as f:
+            pickle.dump(scaler, f)
+        logger.info(f"[OK] Saved: {SCALER_PATH}")
         
         # Save feature names (exactly 57 for Hybrid IDS)
         feature_list = list(X.columns)

@@ -180,6 +180,11 @@ main() {
     check_command git
     check_command curl
     check_command sudo
+    check_command hping3
+    check_command nmap
+    
+    echo "[+] Checking Python ML Dependencies..."
+    python3 -c "import river" 2>/dev/null && echo -e "${GREEN}✓${NC} Found: river (drift detection)" || echo -e "${YELLOW}⚠${NC} Missing: river (drift detection will be disabled)"
     echo ""
 
     echo "[+] Checking Versions..."

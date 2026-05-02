@@ -49,6 +49,7 @@ data/*.sqlite
 data/*.sqlite3
 data/*.db-shm
 data/*.db-wal
+data/*.csv
 data/logs/*.log
 data/logs/*.json
 data/logs/*.txt
@@ -80,3 +81,6 @@ desktop.ini
 # Keep documentation, ignore backup files
 *.md.bak
 *.tmp
+
+# --- User Files ---
+user/test.pcapng

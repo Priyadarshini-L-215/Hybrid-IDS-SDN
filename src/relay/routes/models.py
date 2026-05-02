@@ -1,0 +1,227 @@
+import io
+import os
+import time
+import asyncio
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+import structlog
+import yaml
+
+from common.config import CONFIG_PATH, MODELS_DIR
+from ml_engine.evaluator import validate_dataset, evaluate_dataset
+
+logger = structlog.get_logger("relay.routes.models")
+
+router = APIRouter(prefix="/api", tags=["Models"])
+
+# We need to access the globally initialized ML Engine from app.py
+# We'll use a getter function dependency or just import it dynamically to avoid circular imports.
+def get_engine():
+    from relay.app import get_ml_engine
+    return get_ml_engine()
+
+@router.get("/models")
+async def list_models():
+    """Lists available models and scalers."""
+    try:
+        from common.config import ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
+        
+        models = [f.name for f in MODELS_DIR.glob("*.onnx")] + \
+                 [f.name for f in MODELS_DIR.glob("*.pkl") if "scaler" not in f.name]
+        scalers = [f.name for f in MODELS_DIR.glob("*scaler*.pkl")]
+        
+        return {
+            "models": sorted(list(set(models))),
+            "scalers": sorted(list(set(scalers))),
+            "active_model": ACTIVE_MODEL_FILE,
+            "active_scaler": ACTIVE_SCALER_FILE
+        }
+    except Exception as e:
+        logger.error("Failed to list models", error=str(e))
+        return {"models": [], "scalers": [], "error": str(e)}
+
+@router.post("/models/active")
+async def set_active_model(request: Dict[str, str]):
+    """Updates the active model in config and reloads the engine."""
+    model_file = request.get("model_file")
+    scaler_file = request.get("scaler_file")
+    
+    if not model_file or not scaler_file:
+        raise HTTPException(status_code=400, detail="model_file and scaler_file are required")
+        
+    try:
+        # Load existing config
+        cfg = {}
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+                
+        # Update model paths
+        if "detection" not in cfg: cfg["detection"] = {}
+        if "ml" not in cfg["detection"]: cfg["detection"]["ml"] = {}
+        
+        cfg["detection"]["ml"]["active_model"] = model_file
+        cfg["detection"]["ml"]["active_scaler"] = scaler_file
+        
+        # Save config
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False)
+            
+        # 1. Reload local engine
+        engine = get_engine()
+        if engine:
+            engine.reload_config()
+            
+        # 2. Signal consumer to reload
+        try:
+            import subprocess
+            import signal
+            pid_res = subprocess.run(["pgrep", "-f", "src/ml_engine/consumer.py"], capture_output=True, text=True)
+            if pid_res.returncode == 0:
+                for pid in pid_res.stdout.split():
+                    os.kill(int(pid), signal.SIGHUP)
+                logger.info("Signaled consumer to reload model")
+        except Exception as e:
+            logger.warning("Failed to signal consumer", error=str(e))
+            
+        return {"success": True, "message": f"Active model swapped to {model_file}"}
+    except Exception as e:
+        logger.error("Failed to swap model", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/evaluate/dataset")
+async def run_evaluation(
+    file: Optional[UploadFile] = File(None),
+    dataset_path: Optional[str] = Form(None),
+    label_column: str = Form("Label")
+):
+    """Evaluates a dataset (uploaded or local) and returns metrics."""
+    engine = get_engine()
+    if not engine or not engine.is_ready:
+         return {"success": False, "error": "ML Engine is not ready or in fallback mode."}
+         
+    source = None
+    try:
+        if file:
+            content = await file.read()
+            source = io.BytesIO(content)
+            logger.info("Evaluating uploaded file", filename=file.filename)
+        elif dataset_path:
+            path = Path(dataset_path)
+            if not path.exists():
+                return {"success": False, "error": f"Path not found: {dataset_path}"}
+            source = path
+            logger.info("Evaluating local path", path=dataset_path)
+        else:
+            return {"success": False, "error": "No dataset provided (upload a file or provide a local path)"}
+            
+        # 1. Validate features
+        v_res = validate_dataset(source, engine.feature_order)
+        if not v_res["compatible"]:
+            return {
+                "success": False, 
+                "error": "Dataset incompatible with current model features.",
+                "incompatibility_details": v_res
+            }
+            
+        # 2. Run evaluation
+        e_res = evaluate_dataset(source, engine, label_column=label_column)
+        return e_res
+        
+    except Exception as e:
+        logger.error("Evaluation endpoint error", error=str(e))
+        return {"success": False, "error": str(e)}
+
+@router.post("/models/train")
+async def run_training(
+    pcap_path: Optional[str] = Form(None),
+    label: Optional[str] = Form("Attack")
+):
+    """Triggers the model training pipeline, optionally adding data from a PCAP."""
+    logger.info("Starting model training pipeline", from_pcap=bool(pcap_path))
+    try:
+        import subprocess
+        project_root = Path(__file__).resolve().parents[3]
+        python_path = project_root / ".venv" / "bin" / "python3"
+        
+        # 1. If PCAP provided, convert and append to dataset first
+        if pcap_path:
+            conv_script = project_root / "scripts" / "pcap_to_csv.py"
+            conv_process = await asyncio.create_subprocess_exec(
+                str(python_path), str(conv_script), pcap_path, label,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(project_root)
+            )
+            await conv_process.communicate()
+        
+        # 2. Run train.py
+        train_script = project_root / "models" / "train.py"
+        process = await asyncio.create_subprocess_exec(
+            str(python_path), str(train_script),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(project_root)
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0:
+            return {"success": True, "message": "Training complete. Metrics updated.", "output": stdout.decode()[-1000:]}
+        else:
+            return {"success": False, "error": stderr.decode() or stdout.decode()}
+            
+    except Exception as e:
+        logger.error("Training endpoint error", error=str(e))
+        return {"success": False, "error": str(e)}
+
+@router.post("/evaluate/pcap")
+async def run_pcap_evaluation(
+    file: Optional[UploadFile] = File(None),
+    pcap_path: Optional[str] = Form(None)
+):
+    """Evaluates a PCAP file and returns flow predictions."""
+    logger.info("Starting PCAP evaluation")
+    try:
+        import subprocess
+        project_root = Path(__file__).resolve().parents[3]
+        python_path = project_root / ".venv" / "bin" / "python3"
+        eval_script = project_root / "scripts" / "evaluate_pcap.py"
+        
+        target_path = pcap_path
+        
+        # If file uploaded, save to temp first
+        temp_pcap = None
+        if file:
+            temp_pcap = project_root / "data" / "pcap_eval" / f"upload_{int(time.time())}.pcap"
+            temp_pcap.parent.mkdir(parents=True, exist_ok=True)
+            with open(temp_pcap, "wb") as f:
+                f.write(await file.read())
+            target_path = str(temp_pcap)
+            
+        if not target_path:
+            return {"success": False, "error": "No PCAP source provided"}
+
+        process = await asyncio.create_subprocess_exec(
+            str(python_path), str(eval_script), target_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(project_root)
+        )
+        stdout, stderr = await process.communicate()
+        
+        # Clean up temp file
+        if temp_pcap and temp_pcap.exists():
+            temp_pcap.unlink()
+            
+        if process.returncode == 0:
+            output = stdout.decode()
+            # The script outputs a table. We'll return the raw output for now.
+            return {"success": True, "results": output}
+        else:
+            return {"success": False, "error": stderr.decode() or stdout.decode()}
+            
+    except Exception as e:
+        logger.error("PCAP evaluation error", error=str(e))
+        return {"success": False, "error": str(e)}

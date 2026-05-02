@@ -38,7 +38,12 @@ def get_cfg(path, default=None):
 
 def refresh_config():
     """Reloads the YAML config from disk and updates global state."""
-    global YAML_CONFIG, API_PORT, UI_PORT, REDIS_HOST, REDIS_PORT, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
+    global YAML_CONFIG, API_PORT, UI_PORT, REDIS_HOST, REDIS_PORT, \
+           ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, \
+           ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, \
+           BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, DEV_MODE, \
+           ALIENTVAULT_KEY, PCAP_ENABLED, SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, \
+           SDN_BRIDGE_NAME, SDN_HONEYPOT_IP, SDN_FALLBACK_TO_IPSET
     
     YAML_CONFIG = _load_yaml_config()
     
@@ -71,7 +76,22 @@ def refresh_config():
     ACTIVE_MODEL_FILE = get_cfg("detection.ml.active_model", "rf_pipeline.onnx")
     ACTIVE_SCALER_FILE = get_cfg("detection.ml.active_scaler", "scaler.pkl")
     
-    # print(f"Config refreshed from {CONFIG_PATH}")
+    # Dev Mode
+    DEV_MODE = get_cfg("system.dev_mode", False)
+    
+    # CTI Settings
+    ALIENTVAULT_KEY = get_cfg("cti.alienvault_key", "")
+    
+    # Forensics Settings
+    PCAP_ENABLED = get_cfg("forensics.pcap_enabled", False)
+    
+    # SDN Settings
+    SDN_ENABLED = get_cfg("sdn.enabled", False)
+    SDN_CONTROLLER_HOST = get_cfg("sdn.controller_host", "127.0.0.1")
+    SDN_CONTROLLER_PORT = int(get_cfg("sdn.controller_port", 8080))
+    SDN_BRIDGE_NAME = get_cfg("sdn.bridge_name", "br-sentinel")
+    SDN_HONEYPOT_IP = get_cfg("sdn.honeypot_ip", "10.99.0.2")
+    SDN_FALLBACK_TO_IPSET = get_cfg("sdn.fallback_to_ipset", True)
 
 # Initialize with defaults before first refresh
 API_PORT = 5000
@@ -92,6 +112,13 @@ BLOCK_TTL = 300
 RATE_LIMIT_PER_SEC = 5
 ACTIVE_MODEL_FILE = "rf_pipeline.onnx"
 ACTIVE_SCALER_FILE = "scaler.pkl"
+DEV_MODE = False
+SDN_ENABLED = False
+SDN_CONTROLLER_HOST = "127.0.0.1"
+SDN_CONTROLLER_PORT = 8080
+SDN_BRIDGE_NAME = "br-sentinel"
+SDN_HONEYPOT_IP = "10.99.0.2"
+SDN_FALLBACK_TO_IPSET = True
 
 refresh_config()
 
@@ -129,7 +156,8 @@ UI_PORT = int(os.environ.get("UI_PORT", get_cfg("network.ui_port", 3000)))
 WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{API_PORT}/ws")
 
 # --- LOGGING ---
-LOG_LEVEL = os.environ.get("LOG_LEVEL", get_cfg("system.log_level", "INFO")).upper()
+_default_log_level = get_cfg("system.log_level", "INFO").upper()
+LOG_LEVEL = "DEBUG" if DEV_MODE else os.environ.get("LOG_LEVEL", _default_log_level).upper()
 
 class JsonFormatter(logging.Formatter):
     """Structured JSON log formatter."""
@@ -201,6 +229,14 @@ REPUTATION_TEMP_BLOCK = get_cfg("mitigation.reputation_temp_block", 25.0)
 REPUTATION_PERM_BLOCK = get_cfg("mitigation.reputation_perm_block", 50.0)
 BLOCK_TTL = get_cfg("mitigation.block_ttl", 300)
 RATE_LIMIT_PER_SEC = get_cfg("mitigation.rate_limit_per_sec", 5)
+
+# --- SDN SETTINGS ---
+SDN_ENABLED = get_cfg("sdn.enabled", False)
+SDN_CONTROLLER_HOST = get_cfg("sdn.controller_host", "127.0.0.1")
+SDN_CONTROLLER_PORT = int(get_cfg("sdn.controller_port", 8080))
+SDN_BRIDGE_NAME = get_cfg("sdn.bridge_name", "br-sentinel")
+SDN_HONEYPOT_IP = get_cfg("sdn.honeypot_ip", "10.99.0.2")
+SDN_FALLBACK_TO_IPSET = get_cfg("sdn.fallback_to_ipset", True)
 
 def ensure_dirs():
     """Ensure all required directories exist."""

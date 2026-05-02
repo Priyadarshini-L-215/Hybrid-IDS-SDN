@@ -3,12 +3,25 @@ import time
 import asyncio
 import structlog
 from typing import Optional, List, Callable
-from common.config import REDIS_QUEUE_NAME, BATCH_SIZE, BATCH_FLUSH_INTERVAL
+from common.config import REDIS_QUEUE_NAME, BATCH_SIZE, BATCH_FLUSH_INTERVAL, SDN_ENABLED
 from ml_engine import redis_client as rc
 from ml_engine.firewall import ActiveFirewall
 from ml_engine.engine import MLEngine
+from ml_engine.cti_client import get_cti_client
 from ml_engine.drift_detector import DriftDetector
 from common.alert_builder import build_alert_payload
+import numpy as np
+
+class NPEncoder(json.JSONEncoder):
+    """Custom JSON Encoder for NumPy types (NumPy 2.0 compatible)."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NPEncoder, self).default(obj)
 
 logger = structlog.get_logger(__name__)
 
@@ -27,6 +40,11 @@ class WorkerPool:
         self.ml_engine = ml_engine or MLEngine()
         self.broadcast_func = broadcast_func
         
+        # De-duplication Engine (Sliding Window)
+        import threading
+        self.dedup_cache = {} # Key: (src, dst, pred), Value: {last_emit, count}
+        self.dedup_lock = threading.Lock()
+        
         self.running = False
         self.worker_tasks = []
         
@@ -37,6 +55,15 @@ class WorkerPool:
         
         # Initialize Drift Detector
         self.drift_detector = DriftDetector(on_drift=self._on_drift_detected)
+        
+        # Persistent GeoIP Reader
+        self.geoip_reader = None
+        try:
+            import maxminddb.geolite2
+            self.geoip_reader = maxminddb.geolite2.open()
+            logger.info("GeoIP database initialized")
+        except Exception as e:
+            logger.warning("Failed to initialize GeoIP reader", error=str(e))
 
     async def start(self):
         """Start async worker tasks."""
@@ -57,17 +84,28 @@ class WorkerPool:
     async def _worker_loop(self, worker_id: str):
         """Main loop: XREADGROUP -> Batch Process -> ACK."""
         group_name = "sentinel_workers"
+        from common.config import LOG_DIR
+        heartbeat_path = LOG_DIR / "heartbeat.jsonl"
         
-        # Ensure group exists
+        # Ensure group exists (Read from latest '$' to avoid backlog flood)
         try:
             await rc.async_redis_client.xgroup_create(
-                REDIS_QUEUE_NAME, group_name, id="0", mkstream=True
+                REDIS_QUEUE_NAME, group_name, id="$", mkstream=True
             )
         except Exception:
             pass # Already exists
 
         while self.running:
             try:
+                # 0. Write Heartbeat for Health Check (Redis-based)
+                if self.processed_count % 10 == 0:
+                    try:
+                        await rc.async_redis_client.setex(
+                            f"sentinel_heartbeat:{worker_id}", 30, 
+                            json.dumps({"ts": time.time(), "status": "active"})
+                        )
+                    except Exception: pass
+
                 # 1. Read Batch
                 streams = await rc.async_redis_client.xreadgroup(
                     group_name, worker_id, {REDIS_QUEUE_NAME: ">"}, count=BATCH_SIZE, block=100
@@ -114,6 +152,44 @@ class WorkerPool:
                     alert = build_alert_payload(raw_event, res)
                     alert["processing_time_ms"] = batch_lat
                     
+                    # 3a. De-duplication Check
+                    dedup_key = (alert["src_ip"], alert.get("dst_ip"), alert["prediction"])
+                    now = time.time()
+                    should_broadcast = True
+                    
+                    with self.dedup_lock:
+                        entry = self.dedup_cache.get(dedup_key)
+                        if entry and (now - entry['last_emit'] < 5):
+                            entry['count'] += 1
+                            should_broadcast = False
+                        else:
+                            # New burst or window expired
+                            # We take the count accrued in the PREVIOUS window if it existed
+                            prev_count = entry['count'] if entry else 0
+                            self.dedup_cache[dedup_key] = {'last_emit': now, 'count': 0}
+                            alert["duplicate_count"] = prev_count + 1
+                    
+                    if not should_broadcast:
+                        continue
+                    
+                    # 3b. Enrichment (Stage 2 Enrichment)
+                    await self._enrich_event(alert)
+                    
+                    # 3c. Re-evaluate decision if CTI data is present
+                    cti_score = alert["enrichment"].get("cti", {}).get("reputation_score", 0.0)
+                    if cti_score > 0:
+                        new_class, new_conf = self.ml_engine.decision_engine.decide(
+                            sig_present=alert.get("sig_present", False),
+                            ml_score=res.get("ml_score", 0.0),
+                            anomaly_score=res.get("anomaly_score", 0.0),
+                            cti_score=cti_score
+                        )
+                        alert["prediction"] = new_class
+                        alert["confidence"] = round(new_conf * 100, 2)
+                        # Update the result for mitigation logic below
+                        res["prediction"] = new_class
+                        res["final_score"] = new_conf
+                    
                     # Apply Mitigation Logic
                     await self._apply_mitigation(alert, res)
                     
@@ -123,7 +199,7 @@ class WorkerPool:
                 # 4. Broadcast
                 if self.broadcast_func:
                     for alert in alerts_to_send:
-                        await self.broadcast_func(json.dumps(alert))
+                        await self.broadcast_func(json.dumps(alert, cls=NPEncoder))
                 
                 # 5. ACK Batch
                 if batch_ids:
@@ -138,7 +214,7 @@ class WorkerPool:
         """Broadcast drift alert to WebSocket clients via the broadcast func."""
         if self.broadcast_func:
             try:
-                await self.broadcast_func(json.dumps(drift_info))
+                await self.broadcast_func(json.dumps(drift_info, cls=NPEncoder))
             except Exception as e:
                 logger.error("Failed to broadcast drift alert", error=str(e))
 
@@ -157,9 +233,71 @@ class WorkerPool:
         
         if action in {"permanent_block", "temp_block", "rate_limit"}:
             alert["mitigation"] = action.replace('_', ' ').upper()
+            alert["sdn_action"] = action
             alert["is_mitigated"] = True
             alert["category"] = f"IPS {action.replace('_', ' ').title()} - {alert.get('category', 'Threat')}"
+            
+            # Map action to SDN terms if using SDN
+            if SDN_ENABLED:
+                alert["sdn_action"] = "drop" if "block" in action else "limit"
+                
             logger.warning("IPS Mitigation Triggered", ip=src_ip, action=action, score=res["final_score"])
+            
+            # Send external alert for critical mitigations
+            if res["final_score"] > 0.95 or action == "permanent_block":
+                await self._send_external_alert(alert)
+
+    async def _send_external_alert(self, alert: dict):
+        """Mocks sending an alert to an external Slack webhook."""
+        webhook_url = "https://hooks.slack.com/services/MOCK/WEBHOOK/URL"
+        payload = {
+            "text": f"🚨 *CRITICAL THREAT DETECTED*\n"
+                    f"*Type:* {alert['prediction']}\n"
+                    f"*Source:* {alert['src_ip']} ({alert['enrichment'].get('location', 'Unknown')})\n"
+                    f"*Confidence:* {alert['confidence']}%\n"
+                    f"*Action:* {alert.get('mitigation', 'LOG ONLY')}\n"
+                    f"*MITRE:* {alert['mitre'].get('id')} - {alert['mitre'].get('technique')}"
+        }
+        # Mocking the HTTP call
+        logger.info("EXTERNAL ALERT SENT (MOCK)", target="Slack", payload=payload)
+        # In production: await httpx.post(webhook_url, json=payload)
+
+    async def _enrich_event(self, alert: dict):
+        """Adds GeoIP and ASN metadata to the alert (V2 Enrichment Layer)."""
+        src_ip = alert.get("src_ip", "")
+        if not src_ip: return
+
+        if src_ip.startswith(("192.168.", "10.", "127.", "172.")):
+            alert["enrichment"] = {
+                "location": "Internal / Localhost",
+                "country": "LOCAL",
+                "asn": "AS0 (Internal)"
+            }
+        else:
+            try:
+                if self.geoip_reader:
+                    record = self.geoip_reader.get(src_ip) or {}
+                    country = record.get("country", {}).get("names", {}).get("en", "Unknown")
+                    asn = record.get("autonomous_system_number", "Unknown")
+                    org = record.get("autonomous_system_organization", "")
+                    city = record.get("city", {}).get("names", {}).get("en", "")
+                    location = record.get("location", {})
+                    alert["enrichment"] = {
+                        "location": f"{city}, {country}".strip(", "),
+                        "country": country,
+                        "asn": f"AS{asn} ({org})" if asn != "Unknown" else "Unknown",
+                        "lat": location.get("latitude"),
+                        "lon": location.get("longitude")
+                    }
+                else:
+                    alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
+            except Exception:
+                alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
+
+        # CTI Integration
+        cti = get_cti_client()
+        cti_data = await cti.get_ip_reputation(src_ip)
+        alert["enrichment"]["cti"] = cti_data
 
     def stop(self):
         self.running = False

@@ -7,7 +7,7 @@ class BaseMessage(BaseModel):
         extra="ignore",
         protected_namespaces=()
     )
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
 class RawEvent(BaseMessage):
     """Schema for data coming from Suricata socket."""
