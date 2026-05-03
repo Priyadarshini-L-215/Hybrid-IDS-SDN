@@ -181,7 +181,7 @@ class WorkerPool:
                     await self._enrich_event(alert)
                     
                     # 3c. Re-evaluate decision if CTI data is present
-                    cti_score = alert["enrichment"].get("cti", {}).get("reputation_score", 0.0)
+                    cti_score = alert.get("enrichment", {}).get("cti", {}).get("reputation_score", 0.0)
                     if cti_score > 0:
                         new_class, new_conf = self.ml_engine.decision_engine.decide(
                             sig_present=alert.get("sig_present", False),
@@ -201,10 +201,9 @@ class WorkerPool:
                     alerts_to_send.append(alert)
                     self.processed_count += 1
                 
-                # 4. Broadcast
-                if self.broadcast_func:
-                    for alert in alerts_to_send:
-                        await self.broadcast_func(json.dumps(alert, cls=NPEncoder))
+                # 4. Broadcast & Persist
+                if self.broadcast_func and alerts_to_send:
+                    await self.broadcast_func(alerts_to_send)
                 
                 # 5. ACK Batch
                 if batch_ids:

@@ -1,0 +1,109 @@
+%YAML 1.1
+---
+
+# Suricata configuration for ML Integration Project
+# Minimal configuration focusing on EVE JSON output.
+
+vars:
+  address-groups:
+    HOME_NET: "[172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,127.0.0.0/8]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "$HOME_NET"
+    SMTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+    DNS_SERVERS: "$HOME_NET"
+    TELNET_SERVERS: "$HOME_NET"
+    AIM_SERVERS: any
+    DC_SERVERS: "$HOME_NET"
+    DNP3_SERVER: "$HOME_NET"
+    DNP3_CLIENT: "$HOME_NET"
+    MODBUS_CLIENT: "$HOME_NET"
+    MODBUS_SERVER: "$HOME_NET"
+    ENIP_CLIENT: "$HOME_NET"
+    ENIP_SERVER: "$HOME_NET"
+
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    ORACLE_PORTS: 1521
+    SSH_PORTS: 22
+    DNP3_PORTS: 20000
+    MODBUS_PORTS: 502
+    FILE_DATA_PORTS: "[$HTTP_PORTS,110,143]"
+    FTP_PORTS: 21
+
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - suricata.rules
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /home/preet/FYP/data/logs/eve.json
+      types:
+        - alert:
+            metadata: yes
+        - flow
+        - http
+        - dns
+        - tls:
+            extended: yes
+            ja3-fingerprints: yes
+        - ssh
+        - stats
+  - eve-log:
+      enabled: yes
+      filetype: unix_stream
+      filename: /tmp/sentinel_suricata.sock
+      types:
+        - alert:
+            metadata: yes
+        - flow
+        - http
+        - dns
+        - tls:
+            extended: yes
+            ja3-fingerprints: yes
+        - ssh
+        - stats
+  - pcap-log:
+      enabled: no
+      filename: sentinel.pcap
+      limit: 1000mb
+      max-files: 2000
+      mode: multi
+      dir: /home/preet/FYP/data/pcaps
+
+af-packet:
+  - interface: eth0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      ja3-fingerprints: yes
+      detection-ports:
+        dp: 443
+    http:
+      enabled: yes
+    dnp3:
+      enabled: yes
+      detection-ports:
+        dp: 20000
+    modbus:
+      enabled: yes
+      detection-ports:
+        dp: 502
+
+logging:
+  default-log-level: info
+  outputs:
+  - console:
+      enabled: yes
+  - file:
+      enabled: yes
+      filename: /home/preet/FYP/data/logs/suricata.log

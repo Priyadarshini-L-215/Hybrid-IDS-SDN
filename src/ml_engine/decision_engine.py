@@ -53,19 +53,27 @@ class DecisionEngine:
 
         # 2. Weighted calculation for behavioral detection
         # ml_score, anomaly_score, and cti_score should be normalized [0, 1]
-        final_score = (self.weights["ml"] * ml_score) + \
-                      (self.weights["anomaly"] * anomaly_score) + \
-                      (self.weights["cti"] * cti_score)
+        weighted_sum = (self.weights["ml"] * ml_score) + \
+                        (self.weights["anomaly"] * anomaly_score) + \
+                        (self.weights["cti"] * cti_score)
         
-        # Normalize total score based on weights
-        # Always include CTI weight in denominator to maintain scale consistency
-        total_weight = self.weights["ml"] + self.weights["anomaly"] + self.weights["cti"]
+        # Normalize total score based on ACTIVE weights only to prevent dilution.
+        # This ensures that if only one component is present, its score is not 
+        # artificially lowered by the weights of missing components.
+        active_weight = self.weights["ml"]
+        if anomaly_score > 0:
+            active_weight += self.weights["anomaly"]
+        if cti_score > 0:
+            active_weight += self.weights["cti"]
         
-        normalized_score = final_score / total_weight if total_weight > 0 else 0
+        normalized_score = weighted_sum / active_weight if active_weight > 0 else 0
 
         # 3. Categorization
         if normalized_score >= self.thresholds["attack"]:
             classification = "attack"
+        elif normalized_score >= self.thresholds.get("anomaly", 0.05):
+            # VAE-driven: uncertain RF + high reconstruction error = unknown/zero-day
+            classification = "anomaly"
         elif normalized_score >= self.thresholds["suspicious"]:
             classification = "suspicious"
         else:

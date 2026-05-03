@@ -53,8 +53,10 @@ class ActiveFirewall:
                 logger.info("Mitigation Backend set to SDN", controller=f"{SDN_CONTROLLER_HOST}:{SDN_CONTROLLER_PORT}")
             else:
                 cls._backend = "legacy"
-                cls._setup_kernel_sets()
                 logger.info("Mitigation Backend set to LEGACY (ipset/iptables)")
+            
+            # ALWAYS setup kernel sets for fallback reliability
+            cls._setup_kernel_sets()
             
             # Initialize Redis connection for shared reputation
             try:
@@ -101,7 +103,8 @@ class ActiveFirewall:
         try:
             # 1. Create ipset sets with timeout support
             subprocess.run(["sudo", "ipset", "create", cls.SET_BLOCKS, "hash:ip", "timeout", "0", "-!"], check=True)
-            subprocess.run(["sudo", "ipset", "create", cls.SET_LIMITED, "hash:ip", "-!"], check=True)
+            # Add a default timeout (e.g. 1 hour) to rate-limited set to avoid infinite restriction
+            subprocess.run(["sudo", "ipset", "create", cls.SET_LIMITED, "hash:ip", "timeout", "3600", "-!"], check=True)
 
             # 2. Ensure iptables chain exists
             CHAIN_NAME = "SENTINEL_IPS"
@@ -161,7 +164,14 @@ class ActiveFirewall:
                 pipe = cls._redis_client.pipeline()
                 count = 0
                 for ip, score in cls._redis_client.hscan_iter(cls.REDIS_REPUTATION_KEY):
-                    new_score = float(score) * 0.9
+                    val = float(score)
+                    new_score = val * 0.9
+                    
+                    # If score falls below block threshold, unblock in the firewall
+                    if val >= REPUTATION_TEMP_BLOCK and new_score < REPUTATION_TEMP_BLOCK:
+                        logger.info("IP rehabilitated via decay", ip=ip, score=round(new_score, 2))
+                        cls.unblock(ip)
+                    
                     if new_score < 0.1:
                         pipe.hdel(cls.REDIS_REPUTATION_KEY, ip)
                     else:

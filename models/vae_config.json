@@ -1,0 +1,6 @@
+{
+    "model": "VAE",
+    "input_dim": 16,
+    "threshold": 0.0283,
+    "description": "Anomaly detection using reconstruction error"
+}

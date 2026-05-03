@@ -225,7 +225,7 @@ class DatabaseHandler:
             
             if filter_type and filter_type.lower() != 'all':
                 if filter_type.lower() == 'attack':
-                    query += " AND lower(prediction) IN ('attack', 'zero-day anomaly', 'suspicious')"
+                    query += " AND lower(prediction) IN ('attack', 'zero-day anomaly', 'suspicious', 'anomaly')"
                 else:
                     query += " AND lower(prediction) = ?"
                     params.append(filter_type.lower())
@@ -426,7 +426,7 @@ class DatabaseHandler:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation'")
             total = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation' AND lower(prediction) IN ('attack', 'suspicious')")
+            cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation' AND lower(prediction) IN ('attack', 'suspicious', 'anomaly', 'zero-day anomaly')")
             attacks = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation' AND lower(prediction) = 'normal'")
             normal = cursor.fetchone()[0]

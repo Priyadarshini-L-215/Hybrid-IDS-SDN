@@ -362,12 +362,11 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     
     return feature_vector
 
-def validate_feature_vector(vector: list) -> bool:
+def validate_feature_vector(vector: list, expected_dim: int = None) -> bool:
     if not isinstance(vector, list):
         return False
-    # Enforce strict 77-feature dimension as required by production models
-    if len(vector) != 77:
-        logger.error(f"Feature vector length mismatch: expected 77, got {len(vector)}")
+    if expected_dim is not None and len(vector) != expected_dim:
+        logger.error(f"Feature vector length mismatch: expected {expected_dim}, got {len(vector)}")
         return False
     return True
 

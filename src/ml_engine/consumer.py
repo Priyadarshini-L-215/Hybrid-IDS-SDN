@@ -8,10 +8,12 @@ import numpy as np
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.config import setup_logging, WORKER_COUNT
-from ml_engine.worker_pool import WorkerPool
+from common.config import setup_logging, WORKER_COUNT, REDIS_ALERT_STREAM
+from ml_engine.worker_pool import WorkerPool, NPEncoder
 from ml_engine.engine import MLEngine
 from ml_engine import redis_client as rc
+from common.database import batch_add_alerts
+import json
 
 # Initialize structured logging
 setup_logging("consumer")
@@ -21,15 +23,33 @@ _RUNNING = True
 _TARGET_FEATURE_DIM = 57
 
 
-async def eve_batch_to_redis(alert_json: str):
-    """Legacy callback that pushes a processed alert into the Redis stream."""
+async def broadcast_and_persist(alerts: list):
+    """Broadcasts a batch of alerts to Redis and persists them to SQLite."""
+    if not alerts:
+        return
+
+    # 1. Persist to SQLite (Offload blocking call to executor)
+    try:
+        loop = asyncio.get_running_loop()
+        # batch_add_alerts is synchronous
+        await loop.run_in_executor(None, batch_add_alerts, alerts)
+        logger.debug("Persisted batch to SQLite", count=len(alerts))
+    except Exception as e:
+        logger.error("Failed to persist alerts to DB", error=str(e))
+
+    # 2. Broadcast to Redis Stream
     if rc.async_redis_client:
         try:
-            await rc.async_redis_client.xadd(
-                "sentinel_alerts_stream",
-                {"alert": alert_json},
-                maxlen=1000
-            )
+            pipe = rc.async_redis_client.pipeline()
+            for alert in alerts:
+                alert_json = json.dumps(alert, cls=NPEncoder)
+                pipe.xadd(
+                    REDIS_ALERT_STREAM,
+                    {"alert": alert_json},
+                    maxlen=1000
+                )
+            await pipe.execute()
+            logger.debug("Broadcasted batch to Redis", count=len(alerts))
         except Exception as e:
             logger.error("Failed to broadcast to Redis", error=str(e))
 
@@ -70,7 +90,7 @@ async def main():
     engine = MLEngine()
     
     # Define broadcast function for the worker pool
-    pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=eve_batch_to_redis)
+    pool = WorkerPool(worker_count=WORKER_COUNT, ml_engine=engine, broadcast_func=broadcast_and_persist)
     
     # 2. Setup termination and reload handling
     loop = asyncio.get_running_loop()

@@ -247,52 +247,49 @@ start_suricata() {
         return 1
     fi
 
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-        sudo systemctl stop suricata >/dev/null 2>&1 || true
-        if ! sudo systemctl start suricata >/dev/null 2>&1; then
-            log_error "systemctl could not start Suricata service"
-            sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
-            sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
-            return 1
-        fi
-
-        sleep 3
-        if sudo systemctl is-active --quiet suricata && is_process_running "suricata"; then
-            log_success "Suricata service is active"
-            return 0
-        fi
-
-        log_error "Suricata service is not active after startup"
-        sudo systemctl --no-pager --full status suricata | tail -n 30 >> "$STARTUP_LOG_FILE" 2>&1 || true
-        sudo journalctl -u suricata -n 30 --no-pager >> "$STARTUP_LOG_FILE" 2>&1 || true
+    # Template the suricata config
+    local template_file="$PROJECT_ROOT/config/suricata/suricata.yaml"
+    local active_file="$PROJECT_ROOT/config/suricata/suricata.yaml.active"
+    
+    if [ -f "$template_file" ]; then
+        log_info "Templating Suricata config..."
+        # Find default interface if not provided
+        local interface
+        interface=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5}' | head -n 1)
+        interface=${interface:-eth0}
+        
+        sed -e "s|__REPO_ROOT__|$PROJECT_ROOT|g" \
+            -e "s|__SURICATA_INTERFACE__|$interface|g" \
+            "$template_file" > "$active_file"
+        log_success "Suricata config ready (interface: $interface)"
+    else
+        log_error "Suricata template config not found at $template_file"
         return 1
     fi
 
-    log_warn "systemd is not available; starting Suricata directly"
-    sudo pkill -f "suricata -c /etc/suricata/suricata.yaml" >/dev/null 2>&1 || true
-    if [ -f /tmp/suricata_sentinel.pid ]; then
-        local current_pid
-        current_pid=$(tr -d '[:space:]' < /tmp/suricata_sentinel.pid 2>/dev/null || true)
-        if [ -n "$current_pid" ] && kill -0 "$current_pid" 2>/dev/null; then
-            log_info "Suricata already running with PID $current_pid"
-            return 0
-        fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+        sudo systemctl stop suricata >/dev/null 2>&1 || true
+        # We start directly if using custom config, as systemd service usually points to /etc/suricata
     fi
 
-    sudo "$suricata_cmd" -c /etc/suricata/suricata.yaml -D >> "$PROJECT_ROOT/data/logs/suricata-start.log" 2>&1
+    log_info "Starting Suricata directly with project config..."
+    sudo pkill -f "suricata -c .*suricata.yaml.active" >/dev/null 2>&1 || true
+    
+    # Start Suricata in daemon mode with project config
+    sudo "$suricata_cmd" --af-packet -c "$active_file" -D >> "$PROJECT_ROOT/data/logs/suricata-start.log" 2>&1
     sleep 3
 
-    if is_process_running "suricata" && [ -S "$SURICATA_SOCKET" ]; then
+    if is_process_running "suricata"; then
         local suricata_pid
-        suricata_pid=$(pgrep -f "suricata -c /etc/suricata/suricata.yaml" | head -n 1 || true)
+        suricata_pid=$(pgrep -f "suricata -c .*suricata.yaml.active" | head -n 1 || true)
         if [ -n "$suricata_pid" ]; then
             echo "suricata_pid=$suricata_pid" >> "$STATE_FILE"
         fi
-        log_success "Suricata started directly"
+        log_success "Suricata active with project config (PID: $suricata_pid)"
         return 0
     fi
 
-    log_error "Direct Suricata start failed"
+    log_error "Suricata failed to start with project config"
     tail -n 30 "$PROJECT_ROOT/data/logs/suricata-start.log" >> "$STARTUP_LOG_FILE" 2>&1 || true
     return 1
 }

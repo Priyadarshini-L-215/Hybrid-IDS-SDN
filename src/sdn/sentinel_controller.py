@@ -92,17 +92,35 @@ class SentinelController(app_manager.RyuApp):
 
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
                                              actions)]
+        
+        # Set SEND_FLOW_REM flag to get notified when flow expires
+        flags = ofproto.OFPFF_SEND_FLOW_REM if hard_timeout > 0 or idle_timeout > 0 else 0
+        
         if buffer_id:
             mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id,
                                     priority=priority, match=match,
                                     instructions=inst, idle_timeout=idle_timeout,
-                                    hard_timeout=hard_timeout)
+                                    hard_timeout=hard_timeout, flags=flags)
         else:
             mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                     match=match, instructions=inst,
                                     idle_timeout=idle_timeout,
-                                    hard_timeout=hard_timeout)
+                                    hard_timeout=hard_timeout, flags=flags)
         datapath.send_msg(mod)
+
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def _flow_removed_handler(self, ev):
+        msg = ev.msg
+        dp = msg.datapath
+        ofp = dp.ofproto
+        
+        if msg.reason == ofp.OFPRR_HARD_TIMEOUT or msg.reason == ofp.OFPRR_IDLE_TIMEOUT:
+            # Check if this was a block flow (priority 200)
+            if msg.priority == 200 and 'ipv4_src' in msg.match:
+                ip = msg.match['ipv4_src']
+                self.logger.info(f"Sentinel Controller: Block flow for {ip} expired. Removing from block_list.")
+                if ip in self.block_list:
+                    self.block_list.remove(ip)
 
     def add_block_flow(self, ip, ttl=0):
         """Installs a DROP flow for the specified source IP on all connected switches."""
