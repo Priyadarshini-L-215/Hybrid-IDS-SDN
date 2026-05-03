@@ -3,19 +3,19 @@ detection:
   correlation_window: 10.0
   decision_engine:
     thresholds:
-      attack: 0.153
-      anomaly: 0.10
-      suspicious: 0.05
+      attack: 0.65
+      suspicious: 0.35
+      anomaly: 0.6
     weights:
-      anomaly: 0.8
-      ml: 1.0
       signature: 1.0
+      ml: 0.8
+      anomaly: 0.2
   dos_threshold: 100
   ml:
     active_model: model_v4.pkl
     active_scaler: scaler_v4.pkl
     ml_threshold: 0.153
-    vae_threshold: 0.0283
+    vae_threshold: 0.3
   port_scan_threshold: 25
 mitigation:
   block_ttl: 300

@@ -102,19 +102,32 @@ class ActiveFirewall:
         """Initialize ipset sets and the custom iptables chain (Legacy mode)."""
         try:
             # 1. Create ipset sets with timeout support
-            subprocess.run(["sudo", "ipset", "create", cls.SET_BLOCKS, "hash:ip", "timeout", "0", "-!"], check=True)
-            # Add a default timeout (e.g. 1 hour) to rate-limited set to avoid infinite restriction
-            subprocess.run(["sudo", "ipset", "create", cls.SET_LIMITED, "hash:ip", "timeout", "3600", "-!"], check=True)
+            # Note: -! flag prevents error if set exists, but WON'T update params.
+            # If creation fails, we destroy and recreate to ensure params match.
+            
+            def create_set_safe(name, params):
+                res = subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], capture_output=True)
+                if res.returncode != 0:
+                    logger.warning(f"ipset {name} creation failed. Flushing iptables and recreating...", error=res.stderr.decode())
+                    # Mismatch or busy: we need to clear iptables rules using this set first
+                    subprocess.run(["sudo", "iptables", "-F", "SENTINEL_IPS"], check=False)
+                    subprocess.run(["sudo", "ipset", "destroy", name], check=False)
+                    subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], check=True)
 
-            # 2. Ensure iptables chain exists
+            create_set_safe(cls.SET_BLOCKS, ["hash:ip", "timeout", "0"])
+            create_set_safe(cls.SET_LIMITED, ["hash:ip", "timeout", "3600"])
+
+            # 2. Ensure iptables chain exists and rules are present
             CHAIN_NAME = "SENTINEL_IPS"
-            subprocess.run(["sudo", "iptables", "-N", CHAIN_NAME], stderr=subprocess.DEVNULL)
+            subprocess.run(["sudo", "iptables", "-N", CHAIN_NAME], check=False)
+            
+            # Flush the chain to ensure clean state with modern rules
             subprocess.run(["sudo", "iptables", "-F", CHAIN_NAME], check=True)
 
-            # 3. Add rules to the chain
+            # Rule 1: Permanent Blocks (Instant Drop)
             subprocess.run(["sudo", "iptables", "-A", CHAIN_NAME, "-m", "set", "--match-set", cls.SET_BLOCKS, "src", "-j", "DROP"], check=True)
             
-            # Rule 2: Rate limit
+            # Rule 2: Rate Limiting (Permit up to threshold, then drop)
             subprocess.run([
                 "sudo", "iptables", "-A", CHAIN_NAME, 
                 "-m", "set", "--match-set", cls.SET_LIMITED, "src",
@@ -124,10 +137,11 @@ class ActiveFirewall:
             ], check=True)
             subprocess.run(["sudo", "iptables", "-A", CHAIN_NAME, "-m", "set", "--match-set", cls.SET_LIMITED, "src", "-j", "DROP"], check=True)
 
-            # 4. Jump from INPUT to our chain
-            check_jump = subprocess.run(["sudo", "iptables", "-C", "INPUT", "-j", CHAIN_NAME], stderr=subprocess.DEVNULL)
-            if check_jump.returncode != 0:
-                subprocess.run(["sudo", "iptables", "-I", "INPUT", "1", "-j", CHAIN_NAME], check=True)
+            # 3. Hook into INPUT/FORWARD
+            for target in ["INPUT", "FORWARD"]:
+                hook_check = subprocess.run(["sudo", "iptables", "-C", target, "-j", CHAIN_NAME], capture_output=True)
+                if hook_check.returncode != 0:
+                    subprocess.run(["sudo", "iptables", "-I", target, "1", "-j", CHAIN_NAME], check=True)
                 
             logger.info("Kernel firewall rules synchronized", chain=CHAIN_NAME)
         except Exception as e:
@@ -284,6 +298,16 @@ class ActiveFirewall:
             logger.error("Unblock operation failed", ip=ip, error=str(e))
 
     @classmethod
+    def is_blocked(cls, ip: str) -> bool:
+        """Checks if an IP is currently in the block set (permanent or temporary)."""
+        if not cls._initialized: cls._initialize()
+        try:
+            result = subprocess.run(["sudo", "ipset", "test", cls.SET_BLOCKS, ip], capture_output=True, text=True)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    @classmethod
     def get_status(cls) -> Dict[str, Any]:
         """Returns summary counts."""
         detailed = cls.get_detailed_status()
@@ -317,24 +341,32 @@ class ActiveFirewall:
             except Exception as e:
                 logger.error("SDN flow fetch failed", error=str(e))
 
-        try:
-            result = subprocess.run(["sudo", "ipset", "list", cls.SET_BLOCKS], capture_output=True, text=True)
-            if result.returncode == 0:
-                lines = result.stdout.splitlines()
-                in_members = False
-                for line in lines:
-                    if line.startswith("Members:"):
-                        in_members = True
-                        continue
-                    if in_members and line.strip():
-                        parts = line.split()
-                        ip = parts[0]
-                        if ip in perm: continue # Avoid duplicates
-                        timeout = int(parts[2]) if len(parts) >= 3 else 0
-                        if timeout == 0: perm.append(ip)
-                        else: temp.append(ip)
-        except Exception as e:
-            logger.error("Failed to list ipset members", error=str(e))
+        def _parse_ipset(set_name, is_perm):
+            try:
+                result = subprocess.run(["sudo", "ipset", "list", set_name], capture_output=True, text=True)
+                if result.returncode == 0:
+                    lines = result.stdout.splitlines()
+                    in_members = False
+                    for line in lines:
+                        if line.startswith("Members:"):
+                            in_members = True
+                            continue
+                        if in_members and line.strip():
+                            parts = line.split()
+                            ip = parts[0]
+                            if ip in perm: continue # Avoid duplicates
+                            
+                            if is_perm:
+                                timeout = int(parts[2]) if len(parts) >= 3 else 0
+                                if timeout == 0: perm.append(ip)
+                                else: temp.append(ip)
+                            else:
+                                temp.append(ip)
+            except Exception as e:
+                logger.error(f"Failed to list ipset members for {set_name}", error=str(e))
+
+        _parse_ipset(cls.SET_BLOCKS, True)
+        _parse_ipset(cls.SET_LIMITED, False)
 
         return {
             "permanent_ips": perm,

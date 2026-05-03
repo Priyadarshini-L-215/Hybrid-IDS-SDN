@@ -1,6 +1,7 @@
 {
-    "model": "VAE",
+    "threshold": 0.3,
+    "latent_dim": 16,
     "input_dim": 16,
-    "threshold": 0.0283,
-    "description": "Anomaly detection using reconstruction error"
+    "model_type": "vae_pytorch",
+    "last_updated": "2026-05-03"
 }

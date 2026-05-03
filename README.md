@@ -78,15 +78,27 @@ The system utilizes a high-performance native Linux architecture:
 To install everything and start the system for the first time, simply run the unified setup and launcher:
 
 ```bash
-chmod +x setup.sh start.sh stop.sh diag.sh
+chmod +x preflight.sh setup.sh start.sh stop.sh diag.sh
+./preflight.sh
 ./setup.sh
 ./start.sh
 ```
 
 **What this does automatically:**
-1.  Installs **Suricata**, **Redis**, and system dependencies via apt.
-2.  Initializes the **Python venv** and **Node.js** UI.
-3.  Launches all components (Sensor, Backend, and Dashboard) in the background.
+1.  Runs **Pre-flight checks** to verify system readiness.
+2.  Installs **Suricata**, **Redis**, and system dependencies via apt.
+3.  Initializes the **Python venv** and **Node.js** UI.
+4.  Launches all components (Sensor, Backend, and Dashboard) in the background.
+
+---
+
+## 🛡️ ML Engine Calibration
+
+The system uses a **VAE (Variational Autoencoder)** for behavioral anomaly detection (Stage 3). The default threshold is now **0.3** to minimize false positives in standard network environments.
+
+To adjust sensitivity:
+- Modify the `threshold` value in `models/vae_config.json`.
+- Restart the engine or trigger a reload with `kill -HUP <consumer_pid>`.
 
 ---
 

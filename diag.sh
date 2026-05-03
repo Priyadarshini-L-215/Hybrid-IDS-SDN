@@ -58,6 +58,21 @@ else
 fi
 
 echo ""
+echo "[+] Checking Model Assets..."
+check_model() {
+    if [ -f "$PROJECT_ROOT/models/$1" ]; then
+        echo -e "[${GREEN}OK${RESET}] Model asset found: $1"
+    else
+        echo -e "[${YELLOW}WARN${RESET}] Model asset missing: $1"
+    fi
+}
+check_model "rf_model.pkl"
+check_model "scaler.pkl"
+check_model "vae_model.pth"
+check_model "vae_scaler.pkl"
+check_model "features.json"
+
+echo ""
 echo "[+] Checking Ports..."
 check_port 6379 "Redis"
 
@@ -89,6 +104,21 @@ if sudo iptables -L SENTINEL_IPS -n > /dev/null 2>&1; then
     echo -e "[${GREEN}OK${RESET}] Iptables chain 'SENTINEL_IPS' is active"
 else
     echo -e "[${RED}FAIL${RESET}] Iptables chain 'SENTINEL_IPS' NOT found"
+fi
+
+echo ""
+echo "[+] Checking SDN Infrastructure..."
+SDN_ENABLED=$($APP_PYTHON -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import SDN_ENABLED; print(str(SDN_ENABLED).lower())" 2>/dev/null || echo "false")
+if [ "$SDN_ENABLED" == "true" ]; then
+    check_process "ryu-manager" "Ryu Controller"
+    check_port 8080 "Ryu REST API"
+    if ip netns list | grep -q "honeypot"; then
+        echo -e "[${GREEN}OK${RESET}] SDN Namespace 'honeypot' exists"
+    else
+        echo -e "[${RED}FAIL${RESET}] SDN Namespace 'honeypot' MISSING"
+    fi
+else
+    echo -e "[${YELLOW}INFO${RESET}] SDN Infrastructure disabled in config"
 fi
 
 echo ""

@@ -80,6 +80,13 @@ activate_venv() {
     fi
 
     log_info "Environment ready"
+    
+    # Run configuration validator
+    log_info "Validating configuration and model files..."
+    if ! "$PROJECT_ROOT/.venv/bin/python" "$PROJECT_ROOT/src/common/config_validator.py"; then
+        log_error "Configuration validation failed. Check the errors above."
+        exit 1
+    fi
 }
 
 # Load configuration from Python

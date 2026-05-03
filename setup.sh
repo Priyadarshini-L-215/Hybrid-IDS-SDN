@@ -461,6 +461,15 @@ main() {
     trap "rm -f $SETUP_LOCK_FILE" EXIT
     touch "$SETUP_LOCK_FILE"
 
+    # Run preflight checks first
+    if [ -f "$PROJECT_ROOT/preflight.sh" ]; then
+        log_info "Running pre-flight validation..."
+        if ! ./preflight.sh; then
+            log_error "Pre-flight validation failed. Please fix the issues above."
+            exit 1
+        fi
+    fi
+
     # Load previous state
     load_state
 

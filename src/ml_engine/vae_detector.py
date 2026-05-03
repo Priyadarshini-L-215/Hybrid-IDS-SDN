@@ -75,7 +75,7 @@ class VaeAnomalyDetector:
         flags      = detector.is_anomaly(X_raw)     # bool ndarray
     """
 
-    DEFAULT_THRESHOLD = 0.0283
+    DEFAULT_THRESHOLD = 0.3
 
     def __init__(self, model_path: str | Path, scaler_path: str | Path,
                  threshold: float = DEFAULT_THRESHOLD):
@@ -110,7 +110,14 @@ class VaeAnomalyDetector:
             return np.zeros(len(X))
 
         try:
-            X_scaled = self.scaler.transform(X).astype(np.float32)
+            # Ensure we only use the first 16 features if more are passed
+            # This aligns with the VAE's 16-manifold architecture
+            if X.shape[1] > 16:
+                X_input = X[:, :16]
+            else:
+                X_input = X
+
+            X_scaled = self.scaler.transform(X_input).astype(np.float32)
             t = torch.from_numpy(X_scaled)
 
             with torch.no_grad():

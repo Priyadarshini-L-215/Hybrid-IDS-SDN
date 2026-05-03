@@ -2,12 +2,12 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Shield, Activity, Zap, Database, Terminal, Settings, 
-  AlertTriangle, CheckCircle2, Server, Globe, Lock, Unlock,
+  AlertTriangle, CheckCircle2, Server, Globe, Lock, Unlock, Home,
   Cpu, RefreshCcw, Search, Filter, ArrowRight, Play, StopCircle, 
   Clock, ExternalLink, Info, ChevronDown, FileText, Upload, 
   Link, BarChart3, Network, Share2, Eye, Trash2, Bug, 
   HardDrive, Target, Flame, ShieldCheck, Radio, Layers, 
-  Fingerprint, RotateCcw, Save, Key, X, MapPin, History
+  Fingerprint, RotateCcw, Save, Key, X, MapPin, History, Download
 } from 'lucide-react';
 import { 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -39,8 +39,13 @@ const Badge = ({ children, variant = 'info' }) => (
   </span>
 );
 
-const GlassCard = ({ children, className = '', title, icon: Icon, actions, subtitle }) => (
-  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`glass-card ${className}`}>
+const GlassCard = ({ children, title, subtitle, icon: Icon, actions, className = '', style = {} }) => (
+  <motion.div 
+    initial={{ opacity: 0, y: 20 }}
+    animate={{ opacity: 1, y: 0 }}
+    className={`glass-card ${className}`}
+    style={style}
+  >
     {title && (
       <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
         <div className="panel-title-group">
@@ -68,6 +73,42 @@ const StatCard = ({ label, value, icon: Icon, color = 'var(--primary)' }) => (
     <div className="stat-value-large">{value}</div>
   </GlassCard>
 );
+
+const CompactIP = ({ ip, onClick }) => {
+  if (!ip || ip === '---') return <span>---</span>;
+  
+  const isLocal = ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('127.') || ip.startsWith('172.');
+  const displayIp = ip.length > 18 ? `${ip.substring(0, 10)}...${ip.substring(ip.length - 4)}` : ip;
+  
+  return (
+    <div 
+      className="compact-ip-badge" 
+      onClick={onClick}
+      title={ip}
+      style={{ 
+        display: 'inline-flex', 
+        alignItems: 'center', 
+        gap: '6px', 
+        cursor: onClick ? 'pointer' : 'default',
+        padding: '4px 8px',
+        background: isLocal ? 'rgba(16, 185, 129, 0.08)' : 'rgba(56, 189, 248, 0.08)',
+        borderRadius: '8px',
+        border: `1px solid ${isLocal ? 'rgba(16, 185, 129, 0.15)' : 'rgba(56, 189, 248, 0.15)'}`,
+        transition: 'all 0.2s'
+      }}
+    >
+      {isLocal ? <Home size={10} className="text-success" /> : <Globe size={10} className="text-primary" />}
+      <span style={{ 
+        fontFamily: 'var(--font-mono)', 
+        fontSize: '0.75rem', 
+        fontWeight: 700,
+        color: isLocal ? 'var(--success)' : 'var(--primary)'
+      }}>
+        {displayIp}
+      </span>
+    </div>
+  );
+};
 
 // --- MAIN APPLICATION ---
 function App() {
@@ -107,6 +148,17 @@ function App() {
   const [nodeIntel, setNodeIntel] = useState(null);
   const [loadingIntel, setLoadingIntel] = useState(false);
 
+  // Search & Filtering
+  const [filterQuery, setFilterQuery] = useState('');
+  const [filterLevel, setFilterLevel] = useState('ALL');
+
+  // Operational Monitoring
+  const [systemLogs, setSystemLogs] = useState([{ ts: new Date().toISOString(), msg: 'Sentinel Core UI Initialized' }]);
+  
+  const addLog = (msg) => {
+    setSystemLogs(prev => [{ ts: new Date().toISOString(), msg }, ...prev].slice(0, 50));
+  };
+
   const ws = useRef(null);
   const statsRef = useRef({ processed_total: 0, attacks: 0, normal: 0 });
 
@@ -114,8 +166,7 @@ function App() {
   const graphData = useMemo(() => {
     const nodes = new Map();
     const links = [];
-    const maxNodes = 40;
-
+    
     // Internal node center
     nodes.set('INTERNAL', { id: 'INTERNAL', name: 'Sentinel Node', group: 'core', val: 25 });
 
@@ -149,6 +200,33 @@ function App() {
       }))
       .slice(0, 15);
   }, [alerts]);
+
+  const filteredAlerts = useMemo(() => {
+    return alerts.filter(a => {
+      const prediction = (a.prediction || '').toLowerCase();
+      const matchesQuery = !filterQuery || 
+        a.src_ip.includes(filterQuery) || 
+        prediction.includes(filterQuery.toLowerCase()) ||
+        a.protocol?.toLowerCase().includes(filterQuery.toLowerCase());
+      
+      const matchesLevel = filterLevel === 'ALL' || 
+        (filterLevel === 'ATTACKS' && (prediction.includes('attack') || prediction.includes('anomaly'))) ||
+        (filterLevel === 'SUSPICIOUS' && prediction.includes('suspicious')) ||
+        (filterLevel === 'NORMAL' && prediction.includes('normal'));
+        
+      return matchesQuery && matchesLevel;
+    });
+  }, [alerts, filterQuery, filterLevel]);
+
+  const protocolStats = useMemo(() => {
+    const counts = {};
+    alerts.forEach(a => {
+      const p = a.protocol?.toUpperCase() || 'OTHER';
+      counts[p] = (counts[p] || 0) + 1;
+    });
+    return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [alerts]);
+
   const lastStatsRef = useRef({ processed: 0, attacks: 0 });
 
   // --- API CALLS ---
@@ -167,6 +245,7 @@ function App() {
         setAlerts(data.alerts);
         setStats({ processed_total: data.total_processed, attacks: data.attack_total, normal: data.normal_total });
         statsRef.current = { processed_total: data.total_processed, attacks: data.attack_total, normal: data.normal_total };
+        addLog(`Alerts: Synchronized ${data.alerts.length} events from database`);
       }
     } catch (e) { console.error("Alerts fetch failed", e); }
   };
@@ -178,8 +257,13 @@ function App() {
     setNodeIntel(null);
     try {
       const res = await fetch(`/api/intelligence/node/${ip}`);
-      setNodeIntel(await res.json());
-    } catch (e) { console.error("Intel fetch failed", e); } finally { setLoadingIntel(false); }
+      const data = await res.json();
+      setNodeIntel(data);
+      addLog(`Intelligence: Analyzed node ${ip} (Risk: ${data.reputation_score}%)`);
+    } catch (e) { 
+      console.error("Intel fetch failed", e); 
+      addLog(`Error: Failed to fetch intelligence for ${ip}`);
+    } finally { setLoadingIntel(false); }
   };
 
   const runSimulation = async (type, payload = {}) => {
@@ -345,192 +429,272 @@ function App() {
         <div className="blob blob-1" /><div className="blob blob-2" /><div className="blob blob-3" />
       </div>
 
-      <header className="header-section">
-        <div className="title-group">
-          <h1>
-            <Shield className="text-primary pulse" size={32} />
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              <span className="gradient-text">SENTINEL</span>
-              <span style={{ color: 'var(--text-muted)', fontWeight: 800, fontSize: '0.65rem', letterSpacing: '0.3em' }}>HYBRID IDS/IPS OS</span>
-            </div>
-          </h1>
+      {/* --- SIDEBAR --- */}
+      <aside className="sidebar glass-panel">
+        <div className="sidebar-logo">
+          <Shield className="text-primary pulse" size={28} />
+          <span className="gradient-text" style={{ fontWeight: 900, fontSize: '1.2rem', letterSpacing: '-0.02em' }}>SENTINEL</span>
         </div>
 
-        <nav className="tabs-navigation">
+        <nav className="sidebar-nav">
           {[
-            { id: 'overview', label: 'Overview', icon: Activity },
-            { id: 'visual', label: 'Visual Intelligence', icon: Network },
-            { id: 'mitigation', label: 'Policy & Mitigation', icon: ShieldCheck },
+            { id: 'overview', label: 'Command Hub', icon: Activity },
+            { id: 'visual', label: 'Visual Intel', icon: Network },
+            { id: 'mitigation', label: 'Policies', icon: ShieldCheck },
             { id: 'lab', label: 'Simulation', icon: Target },
             { id: 'eval', label: 'Evaluation', icon: Fingerprint },
-            { id: 'settings', label: 'Settings', icon: Settings }
+            { id: 'settings', label: 'Engine Config', icon: Settings }
           ].map(tab => (
-            <button key={tab.id} className={`tab-button ${activeTab === tab.id ? 'active' : ''}`} onClick={() => setActiveTab(tab.id)}>
-              <tab.icon size={16} /> {tab.label}
-            </button>
+            <div 
+              key={tab.id} 
+              className={`nav-item ${activeTab === tab.id ? 'active' : ''}`} 
+              onClick={() => {
+                setActiveTab(tab.id);
+                addLog(`Navigation: Switched to ${tab.label} module`);
+              }}
+            >
+              <tab.icon size={18} />
+              <span>{tab.label}</span>
+            </div>
           ))}
         </nav>
 
-        <div className="status-container">
-          <div className="status-hover-wrapper" style={{ cursor: 'pointer' }}>
-            <Badge variant={connected ? 'success' : 'danger'}>{connected ? 'CORE ONLINE' : 'OFFLINE'}</Badge>
-            <div className="engine-tooltip glass">
-              <div style={{ marginBottom: '1rem', fontWeight: 900, fontSize: '0.65rem', color: 'var(--primary)', letterSpacing: '0.1em' }}>SYSTEM INTEGRITY</div>
-              {[
-                { label: 'Neural Engine', status: health?.checks?.consumer_running, val: health?.checks?.consumer_running ? 'ACTIVE' : 'STOPPED' },
-                { label: 'Redis Stream', status: health?.checks?.redis_ok, val: health?.checks?.redis_ok ? 'SYNCED' : 'ERROR' },
-                { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || 'READY' }
-              ].map(item => (
-                <div key={item.label} className="health-item">
-                   <span className="health-label">{item.label}</span>
-                   <span style={{ color: item.status ? 'var(--success)' : 'var(--danger)', fontWeight: 800, fontSize: '0.7rem' }}>{item.val}</span>
-                </div>
-              ))}
-              <div style={{ marginTop: '1rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border)', fontSize: '0.6rem', color: 'var(--text-muted)' }}>
-                Queue Depth: {health?.queue_depth || 0} events
+        <div className="sidebar-footer">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+            <div className={`badge-dot ${connected ? 'bg-success' : 'bg-danger'}`} style={{ width: '8px', height: '8px', background: connected ? 'var(--success)' : 'var(--danger)' }} />
+            <span>CORE {connected ? 'ONLINE' : 'OFFLINE'}</span>
+          </div>
+          <div style={{ opacity: 0.5 }}>v3.1.2-STABLE</div>
+        </div>
+      </aside>
+
+      <main className="main-content">
+        <header className="header-section glass-panel">
+          <div className="title-group">
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span style={{ color: 'var(--text-muted)', fontWeight: 800, fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase' }}>Current Operations</span>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 900 }}>{activeTab.charAt(0).toUpperCase() + activeTab.slice(1).replace(/_/g, ' ')}</h2>
+            </div>
+          </div>
+
+          <div className="engine-metrics">
+            <div className="metric-item">
+              <span className="metric-label">Inference Latency</span>
+              <span className="metric-value">{latency.toFixed(2)}ms</span>
+            </div>
+            <div className="metric-item">
+              <span className="metric-label">Queue Depth</span>
+              <span className="metric-value">{health?.queue_depth || 0}</span>
+            </div>
+            <div className="status-hover-wrapper" style={{ cursor: 'pointer' }}>
+              <Badge variant={connected ? 'success' : 'danger'}>{connected ? 'SYSTEM READY' : 'OFFLINE'}</Badge>
+              <div className="engine-tooltip glass">
+                <div style={{ marginBottom: '1rem', fontWeight: 900, fontSize: '0.65rem', color: 'var(--primary)', letterSpacing: '0.1em' }}>ENGINE INTEGRITY</div>
+                {[
+                  { label: 'Neural Engine', status: health?.checks?.consumer_running, val: health?.checks?.consumer_running ? 'ACTIVE' : 'STOPPED' },
+                  { label: 'Redis Stream', status: health?.checks?.redis_ok, val: health?.checks?.redis_ok ? 'SYNCED' : 'ERROR' },
+                  { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || 'READY' }
+                ].map(item => (
+                  <div key={item.label} className="health-item">
+                     <span className="health-label">{item.label}</span>
+                     <span style={{ color: item.status ? 'var(--success)' : 'var(--danger)', fontWeight: 800, fontSize: '0.7rem' }}>{item.val}</span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <div className="stats-grid">
-        <StatCard label="Ingested Events" value={stats.processed_total?.toLocaleString()} icon={Database} />
-        <StatCard label="Threats Detected" value={stats.attacks?.toLocaleString()} icon={Flame} color="var(--danger)" />
-        <StatCard label="Inference Latency" value={`${latency.toFixed(2)}ms`} icon={Zap} color="var(--primary)" />
-        <StatCard label="Mitigated Hosts" value={health?.ipset?.permanent || 0} icon={Shield} color="var(--success)" />
-      </div>
-
-      <main className="main-layout">
         <AnimatePresence mode="wait">
           {activeTab === 'overview' && (
             <motion.div key="overview" className="content-stack" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-              <GlassCard title="Network Behavior Analytics" icon={Activity} subtitle="Live threat vector analysis">
-                <div style={{ height: '220px', width: '100%' }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={chartData}>
-                      <defs>
-                        <linearGradient id="cNormal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--success)" stopOpacity={0.2}/><stop offset="95%" stopColor="var(--success)" stopOpacity={0}/></linearGradient>
-                        <linearGradient id="cAttack" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--danger)" stopOpacity={0.2}/><stop offset="95%" stopColor="var(--danger)" stopOpacity={0}/></linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                      <XAxis dataKey="time" hide />
-                      <YAxis stroke="rgba(255,255,255,0.1)" fontSize={10} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ background: 'rgba(2, 6, 23, 0.95)', border: '1px solid var(--border)', borderRadius: '8px' }} />
-                      <Area type="monotone" dataKey="normal" stroke="var(--success)" fill="url(#cNormal)" strokeWidth={2} isAnimationActive={false} />
-                      <Area type="monotone" dataKey="attacks" stroke="var(--danger)" fill="url(#cAttack)" strokeWidth={2} isAnimationActive={false} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </GlassCard>
+              <div className="stats-grid">
+                <StatCard label="Total Ingress" value={stats.processed_total?.toLocaleString()} icon={Database} />
+                <StatCard label="Threat Vectors" value={stats.attacks?.toLocaleString()} icon={Flame} color="var(--danger)" />
+                <StatCard label="Active Policies" value={health?.ipset?.permanent || 0} icon={Shield} color="var(--success)" />
+                <StatCard label="Normal Flows" value={stats.normal?.toLocaleString()} icon={CheckCircle2} color="var(--success)" />
+              </div>
 
-              <div className="table-container glass">
-                <div className="table-header"><div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}><Terminal size={18} className="text-primary" /><span className="gradient-text" style={{ fontWeight: 800 }}>LIVE INTELLIGENCE STREAM</span></div></div>
-                <div className="table-scroller" style={{ maxHeight: '550px', overflowY: 'auto' }}>
-                  <table className="alerts-table">
-                    <thead><tr><th>Time</th><th>Source Node</th><th>Destination</th><th>Proto</th><th>Classification</th><th>Confidence</th><th>Mitigation</th></tr></thead>
-                    <tbody>
-                      {alerts.map((alert, i) => {
-                        const isAttack = alert.prediction?.toLowerCase().includes('attack');
-                        const isSuspicious = alert.prediction?.toLowerCase().includes('suspicious');
-                        return (
-                          <React.Fragment key={alert.event_id || i}>
-                            <tr className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`} onClick={() => setExpandedRow(expandedRow === i ? null : i)}>
-                              <td className="ip-address" style={{ fontSize: '0.7rem', opacity: 0.6 }}>{formatTimestamp(alert.timestamp)}</td>
-                              <td className="ip-address" onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }}>{alert.src_ip}</td>
-                              <td className="ip-address">{alert.dst_ip || '---'}:{alert.dst_port || ''}</td>
-                              <td style={{ fontSize: '0.65rem', fontWeight: 900, opacity: 0.8 }}>{alert.protocol?.toUpperCase()}</td>
-                              <td>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>{alert.prediction}</Badge>
-                                    {alert.duplicate_count > 1 && (
-                                      <span className="badge-count" style={{ background: 'var(--primary)', color: 'white', padding: '1px 6px', borderRadius: '10px', fontSize: '0.6rem', fontWeight: 900 }}>
-                                        ×{alert.duplicate_count}
-                                      </span>
-                                    )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: '1.5rem' }}>
+                <div className="table-container glass">
+                  <div className="table-header">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <Terminal size={18} className="text-primary" />
+                        <span className="gradient-text" style={{ fontWeight: 800 }}>LIVE THREAT STREAM</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setFilterLevel('ALL')} style={{ opacity: filterLevel === 'ALL' ? 1 : 0.5 }}>ALL</button>
+                        <button className="btn btn-danger btn-sm" onClick={() => setFilterLevel('ATTACKS')} style={{ opacity: filterLevel === 'ATTACKS' ? 1 : 0.5 }}>THREATS</button>
+                        <button className="btn btn-secondary btn-sm" title="Export CSV" onClick={() => addLog('Export: CSV generation started')}><Download size={12} /></button>
+                        <button className="btn btn-secondary btn-sm" onClick={fetchAlerts}><RotateCcw size={12} /></button>
+                      </div>
+                    </div>
+                    <div className="filter-bar">
+                      <Search size={14} className="text-muted" />
+                      <input 
+                        type="text" 
+                        className="filter-input" 
+                        placeholder="Filter by Source IP, Classification, or Protocol..." 
+                        value={filterQuery}
+                        onChange={(e) => setFilterQuery(e.target.value)}
+                      />
+                      {filterQuery && <X size={14} className="text-muted cursor-pointer" onClick={() => setFilterQuery('')} />}
+                    </div>
+                  </div>
+                  <div className="table-scroller" style={{ maxHeight: '600px', overflowY: 'auto' }}>
+                    <table className="alerts-table">
+                      <thead><tr><th>Timestamp</th><th>Source Node</th><th>Classification</th><th>Score</th><th>Mitigation</th></tr></thead>
+                      <tbody>
+                        {filteredAlerts.map((alert, i) => {
+                          const prediction = (alert.prediction || 'Unknown').toLowerCase();
+                          const isAttack = prediction.includes('attack') || prediction.includes('anomaly');
+                          const isSuspicious = prediction.includes('suspicious');
+                          const confidence = typeof alert.confidence === 'number' ? alert.confidence : 0;
+                          
+                          return (
+                            <React.Fragment key={alert.event_id || i}>
+                              <tr 
+                                onClick={() => setExpandedRow(expandedRow === i ? null : i)}
+                                className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`}
+                              >
+                                <td className="text-muted" style={{ fontSize: '0.65rem', fontWeight: 800 }}>{new Date(alert.timestamp).toLocaleTimeString()}</td>
+                                <td>
+                                  <CompactIP ip={alert.src_ip} onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} />
+                                </td>
+                                <td>
+                                  <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
+                                    {alert.prediction}
+                                  </Badge>
+                                </td>
+                                <td>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                     <div style={{ width: '40px', height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
+                                        <div style={{ width: `${confidence}%`, height: '100%', background: confidence > 80 ? 'var(--danger)' : confidence > 50 ? 'var(--warning)' : 'var(--success)', transition: 'width 0.5s ease' }} />
+                                     </div>
+                                     <span style={{ fontWeight: 800, fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>{confidence.toFixed(1)}%</span>
                                   </div>
-                                  {alert.mitre && (
-                                    <div style={{ display: 'flex', gap: '4px' }}>
-                                      <span style={{ fontSize: '0.55rem', opacity: 0.7, background: 'rgba(255,255,255,0.05)', padding: '2px 4px', borderRadius: '4px', border: '1px solid var(--border)' }}>{alert.mitre.id}</span>
-                                      <span style={{ fontSize: '0.55rem', opacity: 0.7, color: 'var(--primary)' }}>{alert.mitre.tactic}</span>
-                                    </div>
-                                  )}
-                                </div>
-                              </td>
-                              <td style={{ fontWeight: 800, fontFamily: 'var(--font-mono)' }}>{alert.confidence}%</td>
-                              <td><div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>{alert.is_mitigated ? <Lock size={12} className="text-danger" /> : <Unlock size={12} className="text-muted" />}<span style={{ fontSize: '0.65rem', fontWeight: 800 }}>{alert.mitigation || 'PASSIVE'}</span></div></td>
-                            </tr>
-                            {expandedRow === i && (
-                              <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
-                                <td colSpan="7" style={{ padding: '1.5rem' }}>
-                                   <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr 1fr', gap: '2rem' }}>
-                                      <div>
-                                        <h4 style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Decision Matrix</h4>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}><span className="text-muted">Signature Layer</span><span>{alert.forensics?.stage_scores?.signature ? 'DETECTED' : 'CLEAN'}</span></div>
-                                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}><span className="text-muted">Neural Confidence</span><span>{(alert.forensics?.stage_scores?.ml * 100).toFixed(1)}%</span></div>
-                                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}><span className="text-muted">Anomaly Magnitude</span><span>{(alert.forensics?.stage_scores?.anomaly * 100).toFixed(1)}%</span></div>
-                                          <div style={{ height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', marginTop: '4px' }}>
-                                            <div style={{ height: '100%', width: `${alert.confidence}%`, background: 'var(--primary)', boxShadow: '0 0 10px var(--primary-glow)' }} />
-                                          </div>
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <h4 style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Explainability (SHAP)</h4>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                          {alert.shap_top3 && alert.shap_top3.length > 0 ? alert.shap_top3.map((item, idx) => (
-                                            <div key={idx} style={{ fontSize: '0.65rem' }}>
-                                              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
-                                                <span className="text-muted" style={{ textTransform: 'capitalize' }}>{item.feature.replace(/_/g, ' ')}</span>
-                                                <span className="text-primary">{item.impact > 0.1 ? 'High Impact' : 'Medium'}</span>
-                                              </div>
-                                              <div style={{ height: '3px', background: 'rgba(255,255,255,0.05)', borderRadius: '1.5px' }}>
-                                                <div style={{ height: '100%', width: `${Math.min(item.impact * 200, 100)}%`, background: 'var(--primary)' }} />
-                                              </div>
-                                            </div>
-                                          )) : <span className="text-muted" style={{ fontSize: '0.7rem' }}>No explanation data available.</span>}
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <h4 style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Enrichment</h4>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.75rem' }}>
-                                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Globe size={12} className="text-muted" /> {alert.enrichment?.location || 'Unknown'}</div>
-                                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'}</div>
-                                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Info size={12} className="text-muted" /> {alert.alert_sig || 'Generic Flow'}</div>
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <h4 style={{ fontSize: '0.65rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Actions</h4>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                          {alert.is_mitigated ? (
-                                            <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'unblock'); }}>WHITELIST NODE</button>
-                                          ) : (
-                                            <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'block'); }}>BLOCK IMMEDIATELY</button>
-                                          )}
-                                          <button className="btn btn-primary btn-sm" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }} onClick={(e) => { e.stopPropagation(); downloadPcap(alert.event_id); }}>
-                                            <FileText size={14} /> DOWNLOAD PCAP
-                                          </button>
-                                        </div>
-                                      </div>
-                                   </div>
+                                </td>
+                                <td>
+                                   <Badge variant={alert.mitigation ? 'info' : 'muted'}>
+                                     {alert.mitigation || 'LOGGED'}
+                                   </Badge>
                                 </td>
                               </tr>
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              {expandedRow === i && (
+                                <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
+                                  <td colSpan="5" style={{ padding: '1.5rem' }}>
+                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1.5rem' }}>
+                                        <div>
+                                          <h4 style={{ fontSize: '0.6rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Decision Matrix</h4>
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Signature</span><span>{alert.forensics?.stage_scores?.signature ? 'DETECTED' : 'CLEAN'}</span></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Neural</span><span>{(alert.forensics?.stage_scores?.ml * 100).toFixed(1)}%</span></div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Anomaly</span><span>{(alert.forensics?.stage_scores?.anomaly * 100).toFixed(1)}%</span></div>
+                                          </div>
+                                        </div>
+                                        <div>
+                                          <h4 style={{ fontSize: '0.6rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Enrichment</h4>
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.7rem' }}>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Globe size={12} className="text-muted" /> {alert.enrichment?.location || 'Unknown'}</div>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'}</div>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><FileText size={12} className="text-muted" /> {alert.protocol?.toUpperCase()} / {alert.dst_port || '0'}</div>
+                                          </div>
+                                        </div>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                          <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); downloadPcap(alert.event_id); }}><FileText size={14} /> PCAP</button>
+                                          {alert.is_mitigated ? (
+                                            <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'unblock'); }}>WHITELIST</button>
+                                          ) : (
+                                            <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'block'); }}>BLOCK IP</button>
+                                          )}
+                                        </div>
+                                     </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="content-stack">
+                  <GlassCard title="Real-time Traffic Velocity" icon={Activity} subtitle="Events per second (Ingress vs Threats)">
+                    <div style={{ height: '180px', width: '100%' }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={chartData}>
+                          <defs>
+                            <linearGradient id="cNormal" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--success)" stopOpacity={0.2}/><stop offset="95%" stopColor="var(--success)" stopOpacity={0}/></linearGradient>
+                            <linearGradient id="cAttack" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--danger)" stopOpacity={0.2}/><stop offset="95%" stopColor="var(--danger)" stopOpacity={0}/></linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
+                          <XAxis dataKey="time" hide />
+                          <YAxis stroke="rgba(255,255,255,0.1)" fontSize={10} axisLine={false} tickLine={false} />
+                          <Tooltip contentStyle={{ background: 'rgba(2, 6, 23, 0.95)', border: '1px solid var(--border)', borderRadius: '8px' }} />
+                          <Area type="monotone" dataKey="normal" stroke="var(--success)" fill="url(#cNormal)" strokeWidth={2} isAnimationActive={false} />
+                          <Area type="monotone" dataKey="attacks" stroke="var(--danger)" fill="url(#cAttack)" strokeWidth={2} isAnimationActive={false} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </GlassCard>
+
+                  <GlassCard title="Protocol Distribution" icon={Layers} subtitle="Frequency of observed protocols">
+                     <div style={{ height: '180px', width: '100%' }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={protocolStats.slice(0, 5)}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
+                            <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={10} axisLine={false} tickLine={false} />
+                            <YAxis stroke="var(--text-muted)" fontSize={10} axisLine={false} tickLine={false} />
+                            <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '8px' }} />
+                            <Bar dataKey="value" fill="var(--primary)" radius={[4, 4, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                     </div>
+                  </GlassCard>
+
+                  <GlassCard title="Active Policies" icon={ShieldCheck} subtitle="Top Reputation Violations">
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {Object.entries(health?.ipset_detailed?.reputation || {})
+                          .sort(([, a], [, b]) => b - a)
+                          .slice(0, 3)
+                          .map(([ip, score]) => (
+                            <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                               <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
+                               <span style={{ fontWeight: 900, color: score > 50 ? 'var(--danger)' : 'var(--text-secondary)', fontSize: '0.8rem' }}>{score.toFixed(1)}</span>
+                            </div>
+                          ))
+                        }
+                        <button className="btn btn-secondary btn-sm" style={{ marginTop: '0.5rem' }} onClick={() => setActiveTab('mitigation')}>VIEW ALL POLICIES</button>
+                     </div>
+                  </GlassCard>
                 </div>
               </div>
+
+              <GlassCard 
+                title="Operational Log" 
+                icon={Terminal} 
+                subtitle="Real-time system events and UI state transitions"
+                actions={<button className="btn-icon" title="Clear Logs" onClick={() => setSystemLogs([{ ts: new Date().toISOString(), msg: 'Logs cleared by operator' }])}><Trash2 size={14} /></button>}
+              >
+                 <div className="system-log-mini">
+                    {systemLogs.map((log, i) => (
+                      <div key={i} className="log-entry">
+                        <span className="log-ts">[{formatTimestamp(log.ts)}]</span>
+                        <span className="log-msg">{log.msg}</span>
+                      </div>
+                    ))}
+                 </div>
+              </GlassCard>
             </motion.div>
           )}
           
           {activeTab === 'visual' && (
             <motion.div key="visual" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '2rem' }}>
-                  <GlassCard title="Global Threat Vector Map" icon={Globe} subtitle="Real-time geographic source of detections">
+               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '1.5rem' }}>
+                  <GlassCard title="Global Threat Vector Map" icon={Globe} subtitle="Geographic distribution of detected sources">
                     <div style={{ height: '500px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border)' }}>
                       <ComposableMap projectionConfig={{ scale: 140 }}>
                         <Geographies geography={geoUrl}>
@@ -539,12 +703,12 @@ function App() {
                               <Geography
                                 key={geo.rsmKey}
                                 geography={geo}
-                                fill="var(--bg-card)"
-                                stroke="var(--border)"
+                                fill="rgba(255,255,255,0.03)"
+                                stroke="rgba(255,255,255,0.1)"
                                 strokeWidth={0.5}
                                 style={{
                                   default: { outline: "none" },
-                                  hover: { fill: "var(--primary-glow)", outline: "none" },
+                                  hover: { fill: "rgba(56, 189, 248, 0.1)", outline: "none" },
                                   pressed: { outline: "none" },
                                 }}
                               />
@@ -555,30 +719,23 @@ function App() {
                           <Marker key={id} coordinates={coordinates}>
                             <motion.circle
                               initial={{ r: 0, opacity: 1 }}
-                              animate={{ r: [4, 12, 4], opacity: [1, 0.4, 1] }}
+                              animate={{ r: [4, 10, 4], opacity: [1, 0.4, 1] }}
                               transition={{ repeat: Infinity, duration: 2 }}
                               fill={isAttack ? "var(--danger)" : "var(--primary)"}
                               stroke="#fff"
                               strokeWidth={1}
                             />
-                            <text
-                              textAnchor="middle"
-                              y={-15}
-                              style={{ fontFamily: "inherit", fill: "var(--text-secondary)", fontSize: "8px", pointerEvents: 'none' }}
-                            >
-                              {name}
-                            </text>
                           </Marker>
                         ))}
                       </ComposableMap>
                     </div>
                   </GlassCard>
 
-                  <GlassCard title="Network Topology" icon={Network} subtitle="Live flow relationship graph">
-                    <div style={{ height: '500px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border)' }}>
+                  <GlassCard title="Network Topology" icon={Network} subtitle="Real-time flow relationship graph">
+                    <div className="topology-wrapper">
                        <ForceGraph2D
                           graphData={graphData}
-                          width={450}
+                          width={600}
                           height={500}
                           backgroundColor="rgba(0,0,0,0)"
                           nodeLabel="name"
@@ -601,41 +758,55 @@ function App() {
 
           {activeTab === 'mitigation' && (
             <motion.div key="mitigation" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
-                <GlassCard title="Active Blocklist" icon={ShieldCheck} subtitle="Permanently and temporarily blocked IPs">
-                   <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                      <div style={{ marginBottom: '1.5rem' }}>
-                        <div className="stat-label" style={{ marginBottom: '0.5rem', color: 'var(--danger)' }}>Permanent Blocks ({health?.ipset_detailed?.permanent_ips?.length || 0})</div>
-                        {health?.ipset_detailed?.permanent_ips?.map(ip => (
-                          <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(244, 63, 94, 0.05)', borderRadius: '8px', marginBottom: '8px', border: '1px solid rgba(244, 63, 94, 0.1)' }}>
-                             <span className="ip-address" onClick={() => fetchNodeIntel(ip)} style={{ cursor: 'pointer' }}>{ip}</span>
-                             <button className="btn-icon text-danger" onClick={() => blockAction(ip, 'unblock')}><Unlock size={14} /></button>
-                          </div>
-                        ))}
-                      </div>
-                      <div>
-                        <div className="stat-label" style={{ marginBottom: '0.5rem', color: 'var(--warning)' }}>Temporary Blocks ({health?.ipset_detailed?.temporary_ips?.length || 0})</div>
-                        {health?.ipset_detailed?.temporary_ips?.map(ip => (
-                          <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(245, 158, 11, 0.05)', borderRadius: '8px', marginBottom: '8px' }}>
-                             <span className="ip-address" onClick={() => fetchNodeIntel(ip)} style={{ cursor: 'pointer' }}>{ip}</span>
-                             <button className="btn-icon text-muted" onClick={() => blockAction(ip, 'unblock')}><Unlock size={14} /></button>
-                          </div>
-                        ))}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+                <GlassCard title="Active Blocklist" icon={ShieldCheck} subtitle="Nodes currently restricted by IPS">
+                   <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+                      <div className="content-stack">
+                        <div>
+                          <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--danger)' }}>Permanent Blocks ({health?.ipset_detailed?.permanent_ips?.length || 0})</div>
+                          {health?.ipset_detailed?.permanent_ips?.map(ip => (
+                            <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8rem 1rem', background: 'rgba(244, 63, 94, 0.05)', borderRadius: '12px', marginBottom: '8px', border: '1px solid rgba(244, 63, 94, 0.1)' }}>
+                               <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
+                               <button className="btn-icon text-danger" onClick={() => blockAction(ip, 'unblock')}><Unlock size={14} /></button>
+                            </div>
+                          ))}
+                        </div>
+                        <div>
+                          <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--warning)' }}>Temporary Blocks ({health?.ipset_detailed?.temporary_ips?.length || 0})</div>
+                          {health?.ipset_detailed?.temporary_ips?.map(ip => (
+                            <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8rem 1rem', background: 'rgba(245, 158, 11, 0.05)', borderRadius: '12px', marginBottom: '8px', border: '1px solid rgba(245, 158, 11, 0.1)' }}>
+                               <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
+                               <button className="btn-icon text-muted" onClick={() => blockAction(ip, 'unblock')}><Unlock size={14} /></button>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                    </div>
                 </GlassCard>
-                <GlassCard title="Reputation Leaderboard" icon={BarChart3} subtitle="Highest risk nodes by reputation score">
-                   <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                      {Object.entries(health?.ipset_detailed?.reputation || {})
-                        .sort(([, a], [, b]) => b - a)
-                        .slice(0, 15)
-                        .map(([ip, score]) => (
-                          <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', marginBottom: '8px' }}>
-                             <span className="ip-address" onClick={() => fetchNodeIntel(ip)} style={{ cursor: 'pointer' }}>{ip}</span>
-                             <span style={{ fontWeight: 900, color: score > 50 ? 'var(--danger)' : 'var(--text-secondary)' }}>{score.toFixed(1)}</span>
-                          </div>
-                        ))
-                      }
+                <GlassCard title="Global Reputation Scores" icon={BarChart3} subtitle="Probabilistic threat weights by node">
+                   <div className="table-container" style={{ border: 'none', background: 'transparent' }}>
+                      <table className="alerts-table">
+                        <thead><tr><th>Node Identity</th><th>Security Index</th><th>Weight</th></tr></thead>
+                        <tbody>
+                          {Object.entries(health?.ipset_detailed?.reputation || {})
+                            .sort(([, a], [, b]) => b - a)
+                            .map(([ip, score]) => (
+                              <tr key={ip}>
+                                <td><CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} /></td>
+                                <td><Badge variant={score > 60 ? 'danger' : score > 30 ? 'warning' : 'success'}>{score > 60 ? 'MALICIOUS' : score > 30 ? 'SUSPICIOUS' : 'TRUSTED'}</Badge></td>
+                                <td style={{ width: '150px' }}>
+                                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                      <div style={{ flex: 1, height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
+                                        <div style={{ height: '100%', width: `${score}%`, background: score > 60 ? 'var(--danger)' : 'var(--primary)' }} />
+                                      </div>
+                                      <span style={{ fontWeight: 900, fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>{score.toFixed(1)}</span>
+                                   </div>
+                                </td>
+                              </tr>
+                            ))
+                          }
+                        </tbody>
+                      </table>
                    </div>
                 </GlassCard>
               </div>
@@ -644,31 +815,32 @@ function App() {
 
           {activeTab === 'lab' && (
             <motion.div key="lab" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '2rem' }}>
-                <GlassCard title="Simulation Lab" icon={Flame} subtitle="Nmap Scanning and DDoS Traffic Test">
-                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                      <div><label className="stat-label">Target IPv4</label><input type="text" className="input-field" value={scanTarget} onChange={e => setScanTarget(e.target.value)} /></div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
+                <GlassCard title="Simulation Lab" icon={Flame} subtitle="Traffic Generation & Vulnerability Scanning">
+                   <div className="content-stack">
+                      <div><label className="stat-label">Target IPv4 Address</label><input type="text" className="input-field" value={scanTarget} onChange={e => setScanTarget(e.target.value)} /></div>
                       <div>
-                         <label className="stat-label">Nmap Profiles</label>
+                         <label className="stat-label">Scan Profiles</label>
                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
                             {['quick', 'ping', 'service', 'os_detect', 'aggressive', 'vuln'].map(p => (
                               <button key={p} className={`btn btn-secondary btn-sm ${scanProfile === p ? 'btn-primary' : ''}`} onClick={() => setScanProfile(p)}>{p.toUpperCase()}</button>
                             ))}
                          </div>
-                         <button className="btn btn-primary" style={{ width: '100%', marginTop: '10px' }} onClick={() => runSimulation('nmap', { profile: scanProfile })} disabled={simulating}>RUN NMAP SCAN</button>
+                         <button className="btn btn-primary" style={{ width: '100%', marginTop: '1rem' }} onClick={() => runSimulation('nmap', { profile: scanProfile })} disabled={simulating}>
+                            {simulating ? <RefreshCcw className="animate-spin" size={16} /> : <Search size={16} />} RUN SCAN
+                         </button>
                       </div>
                       <div style={{ paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
-                         <label className="stat-label">Attack Simulations</label>
-                         <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>Note: These actions generate real malicious traffic packets.</p>
-                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                            <button className="btn btn-danger btn-sm" onClick={() => runSimulation('ddos')}>UDP/SYN FLOOD</button>
+                         <label className="stat-label">Threat Simulations</label>
+                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
+                            <button className="btn btn-danger btn-sm" onClick={() => runSimulation('ddos')}>UDP FLOOD</button>
                             <button className="btn btn-danger btn-sm" onClick={() => runSimulation('ddos', { type: 'slowloris' })}>HTTP EXHAUST</button>
                          </div>
                       </div>
                    </div>
                 </GlassCard>
-                <GlassCard title="Execution Output" icon={Terminal} subtitle="Real-time tool logs">
-                   <pre className="terminal-output" style={{ height: '350px' }}>{simOutput || 'Awaiting simulation trigger...'}</pre>
+                <GlassCard title="Execution Console" icon={Terminal} subtitle="Tool standard output (STDOUT/STDERR)">
+                   <pre className="terminal-output" style={{ height: '400px' }}>{simOutput || 'Awaiting simulation initialization...'}</pre>
                 </GlassCard>
               </div>
             </motion.div>
@@ -676,52 +848,52 @@ function App() {
 
           {activeTab === 'eval' && (
             <motion.div key="eval" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '2rem' }}>
-                <GlassCard title="Evaluation Lab" icon={Fingerprint} subtitle="Validate datasets against engine">
-                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Upload a CSV dataset with standard features to run batch inference and generate performance metrics.</p>
-                      <div style={{ border: '2px dashed var(--border)', borderRadius: '16px', padding: '2rem', textAlign: 'center' }}>
-                        <Upload size={32} className="text-muted" style={{ margin: '0 auto 1rem' }} />
-                        <label className="btn btn-secondary" style={{ display: 'inline-flex', margin: '0 auto' }}>
-                          CHOOSE CSV FILE
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
+                <GlassCard title="Model Evaluation" icon={Fingerprint} subtitle="Offline dataset validation">
+                   <div className="content-stack">
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Upload forensic CSV data to validate model performance against historical labels.</p>
+                      <div style={{ border: '2px dashed var(--border)', borderRadius: '20px', padding: '3rem', textAlign: 'center', background: 'rgba(255,255,255,0.01)' }}>
+                        <Upload size={32} className="text-muted" style={{ margin: '0 auto 1.5rem' }} />
+                        <label className="btn btn-primary" style={{ display: 'inline-flex', margin: '0 auto' }}>
+                          CHOOSE CSV DATASET
                           <input type="file" hidden onChange={handleFileUpload} accept=".csv" />
                         </label>
-                        {evaluating && <p style={{ marginTop: '1rem', fontSize: '0.7rem' }}>Processing batch inference...</p>}
+                        {evaluating && <p style={{ marginTop: '1rem', fontSize: '0.7rem', color: 'var(--primary)' }} className="pulse-fast">ANALYZING FEATURES...</p>}
                       </div>
                    </div>
                 </GlassCard>
-                <GlassCard title="Performance Report" icon={BarChart3} subtitle="Model validation results">
+                <GlassCard title="Validation Metrics" icon={BarChart3} subtitle="F1-Score, Accuracy, and Confusion Matrix">
                    {evalResult ? (
                      <div className="content-stack">
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '12px', textAlign: 'center' }}>
-                            <div className="stat-label">Accuracy</div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 900, color: 'var(--primary)' }}>{(evalResult.summary?.accuracy * 100).toFixed(1)}%</div>
+                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
+                            <div className="stat-label">Engine Accuracy</div>
+                            <div style={{ fontSize: '1.5rem', fontWeight: 900, color: 'var(--primary)', fontFamily: 'var(--font-mono)' }}>{(evalResult.summary?.accuracy * 100).toFixed(1)}%</div>
                           </div>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '12px', textAlign: 'center' }}>
-                            <div className="stat-label">Total Samples</div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 900 }}>{evalResult.summary?.total_samples}</div>
+                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
+                            <div className="stat-label">Samples</div>
+                            <div style={{ fontSize: '1.5rem', fontWeight: 900, fontFamily: 'var(--font-mono)' }}>{evalResult.summary?.total_samples}</div>
                           </div>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '12px', textAlign: 'center' }}>
-                            <div className="stat-label">Version</div>
-                            <div style={{ fontSize: '1rem', fontWeight: 900, marginTop: '8px' }}>{evalResult.summary?.model_version}</div>
+                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
+                            <div className="stat-label">Model Hash</div>
+                            <div style={{ fontSize: '0.7rem', fontWeight: 800, marginTop: '8px', opacity: 0.5 }}>{evalResult.summary?.model_version || 'SHA-256-UNK'}</div>
                           </div>
                         </div>
-                        <div style={{ height: '200px' }}>
+                        <div style={{ height: '250px' }}>
                           <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={Object.entries(evalResult.metrics || {}).filter(([k]) => ['attack', 'normal', 'suspicious'].includes(k)).map(([name, m]) => ({ name, f1: m.f1_score || m['f1-score'] }))}>
                               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
                               <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={10} />
                               <YAxis stroke="var(--text-muted)" fontSize={10} />
-                              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)' }} />
-                              <Bar dataKey="f1" fill="var(--primary)" radius={[4, 4, 0, 0]} />
+                              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '8px' }} />
+                              <Bar dataKey="f1" fill="var(--primary)" radius={[6, 6, 0, 0]} />
                             </BarChart>
                           </ResponsiveContainer>
                         </div>
                      </div>
                    ) : (
-                     <div style={{ height: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.2 }}>
-                        <BarChart3 size={48} />
+                     <div style={{ height: '350px', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.1 }}>
+                        <BarChart3 size={64} />
                      </div>
                    )}
                 </GlassCard>
@@ -731,121 +903,127 @@ function App() {
 
           {activeTab === 'settings' && (
             <motion.div key="settings" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
-                <GlassCard title="ML Engine Control" icon={Cpu} subtitle="Neural inference configuration">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+                <GlassCard title="Neural Engine Control" icon={Cpu} subtitle="Hot-swappable inference models and scalers">
                    <div className="content-stack">
-                      <div className="input-group">
+                      <div>
                         <label className="stat-label">Active Neural Model (.onnx)</label>
                         <select className="input-field" value={activeModel} onChange={e => setActiveModel(e.target.value)}>
                           {models.map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                       </div>
-                      <div className="input-group">
+                      <div>
                         <label className="stat-label">Feature Scaler (.pkl)</label>
                         <select className="input-field" value={activeScaler} onChange={e => setActiveScaler(e.target.value)}>
                           {scalers.map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
                       </div>
-                      <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
+                      <div style={{ marginTop: '1rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border)' }}>
                         <button className="btn btn-primary" style={{ width: '100%' }} onClick={swapModel} disabled={swapping}>
-                          {swapping ? <RefreshCcw className="animate-spin" size={16} /> : 'APPLY ENGINE CONFIG'}
+                          {swapping ? <RefreshCcw className="animate-spin" size={16} /> : <Save size={16} />} APPLY ENGINE CONFIG
                         </button>
                         {saveStatus && (
-                          <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '8px', background: saveStatus.type === 'success' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(244, 63, 94, 0.1)', color: saveStatus.type === 'success' ? 'var(--success)' : 'var(--danger)', fontSize: '0.7rem', fontWeight: 800 }}>
+                          <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '12px', background: saveStatus.type === 'success' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(244, 63, 94, 0.1)', color: saveStatus.type === 'success' ? 'var(--success)' : 'var(--danger)', fontSize: '0.75rem', fontWeight: 800, textAlign: 'center' }}>
                             {saveStatus.msg}
                           </div>
                         )}
                       </div>
                    </div>
                 </GlassCard>
-                <GlassCard title="Forensic Retention" icon={HardDrive} subtitle="Storage & Logging policy">
+                <GlassCard title="Forensic Retention" icon={HardDrive} subtitle="Storage limits and PCAP logging policy">
                    <div className="content-stack">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
                         <span className="stat-label">PCAP Recording</span>
-                        <Badge variant={health?.pcap?.enabled ? 'success' : 'muted'}>{health?.pcap?.enabled ? 'ENABLED' : 'DISABLED'}</Badge>
+                        <Badge variant={health?.pcap?.enabled ? 'success' : 'muted'}>{health?.pcap?.enabled ? 'ACTIVE' : 'INACTIVE'}</Badge>
                       </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span className="stat-label">Storage Used</span>
-                        <span style={{ fontWeight: 800 }}>{health?.pcap?.storage_used_mb?.toFixed(2) || 0} MB</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                        <span className="stat-label">Forensic Storage</span>
+                        <span style={{ fontWeight: 900, fontFamily: 'var(--font-mono)', color: 'var(--primary)' }}>{health?.pcap?.storage_used_mb?.toFixed(2) || 0} MB</span>
                       </div>
-                      <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>Forensic buffers are automatically pruned when storage exceeds 2GB or records are older than 7 days.</p>
+                      <div style={{ padding: '1rem', borderRadius: '12px', background: 'rgba(56, 189, 248, 0.05)', border: '1px solid var(--primary-glow)' }}>
+                        <div style={{ display: 'flex', gap: '8px', color: 'var(--primary)', marginBottom: '8px' }}><Info size={14} /> <span style={{ fontSize: '0.65rem', fontWeight: 900 }}>RETENTION POLICY</span></div>
+                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>Forensic buffers are pruned when storage exceeds 2.0GB or records exceed 168 hours of age. Emergency purging is active.</p>
+                      </div>
                    </div>
                 </GlassCard>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
+
+        <footer style={{ marginTop: '4rem', padding: '1.5rem 0', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', opacity: 0.3, fontSize: '0.65rem', fontWeight: 800 }}>
+          <span>SENTINEL CORE v3.1.2-STABLE // BUILD_ID: 2026.05.03</span>
+          <span>© 2026 SENTINEL DEFENSE SYSTEMS</span>
+        </footer>
       </main>
 
       {/* --- Node Intelligence Side Panel --- */}
       <AnimatePresence>
         {selectedIp && (
           <>
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedIp(null)} className="overlay-blur" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', zIndex: 1000 }} />
-            <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 25, stiffness: 200 }} className="side-panel glass" style={{ position: 'fixed', top: 0, right: 0, width: '480px', height: '100vh', zIndex: 1001, padding: '2.5rem', overflowY: 'auto' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2.5rem' }}>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedIp(null)} className="overlay-blur" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000 }} />
+            <motion.div initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 25, stiffness: 200 }} className="side-panel glass" style={{ position: 'fixed', top: 0, right: 0, width: '500px', height: '100vh', zIndex: 1001, padding: '2.5rem', overflowY: 'auto' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '3rem' }}>
                  <div>
-                   <h2 className="gradient-text" style={{ fontSize: '1.5rem', fontWeight: 900 }}>Node Intelligence</h2>
-                   <p className="ip-address" style={{ fontSize: '1rem', marginTop: '4px' }}>{selectedIp}</p>
+                   <span style={{ fontSize: '0.6rem', fontWeight: 800, color: 'var(--text-muted)', letterSpacing: '0.2em', textTransform: 'uppercase' }}>Intelligence Report</span>
+                   <h2 className="gradient-text" style={{ fontSize: '1.75rem', fontWeight: 900, marginBottom: '8px' }}>Node Analysis</h2>
+                   <CompactIP ip={selectedIp} />
                  </div>
                  <button onClick={() => setSelectedIp(null)} className="btn-icon"><X size={24} /></button>
               </div>
 
               {loadingIntel ? (
-                <div style={{ height: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><RefreshCcw className="animate-spin" size={32} /></div>
+                <div style={{ height: '400px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><RefreshCcw className="animate-spin text-primary" size={48} /></div>
               ) : nodeIntel ? (
                 <div className="content-stack">
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '16px', border: '1px solid var(--border)' }}>
-                      <div className="stat-label">Reputation</div>
-                      <div style={{ fontSize: '1.75rem', fontWeight: 900, color: (nodeIntel.reputation_score || 0) > 60 ? 'var(--danger)' : 'var(--success)' }}>{nodeIntel.reputation_score || 0}/100</div>
+                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '20px', border: '1px solid var(--border)' }}>
+                      <div className="stat-label" style={{ marginBottom: '8px' }}>Risk Score</div>
+                      <div style={{ fontSize: '2rem', fontWeight: 900, color: (nodeIntel.reputation_score || 0) > 60 ? 'var(--danger)' : 'var(--success)', fontFamily: 'var(--font-mono)' }}>{nodeIntel.reputation_score || 0}%</div>
                     </div>
-                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '16px', border: '1px solid var(--border)' }}>
-                      <div className="stat-label">Alert Count</div>
-                      <div style={{ fontSize: '1.75rem', fontWeight: 900 }}>{nodeIntel.alert_count || 0}</div>
+                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '20px', border: '1px solid var(--border)' }}>
+                      <div className="stat-label" style={{ marginBottom: '8px' }}>Observations</div>
+                      <div style={{ fontSize: '2rem', fontWeight: 900, fontFamily: 'var(--font-mono)' }}>{nodeIntel.alert_count || 0}</div>
                     </div>
                   </div>
 
-                  <div style={{ height: '200px', background: 'rgba(0,0,0,0.2)', borderRadius: '16px', padding: '1rem' }}>
-                    <div className="stat-label" style={{ marginBottom: '1rem' }}>Verdict Distribution</div>
+                  <div style={{ height: '220px', background: 'rgba(0,0,0,0.2)', borderRadius: '20px', padding: '1.5rem', border: '1px solid var(--border)' }}>
+                    <div className="stat-label" style={{ marginBottom: '1.5rem' }}>Verdict Distribution</div>
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
-                        <Pie data={Object.entries(nodeIntel.predictions || {}).map(([name, value]) => ({ name, value }))} cx="50%" cy="50%" innerRadius={40} outerRadius={60} paddingAngle={5} dataKey="value">
+                        <Pie data={Object.entries(nodeIntel.predictions || {}).map(([name, value]) => ({ name, value }))} cx="50%" cy="50%" innerRadius={45} outerRadius={65} paddingAngle={8} dataKey="value">
                           {Object.entries(nodeIntel.predictions || {}).map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
                         </Pie>
-                        <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)' }} />
+                        <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '12px' }} />
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
 
-                  <GlassCard title="Top Signatures" icon={Target}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {nodeIntel.top_signatures?.slice(0, 3).map((sig, idx) => (
-                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}>
-                          <span className="text-muted" style={{ maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sig[0]}</span>
-                          <span style={{ fontWeight: 800 }}>{sig[1]}</span>
+                  <GlassCard title="Top Identified Signatures" icon={Target}>
+                    <div className="content-stack">
+                      {nodeIntel.top_signatures?.slice(0, 4).map((sig, idx) => (
+                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span className="text-muted" style={{ fontSize: '0.75rem', fontWeight: 700, maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sig[0]}</span>
+                          <span style={{ fontWeight: 900, fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontSize: '0.8rem' }}>{sig[1]}</span>
                         </div>
-                      )) || <p style={{ opacity: 0.5, fontSize: '0.7rem' }}>No signatures recorded.</p>}
+                      )) || <p style={{ opacity: 0.5, fontSize: '0.75rem', textAlign: 'center', padding: '1rem' }}>No forensic signatures recorded.</p>}
                     </div>
                   </GlassCard>
 
-                  <div style={{ display: 'flex', gap: '1rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
                     {nodeIntel.is_mitigated ? (
-                      <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => blockAction(selectedIp, 'unblock')}>WHITELIST NODE</button>
+                      <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => blockAction(selectedIp, 'unblock')}><Unlock size={16} /> WHITELIST</button>
                     ) : (
-                      <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => blockAction(selectedIp, 'block')}>BLOCK HOST</button>
+                      <button className="btn btn-danger" style={{ width: '100%' }} onClick={() => blockAction(selectedIp, 'block')}><Shield size={16} /> BLOCK HOST</button>
                     )}
+                    <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => downloadPcap('latest')}><FileText size={16} /> DOWNLOAD PCAP</button>
                   </div>
                 </div>
-              ) : <p>Error loading intel.</p>}
+              ) : <div style={{ textAlign: 'center', padding: '3rem', opacity: 0.5 }}><History size={48} style={{ margin: '0 auto 1rem' }} /><p>Error retrieving forensic data.</p></div>}
             </motion.div>
           </>
         )}
       </AnimatePresence>
-
-      <footer style={{ marginTop: '3rem', padding: '1.5rem 0', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', opacity: 0.4, fontSize: '0.7rem' }}>
-        <span>SENTINEL CORE HYBRID v3.1.2-STABLE</span><span>© 2026 SENTINEL DEFENSE SYSTEMS</span>
-      </footer>
     </div>
   );
 }

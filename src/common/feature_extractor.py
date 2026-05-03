@@ -68,7 +68,7 @@ def load_feature_names(features_path: str | Path = None) -> list:
 
     try:
         if not features_path.exists():
-            logger.warning(f"features.json not found at {features_path}. Using default 77 features.")
+            logger.warning(f"features.json not found at {features_path}. Using default features.")
             _CACHED_FEATURES = DEFAULT_FEATURES
             return DEFAULT_FEATURES
 
@@ -80,10 +80,7 @@ def load_feature_names(features_path: str | Path = None) -> list:
             _CACHED_FEATURES = DEFAULT_FEATURES
             return DEFAULT_FEATURES
         
-        if len(features) != 77:
-            logger.error(f"Expected 77 features, but got {len(features)}. Mismatch may cause model failure.")
-            # We still return it, but validate_feature_vector will catch it later if it's strictly enforced
-        
+        logger.info(f"Loaded {len(features)} feature names from {features_path.name}")
         _CACHED_FEATURES = features
         return features
     except (json.JSONDecodeError, PermissionError) as e:
@@ -266,6 +263,7 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
 
     # ===== BUILD FEATURE DICTIONARY (77 FEATURES) =====
     feature_dict = {
+        # --- Standard CICIDS Names (77 Set) ---
         "Protocol": protocol_num,
         "Flow Duration": flow_age_us,
         "Total Fwd Packets": fwd_pkts,
@@ -273,11 +271,11 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         "Fwd Packets Length Total": fwd_bytes,
         "Bwd Packets Length Total": bwd_bytes,
         "Fwd Packet Length Max": fwd_avg_pkt_len,
-        "Fwd Packet Length Min": fwd_avg_pkt_len * 0.8, # Estimated
+        "Fwd Packet Length Min": fwd_avg_pkt_len * 0.8,
         "Fwd Packet Length Mean": fwd_avg_pkt_len,
         "Fwd Packet Length Std": fwd_pkt_len_std,
         "Bwd Packet Length Max": bwd_avg_pkt_len,
-        "Bwd Packet Length Min": bwd_avg_pkt_len * 0.8, # Estimated
+        "Bwd Packet Length Min": bwd_avg_pkt_len * 0.8,
         "Bwd Packet Length Mean": bwd_avg_pkt_len,
         "Bwd Packet Length Std": bwd_pkt_len_std,
         "Flow Bytes/s": flow_bytes_per_sec,
@@ -321,12 +319,6 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         "Avg Packet Size": avg_packet_size,
         "Avg Fwd Segment Size": avg_fwd_segment_size,
         "Avg Bwd Segment Size": avg_bwd_segment_size,
-        "Fwd Avg Bytes/Bulk": 0.0,
-        "Fwd Avg Packets/Bulk": 0.0,
-        "Fwd Avg Bulk Rate": 0.0,
-        "Bwd Avg Bytes/Bulk": 0.0,
-        "Bwd Avg Packets/Bulk": 0.0,
-        "Bwd Avg Bulk Rate": 0.0,
         "Subflow Fwd Packets": subflow_fwd_packets,
         "Subflow Fwd Bytes": subflow_fwd_bytes,
         "Subflow Bwd Packets": subflow_bwd_packets,
@@ -343,6 +335,24 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         "Idle Std": idle_std,
         "Idle Max": idle_max,
         "Idle Min": idle_min,
+
+        # --- Model v4 Shortened Names (16 Set) ---
+        "flow_dur": flow_age_us,
+        "fwd_pkts": fwd_pkts,
+        "bwd_pkts": bwd_pkts,
+        "fwd_bytes": fwd_bytes,
+        "bwd_bytes": bwd_bytes,
+        "fwd_len_max": fwd_avg_pkt_len,
+        "bwd_len_max": bwd_avg_pkt_len,
+        "fwd_len_mean": fwd_avg_pkt_len,
+        "bwd_len_mean": bwd_avg_pkt_len,
+        "fwd_len_std": fwd_pkt_len_std,
+        "bwd_len_std": bwd_pkt_len_std,
+        "pkts_per_sec": flow_pkts_per_sec,
+        "ack_flag": ack_flag_count,
+        "psh_flag": psh_flag_count,
+        "header_fwd": fwd_header_length,
+        "header_bwd": bwd_header_length,
     }
     
     # ===== BUILD FEATURE VECTOR IN EXACT ORDER =====

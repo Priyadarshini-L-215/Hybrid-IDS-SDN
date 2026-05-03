@@ -71,7 +71,7 @@ class DecisionEngine:
         # 3. Categorization
         if normalized_score >= self.thresholds["attack"]:
             classification = "attack"
-        elif normalized_score >= self.thresholds.get("anomaly", 0.05):
+        elif normalized_score >= self.thresholds.get("anomaly", 0.6):
             # VAE-driven: uncertain RF + high reconstruction error = unknown/zero-day
             classification = "anomaly"
         elif normalized_score >= self.thresholds["suspicious"]:

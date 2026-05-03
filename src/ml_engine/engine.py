@@ -16,11 +16,16 @@ except ImportError:
     ONNX_AVAILABLE = False
 
 import shap
+import warnings
+# Suppress sklearn feature name warnings (we use numpy for performance)
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+
 from common.config import (
     RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, 
     MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
     ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE,
-    ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES
+    ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES,
+    get_cfg
 )
 from common.feature_extractor import extract_features_batch, load_feature_names, validate_feature_vector
 from ml_engine.decision_engine import DecisionEngine
@@ -83,16 +88,21 @@ class MLEngine:
                 ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
             )
             
-            # Update Decision Engine
-            self.decision_engine.weights = {
-                "signature": ML_WEIGHT_SIG,
-                "ml": ML_WEIGHT_RF,
-                "anomaly": ML_WEIGHT_AE
-            }
-            self.decision_engine.thresholds = {
-                "attack": ML_THRESHOLD_ATTACK,
-                "suspicious": ML_THRESHOLD_SUSPICIOUS
-            }
+            # Update Decision Engine (re-instantiate to ensure thresholds are clean)
+            from ml_engine.decision_engine import DecisionEngine
+            self.decision_engine = DecisionEngine(
+                weights={
+                    "signature": ML_WEIGHT_SIG,
+                    "ml": ML_WEIGHT_RF,
+                    "anomaly": ML_WEIGHT_AE,
+                    "cti": 0.8
+                },
+                thresholds={
+                    "attack": ML_THRESHOLD_ATTACK,
+                    "suspicious": ML_THRESHOLD_SUSPICIOUS,
+                    "anomaly": get_cfg("detection.decision_engine.thresholds.anomaly", 0.6)
+                }
+            )
             
             # Update Anomaly Scorer
             if hasattr(self, 'anomaly_scorer'):
