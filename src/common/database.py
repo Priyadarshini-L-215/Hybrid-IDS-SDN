@@ -230,11 +230,8 @@ class DatabaseHandler:
                     query += " AND lower(prediction) = ?"
                     params.append(filter_type.lower())
             
-            # Order by: alert events first (event_type='alert'), then by timestamp DESC
             query += """
-            ORDER BY 
-                CASE WHEN event_type = 'alert' THEN 0 ELSE 1 END,
-                timestamp DESC
+            ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
             """
             params.append(limit)
@@ -424,16 +421,21 @@ class DatabaseHandler:
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation'")
-            total = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation' AND lower(prediction) IN ('attack', 'suspicious', 'anomaly', 'zero-day anomaly')")
-            attacks = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM alerts WHERE lower(category) != 'attack simulation' AND lower(prediction) = 'normal'")
-            normal = cursor.fetchone()[0]
+            query = """
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN lower(prediction) IN ('attack', 'suspicious', 'anomaly', 'zero-day anomaly') THEN 1 ELSE 0 END) as attacks,
+                    SUM(CASE WHEN lower(prediction) = 'normal' THEN 1 ELSE 0 END) as normal
+                FROM alerts 
+                WHERE lower(category) != 'attack simulation'
+            """
+            cursor.execute(query)
+            row = cursor.fetchone()
+            
             return {
-                "total_processed": total,
-                "attack_total": attacks,
-                "normal_total": normal
+                "total_processed": row['total'] or 0,
+                "attack_total": row['attacks'] or 0,
+                "normal_total": row['normal'] or 0
             }
         except sqlite3.Error as e:
             logger.error(f"Stats query failed: {e}")
@@ -463,6 +465,6 @@ def query_alerts(limit=100, filter_type=None, offset=0): return _get_handler().q
 def get_recent_alerts(limit=100): return _get_handler().query_alerts(limit)
 def get_stats(): return _get_handler().get_stats()
 def get_ip_forensics(ip): return _get_handler().get_ip_forensics(ip)
-def find_similar_ips(ip): return _get_handler().find_similar_ips(ip)
+def find_similar_ips(ip, limit=5): return _get_handler().find_similar_ips(ip, limit)
 def add_false_positive(alert_id): return _get_handler().add_false_positive(alert_id)
 db = _get_handler()

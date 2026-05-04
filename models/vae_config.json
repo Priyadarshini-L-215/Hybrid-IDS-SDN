@@ -1,7 +1,7 @@
 {
     "threshold": 0.3,
     "latent_dim": 16,
-    "input_dim": 16,
-    "model_type": "vae_pytorch",
-    "last_updated": "2026-05-03"
+    "input_dim": 49,
+    "model_type": "vae_keras",
+    "last_updated": "2026-05-04"
 }

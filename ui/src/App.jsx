@@ -117,7 +117,12 @@ function App() {
   const [health, setHealth] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [stats, setStats] = useState({ processed_total: 0, attacks: 0, normal: 0 });
-  const [chartData, setChartData] = useState([]);
+  const [chartData, setChartData] = useState(
+    Array.from({ length: 30 }, (_, i) => {
+      const d = new Date(Date.now() - (29 - i) * 2000);
+      return { time: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }), normal: 0, attacks: 0 };
+    })
+  );
   const [latency, setLatency] = useState(0);
   const [expandedRow, setExpandedRow] = useState(null);
 
@@ -126,7 +131,7 @@ function App() {
   const [saveStatus, setSaveStatus] = useState(null);
 
   // Simulation
-  const [scanTarget, setScanTarget] = useState('127.0.0.1');
+  const [scanTarget, setScanTarget] = useState('');
   const [scanProfile, setScanProfile] = useState('quick');
   const [simulating, setSimulating] = useState(false);
   const [simOutput, setSimOutput] = useState('');
@@ -233,7 +238,12 @@ function App() {
   const fetchStatus = async () => {
     try {
       const res = await fetch('/api/pipeline/status');
-      setHealth(await res.json());
+      const data = await res.json();
+      setHealth(data);
+      if (data.stats) {
+        setStats(data.stats);
+        statsRef.current = data.stats;
+      }
     } catch (e) { console.error("Status fetch failed", e); }
   };
 
@@ -245,6 +255,7 @@ function App() {
         setAlerts(data.alerts);
         setStats({ processed_total: data.total_processed, attacks: data.attack_total, normal: data.normal_total });
         statsRef.current = { processed_total: data.total_processed, attacks: data.attack_total, normal: data.normal_total };
+        lastStatsRef.current = { processed: data.total_processed, attacks: data.attack_total };
         addLog(`Alerts: Synchronized ${data.alerts.length} events from database`);
       }
     } catch (e) { console.error("Alerts fetch failed", e); }
@@ -382,18 +393,24 @@ function App() {
 
         // Update stats once per batch
         const batchStats = batch.reduce((acc, a) => {
-          const isAttack = a.prediction?.toLowerCase().includes('attack');
+          const prediction = a.prediction?.toLowerCase() || '';
+          const isAttack = prediction.includes('attack') || prediction.includes('suspicious') || prediction.includes('anomaly');
           acc.processed += 1;
           if (isAttack) acc.attacks += 1;
           else acc.normal += 1;
           return acc;
         }, { processed: 0, attacks: 0, normal: 0 });
 
-        setStats(prev => ({
-          processed_total: prev.processed_total + batchStats.processed,
-          attacks: prev.attacks + batchStats.attacks,
-          normal: prev.normal + batchStats.normal
-        }));
+        setStats(prev => {
+          const next = {
+            processed_total: prev.processed_total + batchStats.processed,
+            attacks: prev.attacks + batchStats.attacks,
+            normal: prev.normal + batchStats.normal
+          };
+          // Sync with ref for the chart interval
+          statsRef.current = next;
+          return next;
+        });
 
         if (batch[0].processing_time_ms) setLatency(batch[0].processing_time_ms);
       }
@@ -602,7 +619,8 @@ function App() {
                                           </div>
                                         </div>
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                          <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); downloadPcap(alert.event_id); }}><FileText size={14} /> PCAP</button>
+                                          <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); downloadPcap(alert.id || alert.event_id); }}><FileText size={14} /> PCAP</button>
+                                           <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }}><Fingerprint size={14} /> DEEP FORENSICS</button>
                                           {alert.is_mitigated ? (
                                             <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'unblock'); }}>WHITELIST</button>
                                           ) : (
@@ -631,7 +649,7 @@ function App() {
                             <linearGradient id="cAttack" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--danger)" stopOpacity={0.2}/><stop offset="95%" stopColor="var(--danger)" stopOpacity={0}/></linearGradient>
                           </defs>
                           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                          <XAxis dataKey="time" hide />
+                          <XAxis dataKey="time" stroke="rgba(255,255,255,0.1)" fontSize={10} tick={{fill: 'rgba(255,255,255,0.5)'}} minTickGap={20} />
                           <YAxis stroke="rgba(255,255,255,0.1)" fontSize={10} axisLine={false} tickLine={false} />
                           <Tooltip contentStyle={{ background: 'rgba(2, 6, 23, 0.95)', border: '1px solid var(--border)', borderRadius: '8px' }} />
                           <Area type="monotone" dataKey="normal" stroke="var(--success)" fill="url(#cNormal)" strokeWidth={2} isAnimationActive={false} />
@@ -999,15 +1017,38 @@ function App() {
                     </ResponsiveContainer>
                   </div>
 
-                  <GlassCard title="Top Identified Signatures" icon={Target}>
+                  <GlassCard title="Lateral Movement Risk" icon={Share2} subtitle="Nodes with similar behavioral signatures">
                     <div className="content-stack">
-                      {nodeIntel.top_signatures?.slice(0, 4).map((sig, idx) => (
-                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span className="text-muted" style={{ fontSize: '0.75rem', fontWeight: 700, maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sig[0]}</span>
-                          <span style={{ fontWeight: 900, fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontSize: '0.8rem' }}>{sig[1]}</span>
-                        </div>
-                      )) || <p style={{ opacity: 0.5, fontSize: '0.75rem', textAlign: 'center', padding: '1rem' }}>No forensic signatures recorded.</p>}
+                      {nodeIntel.lateral_movement_risk?.length > 0 ? (
+                        nodeIntel.lateral_movement_risk.map((node, idx) => (
+                          <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(56, 189, 248, 0.05)', borderRadius: '12px', border: '1px solid rgba(56, 189, 248, 0.1)' }}>
+                            <CompactIP ip={node.src_ip} onClick={() => fetchNodeIntel(node.src_ip)} />
+                            <div style={{ display: 'flex', gap: '10px', fontSize: '0.7rem', fontWeight: 800 }}>
+                              <span className="text-primary" title="Shared Signatures">{node.shared_sigs} SIGS</span>
+                              <span className="text-muted">{node.total_alerts} ALERTS</span>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <p style={{ opacity: 0.5, fontSize: '0.7rem', textAlign: 'center' }}>No similar behavior detected.</p>
+                      )}
                     </div>
+                  </GlassCard>
+
+                  <GlassCard title="Forensic Timeline" icon={History}>
+                     <div className="timeline-mini" style={{ maxHeight: '300px', overflowY: 'auto', paddingRight: '5px' }}>
+                        {nodeIntel.recent_activity?.map((entry, idx) => (
+                          <div key={idx} className="timeline-item" style={{ borderLeft: '2px solid var(--border)', paddingLeft: '1.5rem', paddingBottom: '1.5rem', position: 'relative' }}>
+                             <div style={{ position: 'absolute', left: '-5px', top: '0', width: '8px', height: '8px', borderRadius: '50%', background: entry.prediction === 'attack' ? 'var(--danger)' : 'var(--primary)', border: '2px solid var(--bg-dark)' }} />
+                             <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 800, marginBottom: '4px' }}>{new Date(entry.timestamp).toLocaleString()}</div>
+                             <div style={{ fontSize: '0.75rem', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
+                               <span>{entry.alert_sig || 'General Traffic'}</span>
+                               <span style={{ color: entry.prediction === 'attack' ? 'var(--danger)' : 'var(--success)' }}>{entry.prediction.toUpperCase()}</span>
+                             </div>
+                             {entry.mitigation && <div style={{ fontSize: '0.65rem', marginTop: '4px', opacity: 0.7 }}>Action: <span className="text-primary">{entry.mitigation}</span></div>}
+                          </div>
+                        ))}
+                     </div>
                   </GlassCard>
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
@@ -1016,7 +1057,7 @@ function App() {
                     ) : (
                       <button className="btn btn-danger" style={{ width: '100%' }} onClick={() => blockAction(selectedIp, 'block')}><Shield size={16} /> BLOCK HOST</button>
                     )}
-                    <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => downloadPcap('latest')}><FileText size={16} /> DOWNLOAD PCAP</button>
+                    <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => downloadPcap(nodeIntel.alert_id || 'latest')}><Download size={16} /> PCAP SNIPPET</button>
                   </div>
                 </div>
               ) : <div style={{ textAlign: 'center', padding: '3rem', opacity: 0.5 }}><History size={48} style={{ margin: '0 auto 1rem' }} /><p>Error retrieving forensic data.</p></div>}

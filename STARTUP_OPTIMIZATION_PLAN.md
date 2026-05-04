@@ -1,21 +1,25 @@
 # Sentinel Core - Startup Optimization & First-Time Setup Plan
 
 **Date Created:** April 29, 2026  
-**Status:** Comprehensive Improvement Plan
+**Status:** **FULLY IMPLEMENTED** (May 3, 2026)
 
 ---
 
-## Executive Summary
+## ⚡ Implementation Status (May 2026)
 
-Your current `start.sh` and `setup.sh` are functional but have opportunities for improvement in:
-1. **Error handling & recovery** - missing checks and graceful fallbacks
-2. **Idempotency** - scripts can fail on second runs without cleanup
-3. **Dependency validation** - incomplete pre-flight checks
-4. **First-time setup safety** - needs to verify all prerequisites before continuing
-5. **Logging & diagnostics** - insufficient visibility into failures
-6. **Process management** - lack of comprehensive lifecycle control
+All critical and important phases of this optimization plan have been successfully implemented in **Sentinel Core V4**. 
 
-This plan provides production-ready improvements.
+| Phase | Status | Key Deliverables |
+|-------|--------|------------------|
+| **Phase 1: Critical** | [x] COMPLETE | `preflight.sh` validation, idempotent `setup.sh`, health checks in `start.sh` |
+| **Phase 2: Important** | [x] COMPLETE | Unified Port 3000 architecture, `config_validator.py`, structured logging |
+| **Phase 3: Production** | [x] COMPLETE | Systemd service integration (manual templates), comprehensive health dashboard |
+
+---
+
+## Executive Summary (Historical Context)
+
+This document outlines the original improvement plan designed to address legacy startup issues. These improvements are now core features of the V4 release.
 
 ---
 
@@ -475,7 +479,7 @@ chmod +x diag.sh
 
 ### Verification Steps
 - [ ] Dashboard accessible at `http://localhost:3000`
-- [ ] API responds at `http://localhost:5000/api/pipeline/status`
+- [ ] API responds at `http://localhost:3000/api/pipeline/status`
 - [ ] Redis has events flowing
 - [ ] Suricata connected to ingestion socket
 - [ ] No process crashed (check `diag.sh`)
@@ -536,7 +540,7 @@ system:
 
 network:
   ws_port: 8777
-  flask_port: 5000
+  flask_port: 3000
   redis_host: "127.0.0.1"
   redis_port: 6379
 
@@ -580,7 +584,7 @@ def health_check():
     }
 
 # In start.sh
-wait_for_service "API" "curl -s http://localhost:5000/health | jq '.status' | grep healthy" 30
+wait_for_service "API" "curl -s http://localhost:3000/health | jq '.status' | grep healthy" 30
 ```
 
 ### 6.6: Environment Isolation
@@ -654,7 +658,7 @@ test_startup() {
     kill $PID
     
     curl -s http://localhost:3000 | grep -q "Sentinel" || { echo "FAIL: Dashboard"; exit 1; }
-    curl -s http://localhost:5000/health | grep -q "healthy" || { echo "FAIL: API"; exit 1; }
+    curl -s http://localhost:3000/health | grep -q "healthy" || { echo "FAIL: API"; exit 1; }
 }
 
 test_setup && test_startup && echo "All tests passed"

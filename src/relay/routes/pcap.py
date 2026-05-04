@@ -13,34 +13,61 @@ PCAP_DIR = BASE_DIR / "data" / "pcaps"
 @router.get("/download/{event_id}")
 async def download_pcap(event_id: str):
     """
-    Extracts and downloads a PCAP snippet for a specific event.
-    Note: Requires forensics.pcap_enabled to be true in config.
+    Extracts and downloads a PCAP snippet for a specific event using tcpdump.
     """
     if not PCAP_ENABLED:
         raise HTTPException(status_code=403, detail="PCAP capture is currently disabled in configuration.")
 
-    # In a real implementation, we would use the event_id to find the flow
-    # and extract it from the master PCAP using tcpdump or tshark.
-    # For now, we look for a file matching the event_id or the latest capture.
-    
-    # 1. Ensure directory exists
-    if not PCAP_DIR.exists():
-        os.makedirs(PCAP_DIR, exist_ok=True)
-        raise HTTPException(status_code=404, detail="No PCAP captures found.")
+    from common.database import db
+    import subprocess
 
-    # 2. Search for the PCAP (Simulation: look for any pcap in the dir)
-    pcaps = [f for f in os.listdir(PCAP_DIR) if f.endswith(".pcap")]
+    # 1. Get alert metadata for extraction
+    try:
+        conn = db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT src_ip FROM alerts WHERE id = ?", (event_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert not found in database.")
+        
+        ip = row['src_ip']
+    except Exception as e:
+        logger.error("Database query failed for PCAP extraction", error=str(e))
+        raise HTTPException(status_code=500, detail="Internal database error.")
+
+    # 2. Path to master capture (assuming Suricata or system capture)
+    # Search for any .pcap in the PCAP_DIR that could be the source
+    pcaps = [f for f in os.listdir(PCAP_DIR) if f.endswith(".pcap") and not f.startswith("snippet_")]
     if not pcaps:
-        raise HTTPException(status_code=404, detail="PCAP file not yet generated for this event.")
+        raise HTTPException(status_code=404, detail="No master PCAP capture found to extract from.")
 
-    # Return the first one found for demonstration
-    target_path = PCAP_DIR / pcaps[0]
-    
-    return FileResponse(
-        path=target_path,
-        filename=f"forensic_event_{event_id}.pcap",
-        media_type="application/vnd.tcpdump.pcap"
-    )
+    master_pcap = PCAP_DIR / pcaps[0] # Use the first available capture
+    snippet_path = PCAP_DIR / f"snippet_{event_id}.pcap"
+
+    # 3. Extract using tcpdump
+    try:
+        # Run tcpdump to filter by the source IP
+        # We use -r to read and -w to write the snippet
+        # sudo might be required depending on file permissions
+        cmd = ["tcpdump", "-r", str(master_pcap), f"host {ip}", "-w", str(snippet_path)]
+        
+        # Check if we need sudo (if first attempt fails with permission error)
+        try:
+            subprocess.run(cmd, check=True, timeout=10, capture_output=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(["sudo"] + cmd, check=True, timeout=10)
+
+        if not snippet_path.exists() or snippet_path.stat().st_size == 0:
+             raise HTTPException(status_code=404, detail="No packets found for this IP in the capture.")
+
+        return FileResponse(
+            path=snippet_path,
+            filename=f"forensic_event_{event_id}.pcap",
+            media_type="application/vnd.tcpdump.pcap"
+        )
+    except Exception as e:
+        logger.error("tcpdump extraction failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to extract PCAP snippet.")
 
 @router.get("/status")
 async def get_pcap_status():

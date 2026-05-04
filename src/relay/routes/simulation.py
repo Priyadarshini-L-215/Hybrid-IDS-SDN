@@ -124,8 +124,8 @@ send(pkt, loop=1, count=1000, verbose=0)
 """
                 with open(script_path, "w") as f:
                     f.write(script_content)
-            
-            _track_process(subprocess.Popen(["python3", str(script_path), target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            import sys
+            _track_process(subprocess.Popen([sys.executable, str(script_path), target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             return {"success": True, "message": f"DDoS Simulation (Scapy) started against {target}"}
             
     except Exception as e:

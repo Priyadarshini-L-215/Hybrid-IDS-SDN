@@ -261,6 +261,14 @@ class ActiveFirewall:
     @classmethod
     def _legacy_block(cls, ip: str, ttl: int = 0):
         try:
+            # Check if IPv6 - ipset sets created in _setup_kernel_sets are IPv4 (family inet)
+            try:
+                if ipaddress.ip_address(ip).version == 6:
+                    logger.warning("Skipping IPv6 block (not yet supported by legacy backend)", ip=ip)
+                    return
+            except ValueError:
+                pass
+
             subprocess.run(["sudo", "ipset", "add", cls.SET_BLOCKS, ip, "timeout", str(ttl), "-!"], check=True)
             logger.warning("Legacy Block (ipset)", ip=ip, ttl=ttl)
         except Exception as e:
@@ -289,6 +297,16 @@ class ActiveFirewall:
         
         # Always try legacy unblock just in case
         try:
+            # Check if IPv6
+            try:
+                if ipaddress.ip_address(ip).version == 6:
+                    # Clear from Redis anyway
+                    if cls._redis_client:
+                        cls._redis_client.hdel(cls.REDIS_REPUTATION_KEY, ip)
+                    return
+            except ValueError:
+                pass
+
             subprocess.run(["sudo", "ipset", "del", cls.SET_BLOCKS, ip, "-!"], check=True)
             subprocess.run(["sudo", "ipset", "del", cls.SET_LIMITED, ip, "-!"], check=True)
             if cls._redis_client:

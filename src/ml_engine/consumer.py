@@ -20,7 +20,7 @@ setup_logging("consumer")
 logger = structlog.get_logger("consumer")
 
 _RUNNING = True
-_TARGET_FEATURE_DIM = 57
+_TARGET_FEATURE_DIM = 49
 
 
 async def broadcast_and_persist(alerts: list):

@@ -15,9 +15,9 @@ class FlowAggregator:
     """
     
     def __init__(self, 
-                 window_size: float = 10.0, 
-                 idle_timeout: float = 5.0, 
-                 max_duration: float = 30.0):
+                 window_size: float = 1.0, 
+                 idle_timeout: float = 1.0, 
+                 max_duration: float = 1.0):
         
         self.window_size = window_size
         self.idle_timeout = idle_timeout

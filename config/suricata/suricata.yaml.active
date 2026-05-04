@@ -45,6 +45,8 @@ outputs:
         - alert:
             metadata: yes
         - flow
+        - tcp:
+            extended: yes
         - http
         - dns
         - tls:
@@ -60,6 +62,8 @@ outputs:
         - alert:
             metadata: yes
         - flow
+        - tcp:
+            extended: yes
         - http
         - dns
         - tls:
@@ -76,7 +80,7 @@ outputs:
       dir: /home/preet/FYP/data/pcaps
 
 af-packet:
-  - interface: eth0
+  - interface: eth2
     cluster-id: 99
     cluster-type: cluster_flow
     defrag: yes

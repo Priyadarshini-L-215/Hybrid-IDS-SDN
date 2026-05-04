@@ -45,11 +45,17 @@ class DriftDetector:
         if self._detector is None:
             return False
 
-        self._sample_count += 1
-        # Normalize score if needed, but ADWIN handles most distributions
-        self._detector.update(score)
+        import threading
+        if not hasattr(self, "_lock"):
+            self._lock = threading.Lock()
 
-        if self._detector.drift_detected:
+        with self._lock:
+            self._sample_count += 1
+            # Normalize score if needed, but ADWIN handles most distributions
+            self._detector.update(score)
+            drift_detected = self._detector.drift_detected
+
+        if drift_detected:
             now = time.time()
             if now - self._last_drift_time > self._cooldown_sec:
                 self._last_drift_time = now

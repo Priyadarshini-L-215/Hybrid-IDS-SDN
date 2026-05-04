@@ -51,7 +51,42 @@ async def submit_feedback(feedback: AlertFeedback):
 @router.get("/trail/{alert_id}")
 async def get_forensic_trail(alert_id: str):
     """
-    Retrieves deep forensic data for a specific alert.
-    (Placeholder for future expansion)
+    Retrieves deep forensic data for a specific alert by reconstructing the IP's activity trail.
     """
-    return {"alert_id": alert_id, "status": "Forensic trail reconstruction not yet fully implemented"}
+    from common.database import db
+    try:
+        # 1. Get the alert details to find the source IP
+        conn = db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT src_ip FROM alerts WHERE id = ?", (alert_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        
+        ip = row['src_ip']
+        
+        # 2. Get full forensics for this IP
+        forensics = db.get_ip_forensics(ip)
+        if not forensics:
+            return {"alert_id": alert_id, "ip": ip, "status": "Limited forensic history"}
+            
+        # 3. Find similar IPs
+        similar_nodes = db.find_similar_ips(ip, limit=3)
+        
+        return {
+            "alert_id": alert_id,
+            "target_ip": ip,
+            "node_intelligence": {
+                "total_events": forensics.get("total_events"),
+                "first_seen": forensics.get("first_seen"),
+                "last_seen": forensics.get("last_seen"),
+                "ja3_hash": forensics.get("ja3_hash"),
+                "avg_latency": forensics.get("avg_latency_ms")
+            },
+            "timeline": forensics.get("history", []),
+            "threat_enrichment": forensics.get("cti"),
+            "lateral_movement_risk": similar_nodes
+        }
+    except Exception as e:
+        logger.error("Forensics reconstruction failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Forensic engine error")

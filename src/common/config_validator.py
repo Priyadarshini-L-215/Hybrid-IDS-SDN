@@ -43,7 +43,8 @@ class ConfigValidator:
         required_models = [
             ACTIVE_MODEL_FILE,
             ACTIVE_SCALER_FILE,
-            "vae_model.pth",
+            "vae_encoder.keras",
+            "vae_decoder.keras",
             "vae_scaler.pkl",
             "features.json"
         ]

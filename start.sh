@@ -100,18 +100,38 @@ load_config() {
     fi
 
     if ! API_PORT=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import API_PORT; print(API_PORT)" 2>/dev/null); then
-        log_warn "Could not load API_PORT from config, using default 5000"
-        API_PORT=5000
-    fi
-
-    if ! UI_PORT=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import UI_PORT; print(UI_PORT)" 2>/dev/null); then
-        log_warn "Could not load UI_PORT from config, using default 3000"
-        UI_PORT=3000
+        log_warn "Could not load API_PORT from config, using default 3000"
+        API_PORT=3000
     fi
 
     SDN_ENABLED=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import SDN_ENABLED; print(str(SDN_ENABLED).lower())" 2>/dev/null || echo "false")
 
-    log_info "Loaded config: API_PORT=$API_PORT, UI_PORT=$UI_PORT, SDN_ENABLED=$SDN_ENABLED"
+    log_info "Loaded config: API_PORT=$API_PORT, SDN_ENABLED=$SDN_ENABLED"
+}
+
+verify_models() {
+    log_info "Verifying critical model files..."
+    local missing=0
+    local critical_files=(
+        "models/rf_model.pkl"
+        "models/scaler.pkl"
+        "models/vae_encoder.keras"
+        "models/vae_decoder.keras"
+    )
+    
+    for f in "${critical_files[@]}"; do
+        if [ ! -f "$PROJECT_ROOT/$f" ]; then
+            log_warn "Missing critical model file: $f"
+            missing=$((missing + 1))
+        fi
+    done
+    
+    if [ $missing -gt 0 ]; then
+        log_warn "Some model files are missing. Inference may be degraded or fail."
+        log_info "Tip: Run ./setup.sh to synchronize models from 'new model' directory."
+    else
+        log_success "All critical model files verified"
+    fi
 }
 
 # ============================================================================
@@ -163,16 +183,21 @@ ensure_sudo_access() {
 }
 
 cleanup_stale_processes() {
-    log_info "Cleaning up stale processes..."
-    pkill -f "src/ml_engine/consumer.py" 2>/dev/null || true
-    pkill -f "src/ml_engine/ingestion.py" 2>/dev/null || true
-    pkill -f "relay.app:app" 2>/dev/null || true
-    pkill -f "uvicorn.*relay.app" 2>/dev/null || true
-    pkill -f "npm.*dev" 2>/dev/null || true
-    pkill -f "ryu-manager" 2>/dev/null || true
-    pkill -f "src/sdn/honeypot.py" 2>/dev/null || true
-    sleep 1
-    log_success "Stale processes cleaned up"
+    log_info "Cleaning up stale processes and sockets..."
+    pkill -9 -f "src/ml_engine/consumer.py" 2>/dev/null || true
+    pkill -9 -f "src/ml_engine/ingestion.py" 2>/dev/null || true
+    pkill -9 -f "relay.app:app" 2>/dev/null || true
+    pkill -9 -f "uvicorn.*relay.app" 2>/dev/null || true
+    pkill -9 -f "npm.*dev" 2>/dev/null || true
+    pkill -9 -f "ryu-manager" 2>/dev/null || true
+    pkill -9 -f "src/sdn/honeypot.py" 2>/dev/null || true
+    
+    # Cleanup stale sockets
+    sudo rm -f /tmp/sentinel_suricata.sock 2>/dev/null || true
+    sudo rm -f /tmp/suricata_sentinel.pid 2>/dev/null || true
+    
+    sleep 2
+    log_success "Cleanup complete"
 }
 
 cleanup_on_interrupt() {
@@ -302,12 +327,22 @@ start_suricata() {
 }
 
 start_consumer() {
-    log_info "Starting ML Consumer..."
+    log_info "Starting ML Consumer (Schema: 49 features)..."
     "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/consumer.py" >> "$PROJECT_ROOT/data/logs/consumer.log" 2>&1 &
     local pid=$!
     echo "consumer_pid=$pid" >> "$STATE_FILE"
-    sleep 3
-    is_process_running "consumer.py"
+    
+    # Wait for consumer heartbeat or at least confirm it stayed alive
+    log_info "Waiting for ML Engine to initialize models..."
+    sleep 5
+    
+    if is_process_running "consumer.py"; then
+        log_success "ML Consumer active (PID: $pid)"
+        return 0
+    else
+        log_error "ML Consumer failed to start. Check data/logs/consumer.log"
+        return 1
+    fi
 }
 
 start_relay() {
@@ -319,22 +354,14 @@ start_relay() {
 }
 
 start_ui() {
-    log_info "Starting Dashboard UI..."
+    log_info "Ensuring Dashboard UI is built..."
     cd "$PROJECT_ROOT/ui"
     
-    # Check if UI is built
     if [ ! -d "dist" ]; then
         log_warn "UI dist directory missing. Running npm run build..."
         npm run build || { log_error "UI build failed"; return 1; }
     fi
-
-    export VITE_BACKEND_PORT=$API_PORT
-    export VITE_PORT=$UI_PORT
-    PORT=$UI_PORT npm run dev -- --host 0.0.0.0 --port "$UI_PORT" >> "$PROJECT_ROOT/data/logs/ui.log" 2>&1 &
-    local pid=$!
     cd "$PROJECT_ROOT"
-    echo "ui_pid=$pid" >> "$STATE_FILE"
-    wait_for_condition "Dashboard UI" "nc -z 127.0.0.1 $UI_PORT" 15
 }
 
 # ============================================================================
@@ -348,17 +375,20 @@ main() {
     echo "================================================================="
     
     setup_logging
+    source_env_file
+    ensure_sudo_access
+    
+    # Start Redis first because the validator needs it
+    start_redis || exit 1
+    
+    # Ensure state file is fresh and track interrupts
+    : > "$STATE_FILE"
+    trap cleanup_on_interrupt INT TERM
+    
     activate_venv
     load_config
-    ensure_sudo_access
+    verify_models
     cleanup_stale_processes
-    trap cleanup_on_interrupt INT TERM
-
-    # Startup sequence
-    # Ensure state file is fresh
-    : > "$STATE_FILE"
-    
-    start_redis || exit 1
     start_sdn_infrastructure
     start_ryu_controller
     start_honeypot
@@ -369,7 +399,7 @@ main() {
     start_ui
 
     log_success "SENTINEL CORE IS NOW ACTIVE"
-    echo "Dashboard: http://127.0.0.1:${UI_PORT}"
+    echo "Dashboard: http://127.0.0.1:${API_PORT}"
     
     # Tail logs if interactive
     if [ -t 1 ]; then

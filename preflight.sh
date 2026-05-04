@@ -120,7 +120,14 @@ check_disk_space() {
 
 check_model_files() {
     local missing=0
-    local models=("models/autoencoder.pth" "models/rf_model.pkl" "models/features.json")
+    local models=(
+        "models/rf_model.pkl"
+        "models/scaler.pkl"
+        "models/vae_encoder.keras"
+        "models/vae_decoder.keras"
+        "models/vae_scaler.pkl"
+        "models/feature_order.json"
+    )
     
     for model in "${models[@]}"; do
         if [ -f "$model" ]; then

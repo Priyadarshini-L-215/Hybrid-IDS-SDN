@@ -2,7 +2,7 @@ from typing import Dict, Tuple, Optional
 import structlog
 from common.config import (
     ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE,
-    ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS
+    ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_THRESHOLD_ANOMALY
 )
 
 logger = structlog.get_logger(__name__)
@@ -27,7 +27,8 @@ class DecisionEngine:
         
         self.thresholds = thresholds or {
             "attack": ML_THRESHOLD_ATTACK,
-            "suspicious": ML_THRESHOLD_SUSPICIOUS
+            "suspicious": ML_THRESHOLD_SUSPICIOUS,
+            "anomaly": ML_THRESHOLD_ANOMALY
         }
         
         logger.info("Decision Engine initialized", 
@@ -38,7 +39,8 @@ class DecisionEngine:
                sig_present: bool, 
                ml_score: float, 
                anomaly_score: float,
-               cti_score: float = 0.0) -> Tuple[str, float]:
+               cti_score: float = 0.0,
+               prediction: dict = None) -> Tuple[str, float]:
         """
         Calculates final classification and confidence.
         Returns: (classification, final_score)
@@ -69,21 +71,22 @@ class DecisionEngine:
         normalized_score = weighted_sum / active_weight if active_weight > 0 else 0
 
         # 3. Categorization
-        if normalized_score >= self.thresholds["attack"]:
+        if normalized_score >= self.thresholds.get("attack", 0.85):
             classification = "attack"
-        elif normalized_score >= self.thresholds.get("anomaly", 0.6):
+        elif normalized_score >= self.thresholds.get("suspicious", 0.6):
+            classification = "suspicious"
+        elif normalized_score >= self.thresholds.get("anomaly", 0.5):
             # VAE-driven: uncertain RF + high reconstruction error = unknown/zero-day
             classification = "anomaly"
-        elif normalized_score >= self.thresholds["suspicious"]:
-            classification = "suspicious"
         else:
             classification = "normal"
 
-        logger.debug("Decision finalized", 
+        logger.info("Decision finalized", 
                      ml=ml_score, 
                      anomaly=anomaly_score, 
                      score=round(normalized_score, 4), 
-                     decision=classification)
+                     decision=classification,
+                     top_features=prediction.get("shap_top3", []) if prediction else [])
                      
         return classification, normalized_score
 
@@ -93,6 +96,9 @@ class DecisionEngine:
             return 15.0 * score
         elif classification == "suspicious":
             return 5.0 * score
+        elif classification == "anomaly":
+            # Zero-day or behavioral anomaly, treat as moderately suspicious
+            return 8.0 * score
         else:
             # Slow recovery for normal traffic
             return -0.2

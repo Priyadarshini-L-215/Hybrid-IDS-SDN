@@ -140,7 +140,8 @@ async def get_pipeline_status():
         keys = await rc.async_redis_client.keys("sentinel_heartbeat:*")
         if keys:
             consumer_ok = True
-    except Exception:
+    except Exception as e:
+        logger.debug("Heartbeat check failed", error=str(e))
         pass
 
     # 2. Check Redis Status
@@ -151,13 +152,24 @@ async def get_pipeline_status():
             await rc.async_redis_client.ping()
             redis_ok = True
             queue_depth = await rc.async_redis_client.xlen("sentinel_alerts_stream")
-        except Exception:
+        except Exception as e:
+            logger.warning("Redis health check failed", error=str(e))
             pass
+
+    # 3. Get System Stats
+    from common.database import get_stats
+    loop = asyncio.get_running_loop()
+    stats = await loop.run_in_executor(None, get_stats)
 
     return {
         "status": "active" if (consumer_ok and redis_ok) else "degraded",
         "redis_ok": redis_ok,
         "queue_depth": queue_depth,
+        "stats": {
+            "processed_total": stats.get("total_processed", 0),
+            "attacks": stats.get("attack_total", 0),
+            "normal": stats.get("normal_total", 0)
+        },
         "ipset": ActiveFirewall.get_status(),
         "ipset_detailed": ActiveFirewall.get_detailed_status(),
         "checks": {
@@ -197,10 +209,14 @@ async def get_node_intelligence(ip: str):
         except Exception as e:
             logger.debug("Failed to check blocked state", ip=ip, error=str(e))
 
+        # 2. Find similar IPs (Lateral Movement Risk)
+        from common.database import find_similar_ips
+        similar_nodes = await loop.run_in_executor(None, find_similar_ips, ip, 3)
+
         return {
             "ip": ip,
             "alert_count": forensics.get("total_events", 0),
-            "recent_activity": forensics.get("history", [])[:5],
+            "recent_activity": forensics.get("history", []),
             "reputation_score": rep_score,
             "is_mitigated": is_mitigated,
             "predictions": forensics.get("predictions", {}),
@@ -209,7 +225,8 @@ async def get_node_intelligence(ip: str):
             "cti": forensics.get("cti", {}),
             "first_seen": forensics.get("first_seen"),
             "last_seen": forensics.get("last_seen"),
-            "ja3_hash": forensics.get("ja3_hash")
+            "ja3_hash": forensics.get("ja3_hash"),
+            "lateral_movement_risk": similar_nodes
         }
     except Exception as e:
         logger.error("Failed to fetch node intelligence", ip=ip, error=str(e))

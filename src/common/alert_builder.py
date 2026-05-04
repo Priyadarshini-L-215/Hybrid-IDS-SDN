@@ -88,7 +88,8 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
             sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
 
     if event_id is None:
-        event_id = f"{event.get('timestamp')}-{event.get('flow_id', '0')}-{event.get('event_type')}"
+        raw_hash = hashlib.md5(str(event.get("raw", event)).encode()).hexdigest()[:6]
+        event_id = f"{event.get('timestamp')}-{event.get('flow_id', '0')}-{event.get('event_type')}-{raw_hash}"
 
     normalized_sig = normalize_signature(sig)
 

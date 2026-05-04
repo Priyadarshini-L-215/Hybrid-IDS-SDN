@@ -18,6 +18,7 @@ from common.config import (
 from ml_engine import redis_client as rc
 from relay.ws_manager import ConnectionManager
 from ml_engine.engine import MLEngine
+from ml_engine.firewall import ActiveFirewall
 
 # Import routers
 from relay.routes import system, simulation, forensics, models, lab, pcap

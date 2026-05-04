@@ -1,25 +1,30 @@
 {
-  "model_version": "v4.1.0",
-  "architecture": "Hybrid: CalibratedClassifierCV(RF) + VAE",
-  "trained_on": "Hybrid Manifold Schema (CICIDS+UNSW+NSLKDD)",
-  "last_updated": "2026-05-03",
-  "features_count": 16,
-  "components": {
-    "rf": {
-      "file": "model_v4.pkl",
-      "type": "CalibratedClassifierCV(RandomForest)",
-      "threshold": 0.153
+    "model_name": "Sentinel Core V4",
+    "version": "4.0.0",
+    "architecture": "Calibrated Random Forest",
+    "manifold_features": [
+        "flow_dur",
+        "fwd_pkts",
+        "bwd_pkts",
+        "fwd_bytes",
+        "bwd_bytes",
+        "fwd_len_max",
+        "bwd_len_max",
+        "fwd_len_mean",
+        "bwd_len_mean",
+        "fwd_len_std",
+        "bwd_len_std",
+        "pkts_per_sec",
+        "ack_flag",
+        "psh_flag",
+        "header_fwd",
+        "header_bwd"
+    ],
+    "thresholds": {
+        "CIC-IDS": 0.008,
+        "UNSW-NB15": 0.013,
+        "NSL-KDD": 0.422,
+        "default": 0.153
     },
-    "vae": {
-      "file": "vae_model.pth",
-      "scaler": "vae_scaler.pkl",
-      "type": "PyTorch VAE (16-dim latent)",
-      "threshold": 0.0283,
-      "trigger": "rf_score < 0.153"
-    }
-  },
-  "metrics": {
-    "rf_accuracy": 0.992,
-    "rf_f1": 0.985
-  }
+    "preprocessing": "PowerTransformer (Yeo-Johnson)"
 }

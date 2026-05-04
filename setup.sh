@@ -102,6 +102,10 @@ setup_system_packages() {
         "software-properties-common"
         "openvswitch-switch"
         "hping3"
+        "tcpdump"
+        "libgeoip-dev"
+        "geoip-bin"
+        "libsqlite3-dev"
     )
 
     # Check which packages are missing
@@ -357,7 +361,42 @@ setup_suricata_rules() {
         log_warn "suricata-update not found, skipping rule update"
     fi
 
-    mark_complete "suricata_rules"
+mark_complete "suricata_rules"
+}
+
+setup_model_files() {
+    if is_complete "model_files"; then
+        log_info "Model files already synchronized (skipping)"
+        return 0
+    fi
+
+    log_info "Synchronizing model files for 49-feature schema..."
+    
+    mkdir -p "$PROJECT_ROOT/models"
+    
+    # Check if 'new model' directory exists and has files
+    if [ -d "$PROJECT_ROOT/new model" ]; then
+        log_info "Found updated models in 'new model' directory. Synchronizing..."
+        
+        # Files to sync from 'new model'
+        local files_to_sync=("rf_model.pkl" "scaler.pkl" "feature_order.pkl" "le_proto.pkl")
+        
+        for file in "${files_to_sync[@]}"; do
+            if [ -f "$PROJECT_ROOT/new model/$file" ]; then
+                log_info "Copying $file to models/..."
+                cp "$PROJECT_ROOT/new model/$file" "$PROJECT_ROOT/models/$file"
+            fi
+        done
+    fi
+
+    # Ensure other required V4 files are present (if they exist in models/ backup or similar)
+    # This is a good place to ensure feature_order.json is present
+    if [ ! -f "$PROJECT_ROOT/models/feature_order.json" ] && [ -f "$PROJECT_ROOT/models/feature_names_v4.json" ]; then
+        log_info "Creating feature_order.json from v4 names..."
+        cp "$PROJECT_ROOT/models/feature_names_v4.json" "$PROJECT_ROOT/models/feature_order.json"
+    fi
+
+    mark_complete "model_files"
 }
 
 setup_services() {
@@ -395,14 +434,12 @@ PROJECT_ROOT=$PROJECT_ROOT
 PYTHONPATH=\$PROJECT_ROOT/src
 VENV_PATH=\$PROJECT_ROOT/.venv
 LOG_DIR=\$PROJECT_ROOT/data/logs
-API_PORT=5000
-UI_PORT=3000
+API_PORT=3000
 WS_PORT=8777
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
-
-# Optional: Override defaults
-# FLASK_PORT=5000
+LOG_LEVEL=INFO
+MODEL_VERSION=v4.0
 EOF
 
     log_success "Created .env file at $PROJECT_ROOT/.env"
@@ -481,6 +518,7 @@ main() {
     setup_ui_dependencies || { log_error "UI dependencies setup failed"; exit 1; }
     setup_suricata_config || { log_error "Suricata configuration failed"; exit 1; }
     setup_suricata_rules
+    setup_model_files || { log_error "Model file synchronization failed"; exit 1; }
     setup_services || { log_error "Service setup failed"; exit 1; }
     setup_logrotate
     create_env_file

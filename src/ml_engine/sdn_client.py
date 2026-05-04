@@ -10,7 +10,10 @@ logger = structlog.get_logger(__name__)
 class SDNClient:
     """SDN Mitigation Client — communicates with Ryu Controller via REST."""
 
-    def __init__(self, controller_url: str = "http://127.0.0.1:8080"):
+    def __init__(self, controller_url: Optional[str] = None):
+        from common.config import SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT
+        if controller_url is None:
+            controller_url = f"http://{SDN_CONTROLLER_HOST}:{SDN_CONTROLLER_PORT}"
         self.base_url = controller_url.rstrip('/')
         self.api_url = f"{self.base_url}/sdn"
         self._client = httpx.AsyncClient(timeout=5.0)

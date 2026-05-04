@@ -25,6 +25,7 @@ from common.config import (
     MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
     ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE,
     ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES,
+    AUTOENCODER_THRESHOLD,
     get_cfg
 )
 from common.feature_extractor import extract_features_batch, load_feature_names, validate_feature_vector
@@ -57,8 +58,8 @@ class MLEngine:
             min_samples=ANOMALY_MIN_SAMPLES
         )
         self.shap_explainer = None
-        self.vae_detector = None  # Stage 3: PyTorch VAE anomaly detector
-        self.vae_threshold = 0.0283  # Default; overridden by vae_config.json
+        self.vae_detector = None  # Stage 3: Keras VAE anomaly detector
+        self.vae_threshold = AUTOENCODER_THRESHOLD
         
         self._load_metadata()
         self._load_models()
@@ -147,29 +148,36 @@ class MLEngine:
                 self.rf_session = None
                 logger.info("Pkl RF Model loaded", path=str(model_path))
 
-            # 4. Load VAE Anomaly Detector (Stage 3 — PyTorch)
-            vae_model_path = MODELS_DIR / "vae_model.pth"
+            # 4. Load VAE Anomaly Detector (Stage 3 — Keras)
+            vae_encoder_path = MODELS_DIR / "vae_encoder.keras"
+            vae_decoder_path = MODELS_DIR / "vae_decoder.keras"
             vae_scaler_path = MODELS_DIR / "vae_scaler.pkl"
             vae_config_path = MODELS_DIR / "vae_config.json"
-            if vae_model_path.exists() and vae_scaler_path.exists():
+            
+            if vae_encoder_path.exists() and vae_decoder_path.exists() and vae_scaler_path.exists():
                 if vae_config_path.exists():
-                    with open(vae_config_path) as f:
-                        vae_cfg = json.load(f)
-                    self.vae_threshold = vae_cfg.get("threshold", self.vae_threshold)
+                    try:
+                        with open(vae_config_path) as f:
+                            vae_cfg = json.load(f)
+                        self.vae_threshold = vae_cfg.get("threshold", self.vae_threshold)
+                    except Exception as e:
+                        logger.warning("Failed to load vae_config.json", error=str(e))
+
                 self.vae_detector = VaeAnomalyDetector(
-                    model_path=vae_model_path,
+                    encoder_path=vae_encoder_path,
+                    decoder_path=vae_decoder_path,
                     scaler_path=vae_scaler_path,
                     threshold=self.vae_threshold,
                 )
                 if self.vae_detector.is_ready:
-                    logger.info("VAE Anomaly Detector loaded",
+                    logger.info("VAE Anomaly Detector loaded (Keras)",
                                 threshold=self.vae_threshold,
-                                path=str(vae_model_path))
+                                encoder=str(vae_encoder_path))
                 else:
                     logger.warning("VAE Detector failed to initialise; anomaly detection disabled")
                     self.vae_detector = None
             else:
-                logger.warning("VAE model files not found; anomaly detection disabled")
+                logger.warning("VAE Keras model files not found; anomaly detection disabled")
             
             # 5. Initialize SHAP Explainer (if RF pkl available)
             if self.rf_model and not self.shap_explainer:
@@ -206,6 +214,7 @@ class MLEngine:
 
         start_time = time.time()
         results = []
+        batch_shap_results = {}
         
         # 1. Feature Extraction
         t_extract_start = time.time()
@@ -251,8 +260,16 @@ class MLEngine:
                     else:
                         ml_scores_valid = outputs[1][:, 1]
                 elif self.rf_model and self.scaler:
-                    # Pkl path — pass raw numpy array to bypass sklearn feature-name checks.
-                    # Feature order is already enforced upstream by extract_features_batch.
+                    # Pkl path — handle dimensionality mismatch between extraction and model
+                    expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
+                    if X.shape[1] != expected_dim:
+                        logger.warning("Feature dimension mismatch, attempting to align", 
+                                       extracted=X.shape[1], expected=expected_dim)
+                        if X.shape[1] > expected_dim:
+                            X = X[:, :expected_dim]
+                        else:
+                            X = np.pad(X, ((0, 0), (0, expected_dim - X.shape[1])), mode='constant')
+                            
                     X_scaled = self.scaler.transform(X)
                     ml_scores_valid = self.rf_model.predict_proba(X_scaled)[:, 1]
                 else:
@@ -264,32 +281,82 @@ class MLEngine:
                 # 2b. VAE Anomaly Detection (Stage 3)
                 # Only fires for samples where the RF is uncertain (ml_score < threshold).
                 # This avoids wasting compute on high-confidence RF detections.
-                valid_anomaly_scores = [0.0] * len(valid_features)
+                batch_anomaly_scores = [0.0] * len(valid_features)
                 if self.vae_detector and self.vae_detector.is_ready:
                     # Trigger VAE for samples where RF is uncertain (e.g. score < 0.5)
                     # This provides a second behavioral opinion on doubtful traffic.
                     uncertain_mask = np.array(ml_scores_valid, dtype=np.float32) < 0.5
                     if uncertain_mask.any():
                         X_uncertain = X[uncertain_mask]
-                        # score() now returns normalized [0, 1] values
-                        v_scores = self.vae_detector.score(X_uncertain)
-                        uncertain_positions = np.where(uncertain_mask)[0]
-                        for pos, v_score in zip(uncertain_positions, v_scores):
-                            valid_anomaly_scores[pos] = float(v_score)
                         
-                        # Use raw MSE for the threshold check in logging if needed, 
-                        # but here we can just check normalized > 0.5
-                        n_anomalies = int((v_scores > 0.5).sum())
+                        # 1. Get raw MSE and latent vectors
+                        latents, mse_raw = self.vae_detector.get_latent_and_mse(X_uncertain)
+                        
+                        # 2. Update and get score from anomaly_scorer
+                        # We also update global latent stats periodically
+                        self.anomaly_scorer.update_latent_stats(latents)
+                        
+                        uncertain_positions = np.where(uncertain_mask)[0]
+                        for pos_idx, pos in enumerate(uncertain_positions):
+                            proto = events[valid_indices[pos]].get("proto") or "TCP"
+                            score = self.anomaly_scorer.score(
+                                mse=float(mse_raw[pos_idx]), 
+                                latent_vector=latents[pos_idx],
+                                protocol=proto
+                            )
+                            batch_anomaly_scores[pos] = score
+                        
+                        n_anomalies = int((np.array(batch_anomaly_scores)[uncertain_positions] > 0.5).sum())
                         if n_anomalies:
                             logger.info("VAE flagged potential anomalies",
                                         count=n_anomalies)
-                self.valid_anomaly_scores = valid_anomaly_scores
+                valid_anomaly_scores = batch_anomaly_scores
                     
+                # 2c. Batch SHAP (Performance optimization)
+                batch_shap_results = {} # Index -> Top 3 features
+                if self.shap_explainer:
+                    try:
+                        t_shap_start = time.time()
+                        # Use scaled features for SHAP if available
+                        X_shap = X_scaled if 'X_scaled' in locals() else X
+                        
+                        shap_vals = self.shap_explainer.shap_values(X_shap)
+                        
+                        # Standardize to 2D (N, M)
+                        if isinstance(shap_vals, list):
+                            pos_class_vals = shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
+                        else:
+                            pos_class_vals = shap_vals
+                            
+                        if hasattr(pos_class_vals, "ndim") and pos_class_vals.ndim == 3:
+                            # Handle (N, M, 2) output from some shap versions
+                            pos_class_vals = pos_class_vals[:, :, 1]
+
+                        # Map back to original indices
+                        for i, v_idx in enumerate(valid_indices):
+                            vals = pos_class_vals[i]
+                            indexed_features = []
+                            for f_idx, v in enumerate(vals):
+                                if f_idx < len(self.feature_order):
+                                    indexed_features.append({
+                                        "feature": self.feature_order[f_idx],
+                                        "impact": float(abs(v))
+                                    })
+                            indexed_features.sort(key=lambda x: x["impact"], reverse=True)
+                            batch_shap_results[v_idx] = indexed_features[:3]
+
+                        shap_ms = (time.time() - t_shap_start) * 1000
+                        logger.debug("Batch SHAP calculated", 
+                                     total_ms=round(shap_ms, 2), 
+                                     per_event_ms=round(shap_ms/len(valid_features), 2))
+                    except Exception as e:
+                        logger.warning("Batch SHAP failed", error=str(e))
+
             except Exception as e:
                 logger.error("Batch inference failed", error=str(e))
-                self.valid_anomaly_scores = [0.0] * len(valid_features)
+                valid_anomaly_scores = [0.0] * len(valid_features)
         else:
-            self.valid_anomaly_scores = []
+            valid_anomaly_scores = []
         
         infer_ms = (time.time() - t_infer_start) * 1000
         
@@ -303,54 +370,54 @@ class MLEngine:
             anomaly_score = 0.0
             if i in valid_indices:
                 v_idx = valid_indices.index(i)
-                if v_idx < len(self.valid_anomaly_scores):
-                    anomaly_score = self.valid_anomaly_scores[v_idx]
+                if v_idx < len(valid_anomaly_scores):
+                    anomaly_score = valid_anomaly_scores[v_idx]
             
-            classification, confidence = self.decision_engine.decide(
-                sig_present=sig_present,
-                ml_score=ml_scores[i],
-                anomaly_score=anomaly_score
-            )
+            shap_top3 = batch_shap_results.get(i, [])
             
-            results.append({
-                "prediction": classification,
-                "confidence": round(float(confidence) * 100, 2),
-                "final_score": round(float(confidence), 4),
+            res = {
+                "prediction": "unknown", # placeholder
                 "ml_score": round(float(ml_scores[i]), 4),
                 "anomaly_score": round(float(anomaly_score), 4),
                 "sig_present": sig_present,
+                "shap_top3": shap_top3
+            }
+
+            classification, normalized_score = self.decision_engine.decide(
+                sig_present, ml_scores[i], anomaly_score, 0.0, res
+            )
+            
+            res.update({
+                "prediction": classification,
+                "confidence": round(float(normalized_score) * 100, 2),
+                "final_score": round(float(normalized_score), 4),
                 "model_version": self.meta.get("model_version", "v3.0"),
-                "shap_top3": self._get_shap_top3(features_list[i]) if classification == "attack" else [],
                 "latency": {
                     "extract_ms": round(extract_ms / batch_count, 2),
                     "infer_ms": round(infer_ms / batch_count, 2),
                     "total_ms": round((time.time() - start_time) * 1000 / batch_count, 2)
                 }
             })
+            results.append(res)
             
         return results
 
     def _get_shap_top3(self, features: Optional[List[float]]) -> List[Dict[str, Any]]:
         """
-        Returns the top 3 most influential features for a prediction using SHAP.
+        Legacy single-event SHAP helper. Now deprecated in favor of batched SHAP.
         """
         if features is None or not self.shap_explainer or not self.feature_order:
             return []
             
         try:
             X = np.array(features).reshape(1, -1)
-            # TreeExplainer.shap_values returns [expected_value, shap_values] or list for multi-class
-            # For binary RF, it's often a list of [neg, pos]
             shap_vals = self.shap_explainer.shap_values(X)
             
-            # Extract values for the 'attack' class (usually index 1)
             if isinstance(shap_vals, list):
                 vals = shap_vals[1][0] if len(shap_vals) > 1 else shap_vals[0][0]
             else:
-                # Some versions return a single array for binary
                 vals = shap_vals[0] if shap_vals.ndim == 2 else shap_vals
 
-            # Map to feature names and sort
             indexed_features = []
             for i, v in enumerate(vals):
                 if i < len(self.feature_order):
@@ -359,10 +426,8 @@ class MLEngine:
                         "impact": float(abs(v))
                     })
             
-            # Sort by impact descending
             indexed_features.sort(key=lambda x: x["impact"], reverse=True)
             return indexed_features[:3]
             
-        except Exception as e:
-            logger.debug("SHAP explanation failed", error=str(e))
+        except Exception:
             return []

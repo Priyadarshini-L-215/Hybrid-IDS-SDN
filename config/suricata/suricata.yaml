@@ -45,6 +45,8 @@ outputs:
         - alert:
             metadata: yes
         - flow
+        - tcp:
+            extended: yes
         - http
         - dns
         - tls:
@@ -60,6 +62,8 @@ outputs:
         - alert:
             metadata: yes
         - flow
+        - tcp:
+            extended: yes
         - http
         - dns
         - tls:

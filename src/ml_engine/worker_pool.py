@@ -61,8 +61,8 @@ class WorkerPool:
         # Persistent GeoIP Reader
         self.geoip_reader = None
         try:
-            import maxminddb.geolite2
-            self.geoip_reader = maxminddb.geolite2.open()
+            from geolite2 import geolite2
+            self.geoip_reader = geolite2.reader()
             logger.info("GeoIP database initialized")
         except Exception as e:
             logger.warning("Failed to initialize GeoIP reader", error=str(e))
@@ -83,7 +83,23 @@ class WorkerPool:
             task = asyncio.create_task(self._worker_loop(f"worker-{i}"))
             self.worker_tasks.append(task)
             
+        # Start cache cleanup task
+        self.worker_tasks.append(asyncio.create_task(self._cleanup_task()))
+            
         logger.info("Worker pool started", count=self.worker_count)
+
+    async def _cleanup_task(self):
+        """Periodically purges old entries from the deduplication cache."""
+        while self.running:
+            await asyncio.sleep(60) # Cleanup every minute
+            now = time.time()
+            async with self.dedup_lock:
+                # Purge entries older than 30 seconds
+                keys_to_remove = [k for k, v in self.dedup_cache.items() if now - v['last_emit'] > 30]
+                for k in keys_to_remove:
+                    del self.dedup_cache[k]
+            if keys_to_remove:
+                logger.debug("Dedup cache cleaned", removed=len(keys_to_remove))
 
     async def _worker_loop(self, worker_id: str):
         """Main loop: XREADGROUP -> Batch Process -> ACK."""
@@ -148,12 +164,8 @@ class WorkerPool:
                 for res in results:
                     self.drift_detector.update(res.get("ml_score", 0.0))
                 
-                # 3. Finalize Alerts and Mitigation
-                alerts_to_send = []
-                for i, res in enumerate(results):
-                    raw_event = batch_msgs[i]
-                    
-                    # Create standard alert payload
+                # 3. Finalize Alerts and Mitigation in PARALLEL
+                async def prepare_alert(raw_event, res):
                     alert = build_alert_payload(raw_event, res)
                     alert["processing_time_ms"] = batch_lat
                     
@@ -164,20 +176,19 @@ class WorkerPool:
                     
                     async with self.dedup_lock:
                         entry = self.dedup_cache.get(dedup_key)
-                        if entry and (now - entry['last_emit'] < 5):
+                        dedup_window = 5.0 if alert.get("prediction") != "normal" else 0.5
+                        if entry and (now - entry['last_emit'] < dedup_window):
                             entry['count'] += 1
                             should_broadcast = False
                         else:
-                            # New burst or window expired
-                            # We take the count accrued in the PREVIOUS window if it existed
                             prev_count = entry['count'] if entry else 0
                             self.dedup_cache[dedup_key] = {'last_emit': now, 'count': 0}
                             alert["duplicate_count"] = prev_count + 1
                     
                     if not should_broadcast:
-                        continue
+                        return None
                     
-                    # 3b. Enrichment (Stage 2 Enrichment)
+                    # 3b. Enrichment & CTI (Parallelizable network calls)
                     await self._enrich_event(alert)
                     
                     # 3c. Re-evaluate decision if CTI data is present
@@ -191,15 +202,19 @@ class WorkerPool:
                         )
                         alert["prediction"] = new_class
                         alert["confidence"] = round(new_conf * 100, 2)
-                        # Update the result for mitigation logic below
                         res["prediction"] = new_class
                         res["final_score"] = new_conf
                     
-                    # Apply Mitigation Logic
+                    # 3d. Apply Mitigation
                     await self._apply_mitigation(alert, res)
-                    
-                    alerts_to_send.append(alert)
-                    self.processed_count += 1
+                    return alert
+
+                # Execute all alert preparation tasks in parallel
+                tasks = [prepare_alert(batch_msgs[i], results[i]) for i in range(len(results))]
+                processed_alerts = await asyncio.gather(*tasks)
+                
+                alerts_to_send = [a for a in processed_alerts if a is not None]
+                self.processed_count += len(alerts_to_send)
                 
                 # 4. Broadcast & Persist
                 if self.broadcast_func and alerts_to_send:
@@ -218,7 +233,18 @@ class WorkerPool:
         """Broadcast drift alert to WebSocket clients via the broadcast func."""
         if self.broadcast_func:
             try:
-                await self.broadcast_func(json.dumps(drift_info, cls=NPEncoder))
+                # Wrap in a list and mark as a system alert if needed
+                drift_alert = {
+                    "event_id": f"drift-{int(time.time())}",
+                    "event_type": "system_alert",
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "prediction": "drift_detected",
+                    "confidence": 100.0,
+                    "alert_sig": "Model Drift Detected",
+                    "category": "System health",
+                    "details": drift_info
+                }
+                await self.broadcast_func([drift_alert])
             except Exception as e:
                 logger.error("Failed to broadcast drift alert", error=str(e))
 

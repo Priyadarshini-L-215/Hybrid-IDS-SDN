@@ -37,7 +37,7 @@ class FlowAggregate(BaseMessage):
     byte_count: int
     pps: float  # Packets per second
     bps: float  # Bytes per second
-    features: Optional[List[float]] = Field(default=None, description="Normalized 77-feature vector")
+    features: Optional[List[float]] = Field(default=None, description="Normalized 49-feature vector (UNSW-NB15 schema)")
 
 class AlertPayload(BaseMessage):
     """Schema for final processed alerts sent to UI."""

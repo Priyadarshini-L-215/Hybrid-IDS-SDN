@@ -38,24 +38,26 @@ def get_cfg(path, default=None):
 
 def refresh_config():
     """Reloads the YAML config from disk and updates global state."""
-    global YAML_CONFIG, API_PORT, UI_PORT, REDIS_HOST, REDIS_PORT, \
-           ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, \
+    global YAML_CONFIG, API_PORT, REDIS_HOST, REDIS_PORT, \
+           ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_THRESHOLD_ANOMALY, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, \
            ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, \
            BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, DEV_MODE, \
            ALIENTVAULT_KEY, PCAP_ENABLED, SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, \
-           SDN_BRIDGE_NAME, SDN_HONEYPOT_IP, SDN_FALLBACK_TO_IPSET
+           SDN_BRIDGE_NAME, SDN_HONEYPOT_IP, SDN_FALLBACK_TO_IPSET, \
+           BATCH_SIZE, BATCH_FLUSH_INTERVAL, REDIS_DB, AUTOENCODER_THRESHOLD
     
     YAML_CONFIG = _load_yaml_config()
     
     # Update network settings
-    API_PORT = int(get_cfg("network.api_port", 5000))
-    UI_PORT = int(get_cfg("network.ui_port", 3000))
+    API_PORT = int(get_cfg("network.api_port", 3000))
     REDIS_HOST = os.environ.get("REDIS_HOST", get_cfg("network.redis_host", "127.0.0.1"))
     REDIS_PORT = int(os.environ.get("REDIS_PORT", get_cfg("network.redis_port", 6379)))
+    REDIS_DB = int(os.environ.get("REDIS_DB", get_cfg("network.redis_db", 0)))
     
     # Update detection thresholds
     ML_THRESHOLD_ATTACK = get_cfg("detection.decision_engine.thresholds.attack", 0.85)
     ML_THRESHOLD_SUSPICIOUS = get_cfg("detection.decision_engine.thresholds.suspicious", 0.6)
+    ML_THRESHOLD_ANOMALY = get_cfg("detection.decision_engine.thresholds.anomaly", 0.5)
     
     # Update weights
     ML_WEIGHT_SIG = get_cfg("detection.decision_engine.weights.signature", 1.0)
@@ -65,6 +67,7 @@ def refresh_config():
     # Update anomaly settings
     ANOMALY_PERCENTILE = float(get_cfg("detection.anomaly_percentile", 99.5))
     ANOMALY_MIN_SAMPLES = int(get_cfg("detection.anomaly_min_samples", 50))
+    AUTOENCODER_THRESHOLD = float(get_cfg("detection.autoencoder_threshold", 0.0283))
     
     # Update mitigation settings
     REPUTATION_LIMIT = get_cfg("mitigation.reputation_limit", 10.0)
@@ -78,6 +81,10 @@ def refresh_config():
     
     # Dev Mode
     DEV_MODE = get_cfg("system.dev_mode", False)
+    
+    # Batch processing
+    BATCH_SIZE = int(get_cfg("system.batch_size", 20))
+    BATCH_FLUSH_INTERVAL = float(get_cfg("system.batch_flush_interval", 0.25))
     
     # CTI Settings
     ALIENTVAULT_KEY = get_cfg("cti.alienvault_key", "")
@@ -93,16 +100,17 @@ def refresh_config():
     SDN_HONEYPOT_IP = get_cfg("sdn.honeypot_ip", "10.99.0.2")
     SDN_FALLBACK_TO_IPSET = get_cfg("sdn.fallback_to_ipset", True)
 
-# Initialize with defaults before first refresh
-API_PORT = 5000
-UI_PORT = 3000
+# Initialize with defaults
+API_PORT = 3000
 REDIS_HOST = "127.0.0.1"
 REDIS_PORT = 6379
+REDIS_DB = 0
 ML_THRESHOLD_ATTACK = 0.85
 ML_THRESHOLD_SUSPICIOUS = 0.6
+ML_THRESHOLD_ANOMALY = 0.5
 ML_WEIGHT_SIG = 1.0
-ML_WEIGHT_RF = 0.5
-ML_WEIGHT_AE = 0.3
+ML_WEIGHT_RF = 0.8
+ML_WEIGHT_AE = 0.2
 ANOMALY_PERCENTILE = 99.5
 ANOMALY_MIN_SAMPLES = 50
 REPUTATION_LIMIT = 10.0
@@ -110,9 +118,11 @@ REPUTATION_TEMP_BLOCK = 25.0
 REPUTATION_PERM_BLOCK = 50.0
 BLOCK_TTL = 300
 RATE_LIMIT_PER_SEC = 5
-ACTIVE_MODEL_FILE = "rf_pipeline.onnx"
+ACTIVE_MODEL_FILE = "rf_model.pkl"
 ACTIVE_SCALER_FILE = "scaler.pkl"
 DEV_MODE = False
+BATCH_SIZE = 20
+BATCH_FLUSH_INTERVAL = 0.25
 SDN_ENABLED = False
 SDN_CONTROLLER_HOST = "127.0.0.1"
 SDN_CONTROLLER_PORT = 8080
@@ -120,6 +130,7 @@ SDN_BRIDGE_NAME = "br-sentinel"
 SDN_HONEYPOT_IP = "10.99.0.2"
 SDN_FALLBACK_TO_IPSET = True
 
+# Load dynamic config
 refresh_config()
 
 # --- LOG PATHS ---
@@ -134,27 +145,26 @@ DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
 
 # --- MODEL PATHS ---
 MODELS_DIR = BASE_DIR / "models"
-RF_MODEL_PATH = MODELS_DIR / "rf_model.pkl"
-SCALER_PATH = MODELS_DIR / "scaler.pkl"
-AUTOENCODER_PATH = MODELS_DIR / "autoencoder.pth"
+RF_MODEL_PATH = MODELS_DIR / ACTIVE_MODEL_FILE
+SCALER_PATH = MODELS_DIR / ACTIVE_SCALER_FILE
+AUTOENCODER_PATH = MODELS_DIR / "vae_encoder.keras"
 FEATURES_PATH = MODELS_DIR / "features.json"
 
-# Autoencoder anomaly threshold. If AUTOENCODER_THRESHOLD is not set,
-# a percentile value (default 95th) can be used by calibration logic.
-AUTOENCODER_THRESHOLD = float(os.environ.get("AUTOENCODER_THRESHOLD", "0.0"))
-AUTOENCODER_THRESHOLD_PERCENTILE = float(os.environ.get("AUTOENCODER_THRESHOLD_PERCENTILE", "95.0"))
+# Autoencoder anomaly threshold.
+AUTOENCODER_THRESHOLD = float(os.environ.get("AUTOENCODER_THRESHOLD", "0.0283"))
 
 # --- SYSTEM SETTINGS ---
+WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))
 POLL_INTERVAL_SEC = 0.1
 HEARTBEAT_INTERVAL_SEC = 10
 ALERT_CACHE_SIZE = 100
+REDIS_QUEUE_NAME = os.environ.get("REDIS_QUEUE_NAME", "sentinel_events_queue")
 
 # --- NETWORK ---
 API_HOST = os.environ.get("API_HOST", "0.0.0.0")
-API_PORT = int(os.environ.get("API_PORT", get_cfg("network.api_port", 5000)))
-UI_PORT = int(os.environ.get("UI_PORT", get_cfg("network.ui_port", 3000)))
+REDIS_ALERT_STREAM = os.environ.get("REDIS_ALERT_STREAM", "sentinel_alerts_stream")
 WS_PORT = int(os.environ.get("WS_PORT", "8777"))
-WS_URI = os.environ.get("WS_URI", f"ws://127.0.0.1:{API_PORT}/ws")
+WS_URI = os.environ.get("WS_URI", f"ws://{API_HOST}:{API_PORT}/ws")
 
 # --- LOGGING ---
 _default_log_level = get_cfg("system.log_level", "INFO").upper()
@@ -181,67 +191,28 @@ from common.logging_setup import setup_logging
 # We'll call this in each entrypoint (main.py, ingestion.py etc) 
 # instead of globally on import to allow component-specific naming.
 
-# --- REDIS QUEUE & CACHING ---
-REDIS_HOST = os.environ.get("REDIS_HOST", get_cfg("network.redis_host", "127.0.0.1"))
-REDIS_PORT = int(os.environ.get("REDIS_PORT", get_cfg("network.redis_port", 6379)))
-REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
-REDIS_QUEUE_NAME = "sentinel_alerts_queue"
-REDIS_ALERT_STREAM = "sentinel_alerts_stream"
-USE_REDIS_QUEUE = os.environ.get("USE_REDIS_QUEUE", "1") == "1"
-
-# --- WORKER POOL & BATCHING ---
-BATCH_SIZE = int(get_cfg("system.batch_size", 10))
-BATCH_FLUSH_INTERVAL = float(get_cfg("system.batch_flush_interval", 0.25))
-WATCHER_FLUSH_TIMEOUT = 0.2
-WORKER_COUNT = int(os.environ.get("WORKER_COUNT", get_cfg("system.worker_count", 4)))
-
-# --- MITIGATION PROTECTED IPS ---
-def get_protected_ips():
-    """Get list of IPs that should never be blocked."""
-    protected = {"127.0.0.1", "::1", "0.0.0.0"}
-    try:
-        from common.net_utils import get_local_ip, get_gateway_ip
-        lip = get_local_ip()
-        gip = get_gateway_ip()
-        if lip: protected.add(lip)
-        if gip: protected.add(gip)
-    except Exception:
-        pass
-    protected.update(["172.17.0.1", "172.18.0.1", "172.19.0.1", "172.20.0.1", "192.168.0.1"])
+def get_protected_ips() -> set:
+    """Returns a set of internal/protected IPs to exclude from mitigation."""
+    protected = {"127.0.0.1", "0.0.0.0", "::1"}
+    # Add common internal ranges
+    protected.update(["192.168.1.1", "10.0.0.1"]) 
+    # Load from config if available
+    extra = get_cfg("mitigation.protected_ips", [])
+    if isinstance(extra, list):
+        protected.update(extra)
     return protected
 
-# --- DETECTION THRESHOLDS ---
-DETECTION_PORT_SCAN_THRESHOLD = get_cfg("detection.port_scan_threshold", 25)
-DETECTION_DOS_THRESHOLD = get_cfg("detection.dos_threshold", 100)
-DETECTION_WINDOW = get_cfg("detection.correlation_window", 10.0)
-
-# --- ML DECISION ENGINE ---
-ML_THRESHOLD_ATTACK = get_cfg("detection.decision_engine.thresholds.attack", 0.85)
-ML_THRESHOLD_SUSPICIOUS = get_cfg("detection.decision_engine.thresholds.suspicious", 0.6)
-ML_WEIGHT_SIG = get_cfg("detection.decision_engine.weights.signature", 1.0)
-ML_WEIGHT_RF = get_cfg("detection.decision_engine.weights.ml", 0.5)
-ML_WEIGHT_AE = get_cfg("detection.decision_engine.weights.anomaly", 0.3)
-ANOMALY_PERCENTILE = float(get_cfg("detection.anomaly_percentile", 99.5))
-ANOMALY_MIN_SAMPLES = int(get_cfg("detection.anomaly_min_samples", 50))
-
-# --- MITIGATION SETTINGS ---
-REPUTATION_LIMIT = get_cfg("mitigation.reputation_limit", 10.0)
-REPUTATION_TEMP_BLOCK = get_cfg("mitigation.reputation_temp_block", 25.0)
-REPUTATION_PERM_BLOCK = get_cfg("mitigation.reputation_perm_block", 50.0)
-BLOCK_TTL = get_cfg("mitigation.block_ttl", 300)
-RATE_LIMIT_PER_SEC = get_cfg("mitigation.rate_limit_per_sec", 5)
-
-# --- SDN SETTINGS ---
-SDN_ENABLED = get_cfg("sdn.enabled", False)
-SDN_CONTROLLER_HOST = get_cfg("sdn.controller_host", "127.0.0.1")
-SDN_CONTROLLER_PORT = int(get_cfg("sdn.controller_port", 8080))
-SDN_BRIDGE_NAME = get_cfg("sdn.bridge_name", "br-sentinel")
-SDN_HONEYPOT_IP = get_cfg("sdn.honeypot_ip", "10.99.0.2")
-SDN_FALLBACK_TO_IPSET = get_cfg("sdn.fallback_to_ipset", True)
+# --- LATE BINDING REDUNDANCY REMOVAL ---
+# These were already set by refresh_config() called above.
+# We only keep unique logic here if any.
 
 def ensure_dirs():
     """Ensure all required directories exist."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    # Ensure DB directory exists
+    # Ensure DB and PCAP directories exist
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    (BASE_DIR / "data" / "pcaps").mkdir(parents=True, exist_ok=True)
+
+# Create directories immediately on import
+ensure_dirs()

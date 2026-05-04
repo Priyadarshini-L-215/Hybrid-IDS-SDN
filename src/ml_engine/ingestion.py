@@ -112,6 +112,10 @@ async def handle_suricata_stream(reader, writer):
                 
                 event = normalize_eve(raw_data)
                 
+                # Filter: Only process events with valid source IPs to avoid 0.0.0.0 junk
+                if event.src_ip == "0.0.0.0" or not event.src_ip:
+                    continue
+
                 # Routing logic
                 if event.event_type == "alert":
                     # Alerts bypass aggregation for immediate response
@@ -158,7 +162,7 @@ async def main():
     os.chmod(SURICATA_SOCKET, 0o777)
     
     # Start heartbeat task
-    asyncio.create_task(emit_heartbeat())
+    heartbeat_task = asyncio.create_task(emit_heartbeat())
 
     async with server:
         logger.info("Server listening", path=str(SURICATA_SOCKET))
@@ -168,6 +172,11 @@ async def main():
             pass
         finally:
             _RUNNING = False
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 if __name__ == "__main__":
     try:

@@ -547,3 +547,26 @@ h1 {
   .sidebar-footer { display: none; }
   .main-content { max-width: calc(100vw - 80px); }
 }
+
+/* --- FORENSIC TIMELINE --- */
+.timeline-mini {
+  margin-top: 0.5rem;
+}
+
+.timeline-item::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--glass-border);
+}
+
+.timeline-item:last-child {
+  padding-bottom: 0;
+}
+
+.timeline-item:last-child::after {
+  height: 10px;
+}

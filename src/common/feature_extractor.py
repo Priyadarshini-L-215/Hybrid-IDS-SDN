@@ -1,397 +1,246 @@
 """
-Unified feature extraction module for Hybrid IDS.
-
-Extracts all 77 CICIDS features from Suricata EVE JSON events.
-This module is shared between consumer.py and integration.py to ensure
-consistent feature engineering across the system.
-
-Feature List (77 total):
-- Flow duration and packet counts
-- Packet length statistics (max, mean, std dev)
-- Inter-arrival time (IAT) statistics
-- Packet rates and ratios
-- TCP flag counts
-- Window sizes and segment sizes
-- Header lengths
+Unified feature extraction module for Hybrid IDS (Sentinel Core V4).
+Extracts 49 UNSW-NB15 style features from Suricata EVE JSON events.
+Includes a StatefulFeatureTracker for temporal connection-tracking features.
 """
 
 import json
 import logging
+import joblib
 from pathlib import Path
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
+# --- STATEFUL TRACKING ---
+class StatefulFeatureTracker:
+    def __init__(self, window_size=100):
+        self.window = deque(maxlen=window_size)
+
+    def update(self, event_meta):
+        self.window.append(event_meta)
+
+    def get_ct_stats(self, src_ip, dst_ip, service, dst_port, src_port):
+        ct_srv_src = 0
+        ct_srv_dst = 0
+        ct_dst_ltm = 0
+        ct_src_ltm = 0
+        ct_src_dport_ltm = 0
+        ct_dst_sport_ltm = 0
+        ct_dst_src_ltm = 0
+        
+        for entry in self.window:
+            # Matches Source IP
+            if entry['src_ip'] == src_ip:
+                ct_src_ltm += 1
+                if entry['service'] == service:
+                    ct_srv_src += 1
+                if entry['dst_ip'] == dst_ip:
+                    ct_dst_src_ltm += 1
+            
+            # Matches Destination IP
+            if entry['dst_ip'] == dst_ip:
+                ct_dst_ltm += 1
+                if entry['service'] == service:
+                    ct_srv_dst += 1
+                if entry['dst_port'] == dst_port:
+                    ct_src_dport_ltm += 1
+            
+            # Matches Source Port for destination sport check
+            if entry['src_port'] == src_port and entry['dst_ip'] == dst_ip:
+                ct_dst_sport_ltm += 1
+                    
+        return {
+            'ct_srv_src': float(ct_srv_src),
+            'ct_srv_dst': float(ct_srv_dst),
+            'ct_dst_ltm': float(ct_dst_ltm),
+            'ct_src_ltm': float(ct_src_ltm),
+            'ct_src_dport_ltm': float(ct_src_dport_ltm),
+            'ct_dst_sport_ltm': float(ct_dst_sport_ltm),
+            'ct_dst_src_ltm': float(ct_dst_src_ltm)
+        }
+
+# Singleton instance for the process
+tracker = StatefulFeatureTracker()
+
+# --- MODEL ASSETS ---
 _CACHED_FEATURES = None
+_LE_PROTO = None
 
 DEFAULT_FEATURES = [
-    "Protocol", "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
-    "Fwd Packets Length Total", "Bwd Packets Length Total", "Fwd Packet Length Max",
-    "Fwd Packet Length Min", "Fwd Packet Length Mean", "Fwd Packet Length Std",
-    "Bwd Packet Length Max", "Bwd Packet Length Min", "Bwd Packet Length Mean",
-    "Bwd Packet Length Std", "Flow Bytes/s", "Flow Packets/s", "Flow IAT Mean",
-    "Flow IAT Std", "Flow IAT Max", "Flow IAT Min", "Fwd IAT Total", "Fwd IAT Mean",
-    "Fwd IAT Std", "Fwd IAT Max", "Fwd IAT Min", "Bwd IAT Total", "Bwd IAT Mean",
-    "Bwd IAT Std", "Bwd IAT Max", "Bwd IAT Min", "Fwd PSH Flags", "Bwd PSH Flags",
-    "Fwd URG Flags", "Bwd URG Flags", "Fwd Header Length", "Bwd Header Length",
-    "Fwd Packets/s", "Bwd Packets/s", "Packet Length Min", "Packet Length Max",
-    "Packet Length Mean", "Packet Length Std", "Packet Length Variance",
-    "FIN Flag Count", "SYN Flag Count", "RST Flag Count", "PSH Flag Count",
-    "ACK Flag Count", "URG Flag Count", "CWE Flag Count", "ECE Flag Count",
-    "Down/Up Ratio", "Avg Packet Size", "Avg Fwd Segment Size", "Avg Bwd Segment Size",
-    "Fwd Avg Bytes/Bulk", "Fwd Avg Packets/Bulk", "Fwd Avg Bulk Rate",
-    "Bwd Avg Bytes/Bulk", "Bwd Avg Packets/Bulk", "Bwd Avg Bulk Rate",
-    "Subflow Fwd Packets", "Subflow Fwd Bytes", "Subflow Bwd Packets",
-    "Subflow Bwd Bytes", "Init Fwd Win Bytes", "Init Bwd Win Bytes",
-    "Fwd Act Data Packets", "Fwd Seg Size Min", "Active Mean", "Active Std",
-    "Active Max", "Active Min", "Idle Mean", "Idle Std", "Idle Max", "Idle Min"
+    'flow_duration','total_fwd_packets','total_bwd_packets',
+    'total_fwd_bytes','total_bwd_bytes',
+    'flow_iat_mean','flow_iat_std',
+    'fwd_iat_mean','bwd_iat_mean',
+    'pkt_len_mean','pkt_len_std',
+    'spkts','dpkts','sbytes','dbytes',
+    'sload','dload','sloss','dloss',
+    'sttl','dttl','swin','dwin',
+    'stcpb','dtcpb','tcprtt','synack','ackdat',
+    'sinpkt','dinpkt','sjit','djit',
+    'ct_state_ttl','ct_flw_http_mthd',
+    'ct_srv_src','ct_srv_dst',
+    'ct_dst_ltm','ct_src_ltm',
+    'ct_src_dport_ltm','ct_dst_sport_ltm',
+    'ct_dst_src_ltm',
+    'smeansz','dmeansz','trans_depth','res_bdy_len',
+    'is_sm_ips_ports','is_ftp_login','ct_ftp_cmd',
+    'app_proto'
 ]
 
 def load_feature_names(features_path: str | Path = None) -> list:
-    """
-    Load the ordered list of 77 feature names from features.json.
-    
-    Args:
-        features_path: Path to features.json. If None, uses default path.
-    
-    Returns:
-        List of 77 feature names in exact order expected by model.
-    """
     if features_path is None:
-        # Default to models/features.json relative to project root
         features_path = Path(__file__).resolve().parents[2] / "models" / "features.json"
     
     features_path = Path(features_path)
-    
     global _CACHED_FEATURES
     if _CACHED_FEATURES is not None:
         return _CACHED_FEATURES
 
     try:
         if not features_path.exists():
-            logger.warning(f"features.json not found at {features_path}. Using default features.")
             _CACHED_FEATURES = DEFAULT_FEATURES
             return DEFAULT_FEATURES
-
         with open(features_path, 'r', encoding='utf-8') as f:
             features = json.load(f)
-        
-        if not isinstance(features, list):
-            logger.error(f"features.json must contain a JSON array, got {type(features)}. Falling back to defaults.")
-            _CACHED_FEATURES = DEFAULT_FEATURES
-            return DEFAULT_FEATURES
-        
-        logger.info(f"Loaded {len(features)} feature names from {features_path.name}")
         _CACHED_FEATURES = features
         return features
-    except (json.JSONDecodeError, PermissionError) as e:
-        logger.error(f"Error loading features.json: {e}. Falling back to defaults.")
+    except Exception:
         _CACHED_FEATURES = DEFAULT_FEATURES
         return DEFAULT_FEATURES
 
+def get_proto_encoder():
+    global _LE_PROTO
+    if _LE_PROTO is None:
+        le_path = Path(__file__).resolve().parents[2] / "models" / "le_proto.pkl"
+        if le_path.exists():
+            try:
+                _LE_PROTO = joblib.load(le_path)
+            except Exception as e:
+                logger.error(f"Failed to load le_proto.pkl: {e}")
+    return _LE_PROTO
 
 def extract_features_from_eve(event: dict, features: list = None) -> list | None:
-    """
-    Extract all 77 features from a Suricata EVE JSON event.
-    
-    Args:
-        event: Suricata EVE JSON event dictionary
-        features: List of feature names (if None, will be loaded from features.json)
-    
-    Returns:
-        List of 77 feature values in exact order, or None if event is not a 'flow' type
-    """
-    # Process both 'flow' and 'alert' events
     if event.get('event_type') not in ['flow', 'alert']:
         return None
     
     if features is None:
         features = load_feature_names()
     
-    # Standardized schema fallback: Suricata puts data in 'flow', 
-    # but our RawEvent puts original data in 'raw'
     flow = event.get('flow', {})
     if not flow and 'raw' in event:
         flow = event['raw'].get('flow', {})
     
-    # ===== BASIC FLOW METRICS =====
-    # If nested flow object is missing, try root level (for FlowAggregate or RawEvent)
-    fwd_pkts = float(flow.get('pkts_toserver', event.get('packet_count', 0) / 2))
-    bwd_pkts = float(flow.get('pkts_toclient', event.get('packet_count', 0) / 2))
-    fwd_bytes = float(flow.get('bytes_toserver', event.get('byte_count', 0) / 2))
-    bwd_bytes = float(flow.get('bytes_toclient', event.get('byte_count', 0) / 2))
-    flow_age_sec = float(flow.get('age', event.get('duration', 0)))
-    flow_age_us = flow_age_sec * 1_000_000  # Convert to microseconds
+    # Basic Metrics
+    fwd_pkts = float(flow.get('pkts_toserver', 0))
+    bwd_pkts = float(flow.get('pkts_toclient', 0))
+    fwd_bytes = float(flow.get('bytes_toserver', 0))
+    bwd_bytes = float(flow.get('bytes_toclient', 0))
+    age_sec = float(flow.get('age', 0))
+    age_ms = age_sec * 1000
     
     total_pkts = fwd_pkts + bwd_pkts
     total_bytes = fwd_bytes + bwd_bytes
+    safe_age = max(age_sec, 0.001)
     
-    # Avoid division by zero
-    safe_age = max(flow_age_sec, 0.0001)
+    # Jitter/IAT approximations
+    fwd_iat_mean = (age_ms / max(fwd_pkts - 1, 1)) if fwd_pkts > 1 else 0
+    bwd_iat_mean = (age_ms / max(bwd_pkts - 1, 1)) if bwd_pkts > 1 else 0
+    flow_iat_mean = (age_ms / max(total_pkts - 1, 1)) if total_pkts > 1 else 0
     
-    # ===== PACKET LENGTH STATISTICS =====
-    # Note: Suricata doesn't provide per-packet statistics in flow events
-    # We estimate based on average packet size
-    fwd_avg_pkt_len = fwd_bytes / max(fwd_pkts, 1)
-    bwd_avg_pkt_len = bwd_bytes / max(bwd_pkts, 1)
-    avg_pkt_len = total_bytes / max(total_pkts, 1)
+    # TCP Info
+    tcp = event.get('tcp', {}) or (event.get('raw', {}).get('tcp', {}))
     
-    # For std dev, we use Suricata's flow metrics if available, otherwise 0.0
-    # Data Reboot: We no longer 'fabricate' std dev with static multipliers (e.g. 0.1)
-    fwd_pkt_len_std = float(flow.get('fwd_pkt_len_std', 0.0))
-    bwd_pkt_len_std = float(flow.get('bwd_pkt_len_std', 0.0))
+    # Update Stateful Tracker
+    src_ip = event.get('src_ip', '0.0.0.0')
+    dst_ip = event.get('dest_ip', '0.0.0.0')
+    service = event.get('app_proto', 'unknown')
+    dst_port = int(event.get('dest_port', 0))
+    src_port = int(event.get('src_port', 0))
+    protocol = event.get('protocol', 'TCP').lower()
     
-    pkt_len_variance = float(flow.get('pkt_len_var', (fwd_pkt_len_std ** 2 + bwd_pkt_len_std ** 2)))
-    pkt_len_std = (pkt_len_variance) ** 0.5
-    
-    # ===== INTER-ARRIVAL TIME (IAT) STATISTICS =====
-    # Simplified: Use flow age / number of packets as proxy for IAT
-    if total_pkts > 1:
-        flow_iat_mean = flow_age_us / (total_pkts - 1)
-    else:
-        flow_iat_mean = 0
-    
-    flow_iat_std = float(flow.get('iat_std', flow_iat_mean * 0.2))
-    flow_iat_max = float(flow.get('iat_max', flow_age_us if total_pkts > 0 else 0))
-    flow_iat_min = float(flow.get('iat_min', flow_iat_mean if total_pkts > 1 else 0))
-    
-    # Forward IAT
-    fwd_iat_total = flow_age_us if fwd_pkts > 1 else 0
-    fwd_iat_mean = fwd_iat_total / max(fwd_pkts - 1, 1) if fwd_pkts > 1 else 0
-    fwd_iat_std = float(flow.get('fwd_iat_std', fwd_iat_mean * 0.15))
-    fwd_iat_max = float(flow.get('fwd_iat_max', flow_age_us if fwd_pkts > 0 else 0))
-    fwd_iat_min = float(flow.get('fwd_iat_min', fwd_iat_mean if fwd_pkts > 1 else 0))
-    
-    # Backward IAT
-    bwd_iat_total = flow_age_us if bwd_pkts > 1 else 0
-    bwd_iat_mean = bwd_iat_total / max(bwd_pkts - 1, 1) if bwd_pkts > 1 else 0
-    bwd_iat_std = float(flow.get('bwd_iat_std', bwd_iat_mean * 0.15))
-    bwd_iat_max = float(flow.get('bwd_iat_max', flow_age_us if bwd_pkts > 0 else 0))
-    bwd_iat_min = float(flow.get('bwd_iat_min', bwd_iat_mean if bwd_pkts > 1 else 0))
-    
-    # ===== PACKET RATES =====
-    fwd_pkts_per_sec = fwd_pkts / safe_age
-    bwd_pkts_per_sec = bwd_pkts / safe_age
-    flow_pkts_per_sec = total_pkts / safe_age
-    flow_bytes_per_sec = total_bytes / safe_age
-    
-    # ===== TCP FLAG COUNTS =====
-    # Suricata includes tcp flags in the event.tcp object or raw_event.tcp object
-    tcp_info = event.get('tcp', {})
-    if not tcp_info and 'raw' in event:
-        tcp_info = event['raw'].get('tcp', {})
-        
-    syn_flag_count = 1.0 if tcp_info.get('syn') else 0.0
-    fin_flag_count = 1.0 if tcp_info.get('fin') else 0.0
-    rst_flag_count = 1.0 if tcp_info.get('rst') else 0.0
-    psh_flag_count = 1.0 if tcp_info.get('psh') else 0.0
-    ack_flag_count = 1.0 if tcp_info.get('ack') else 0.0
-    urg_flag_count = 1.0 if tcp_info.get('urg') else 0.0
-    cwe_flag_count = 1.0 if tcp_info.get('cwr') else 0.0 # Note: CICIDS uses CWE, Suricata uses CWR
-    ece_flag_count = 1.0 if tcp_info.get('ece') else 0.0
-    
-    fwd_psh_flags = psh_flag_count  # Simple approximation, as directional flags aren't always split in standard EVE
-    
-    # ===== SEGMENT SIZES =====
-    fwd_header_length = 20 if fwd_pkts > 0 else 0  # TCP header is 20 bytes (IPv4)
-    bwd_header_length = 20 if bwd_pkts > 0 else 0
-    fwd_segment_size_min = fwd_avg_pkt_len
-    avg_fwd_segment_size = fwd_avg_pkt_len
-    avg_bwd_segment_size = bwd_avg_pkt_len
-    avg_packet_size = avg_pkt_len
-    
-    # ===== SUBFLOW METRICS (Same as flow for single flow) =====
-    subflow_fwd_packets = fwd_pkts
-    subflow_fwd_bytes = fwd_bytes
-    subflow_bwd_packets = bwd_pkts
-    subflow_bwd_bytes = bwd_bytes
-    
-    # ===== WINDOW SIZES (TCP-specific, not in standard Suricata flow events) =====
-    # Check if present in tcp object (requires expanded logging or custom fields)
-    init_fwd_win_bytes = float(tcp_info.get('fwd_window_size', 0))
-    init_bwd_win_bytes = float(tcp_info.get('bwd_window_size', 0))
-    
-    # Active time: time from first to last packet (provided by Suricata as 'age')
-    # Data Reboot: Removed fabricated active_mean (was age/2)
-    active_mean = flow_age_us
-    active_std = 0.0
-    active_max = flow_age_us
-    active_min = flow_age_us
-    
-    # Idle time: simplified as not having inter-packet gaps in single flow record
-    idle_mean = 0.0
-    idle_std = 0.0
-    idle_max = 0.0
-    idle_min = 0.0
-    
-    # ===== PACKET LENGTH STATISTICS (continued) =====
-    fwd_act_data_packets = fwd_pkts  # All fwd packets considered data packets
-    packet_length_max = max(fwd_avg_pkt_len, bwd_avg_pkt_len)
-    packet_length_mean = avg_pkt_len
-    
-    # ===== PROTOCOL MAPPING =====
-    proto_str = (event.get('protocol') or event.get('proto') or 'TCP').upper()
-    proto_map = {
-        "HOPOPT": 0, "ICMP": 1, "IGMP": 2, "GGP": 3, "IPV4": 4, "ST": 5, "TCP": 6,
-        "CBT": 7, "EGP": 8, "IGP": 9, "BBN-RCC-MON": 10, "NVP-II": 11, "PUP": 12,
-        "ARGUS": 13, "EMCON": 14, "XNET": 15, "CHAOS": 16, "UDP": 17, "MUX": 18,
-        "DCN-MEAS": 19, "HMP": 20, "PRM": 21, "XNS-IDP": 22, "TRUNK-1": 23,
-        "TRUNK-2": 24, "LEAF-1": 25, "LEAF-2": 26, "RDP": 27, "IRTP": 28,
-        "ISO-TP4": 29, "NETBLT": 30, "MFE-NSP": 31, "MERIT-INP": 32, "DCCP": 33,
-        "3PC": 34, "IDPR": 35, "XTP": 36, "DDP": 37, "IDPR-CMTP": 38, "TP++": 39,
-        "IL": 40, "IPV6": 41, "SDRP": 42, "IPV6-ROUTE": 43, "IPV6-FRAG": 44,
-        "IDRP": 45, "RSVP": 46, "GRE": 47, "DSR": 48, "BNA": 49, "ESP": 50,
-        "AH": 51, "I-NLSP": 52, "SWIPE": 53, "NARP": 54, "MOBILE": 55, "TLSP": 56,
-        "SKIP": 57, "IPV6-ICMP": 58, "IPV6-NONXT": 59, "IPV6-OPTS": 60, "CFTP": 62,
-        "SAT-EXPAK": 64, "KRYPTOLAN": 65, "RVD": 66, "IPPC": 67, "SAT-MON": 69,
-        "VISA": 70, "IPCV": 71, "CPNX": 72, "CPHB": 73, "WSN": 74, "PVP": 75,
-        "BR-SAT-MON": 76, "SUN-ND": 77, "WB-MON": 78, "WB-EXPAK": 79, "ISO-IP": 80,
-        "VMTP": 81, "SECURE-VMTP": 82, "VINES": 83, "TTP": 84, "NSFNET-IGP": 85,
-        "DGP": 86, "TCF": 87, "EIGRP": 88, "OSPFIGP": 89, "SPRITE-RPC": 90,
-        "LARP": 91, "MTP": 92, "AX.25": 93, "IPIP": 94, "MICP": 95, "SCC-SP": 96,
-        "ETHERIP": 97, "ENCAP": 98, "GMTP": 100, "IFMP": 101, "PNNI": 102,
-        "PIM": 103, "ARIS": 104, "SCPS": 105, "QNX": 106, "A/N": 107, "IPCOMP": 108,
-        "SNP": 109, "COMPAQ-PEER": 110, "IPX-IN-IP": 111, "VRRP": 112, "PGM": 113,
-        "L2TP": 115, "DDX": 116, "IATP": 117, "STP": 118, "SRP": 119, "UTI": 120,
-        "SMP": 121, "SM": 122, "PTP": 123, "ISIS OVER IPV4": 124, "FIRE": 125,
-        "CRTP": 126, "CRUDP": 127, "SSCOPMCE": 128, "IPLT": 129, "SPS": 130,
-        "PIPE": 131, "SCTP": 132, "FC": 133, "RSVP-E2E-IGNORE": 134,
-        "MOBILITY HEADER": 135, "UDPLITE": 136, "MPLS-IN-IP": 137, "MANET": 138,
-        "HIP": 139, "SHIM6": 140, "WESP": 141, "ROHC": 142
-    }
-    # Fallback to 255 (Reserved/Unknown) for protocols not in map
-    protocol_num = float(proto_map.get(proto_str, 255))
+    tracker.update({
+        'src_ip': src_ip, 
+        'dst_ip': dst_ip, 
+        'service': service, 
+        'dst_port': dst_port,
+        'src_port': src_port
+    })
+    ct_stats = tracker.get_ct_stats(src_ip, dst_ip, service, dst_port, src_port)
 
-    # ===== BUILD FEATURE DICTIONARY (77 FEATURES) =====
+    # Protocol Encoding
+    le = get_proto_encoder()
+    try:
+        proto_val = float(le.transform([protocol])[0]) if le else 0.0
+    except:
+        proto_val = 0.0
+
+    # Feature Dictionary (49 features)
     feature_dict = {
-        # --- Standard CICIDS Names (77 Set) ---
-        "Protocol": protocol_num,
-        "Flow Duration": flow_age_us,
-        "Total Fwd Packets": fwd_pkts,
-        "Total Backward Packets": bwd_pkts,
-        "Fwd Packets Length Total": fwd_bytes,
-        "Bwd Packets Length Total": bwd_bytes,
-        "Fwd Packet Length Max": fwd_avg_pkt_len,
-        "Fwd Packet Length Min": fwd_avg_pkt_len * 0.8,
-        "Fwd Packet Length Mean": fwd_avg_pkt_len,
-        "Fwd Packet Length Std": fwd_pkt_len_std,
-        "Bwd Packet Length Max": bwd_avg_pkt_len,
-        "Bwd Packet Length Min": bwd_avg_pkt_len * 0.8,
-        "Bwd Packet Length Mean": bwd_avg_pkt_len,
-        "Bwd Packet Length Std": bwd_pkt_len_std,
-        "Flow Bytes/s": flow_bytes_per_sec,
-        "Flow Packets/s": flow_pkts_per_sec,
-        "Flow IAT Mean": flow_iat_mean,
-        "Flow IAT Std": flow_iat_std,
-        "Flow IAT Max": flow_iat_max,
-        "Flow IAT Min": flow_iat_min,
-        "Fwd IAT Total": fwd_iat_total,
-        "Fwd IAT Mean": fwd_iat_mean,
-        "Fwd IAT Std": fwd_iat_std,
-        "Fwd IAT Max": fwd_iat_max,
-        "Fwd IAT Min": fwd_iat_min,
-        "Bwd IAT Total": bwd_iat_total,
-        "Bwd IAT Mean": bwd_iat_mean,
-        "Bwd IAT Std": bwd_iat_std,
-        "Bwd IAT Max": bwd_iat_max,
-        "Bwd IAT Min": bwd_iat_min,
-        "Fwd PSH Flags": fwd_psh_flags,
-        "Bwd PSH Flags": 0.0,
-        "Fwd URG Flags": 0.0,
-        "Bwd URG Flags": 0.0,
-        "Fwd Header Length": fwd_header_length,
-        "Bwd Header Length": bwd_header_length,
-        "Fwd Packets/s": fwd_pkts_per_sec,
-        "Bwd Packets/s": bwd_pkts_per_sec,
-        "Packet Length Min": min(fwd_avg_pkt_len, bwd_avg_pkt_len) * 0.8,
-        "Packet Length Max": packet_length_max,
-        "Packet Length Mean": packet_length_mean,
-        "Packet Length Std": pkt_len_std,
-        "Packet Length Variance": pkt_len_variance,
-        "FIN Flag Count": fin_flag_count,
-        "SYN Flag Count": syn_flag_count,
-        "RST Flag Count": rst_flag_count,
-        "PSH Flag Count": psh_flag_count,
-        "ACK Flag Count": ack_flag_count,
-        "URG Flag Count": urg_flag_count,
-        "CWE Flag Count": cwe_flag_count,
-        "ECE Flag Count": ece_flag_count,
-        "Down/Up Ratio": bwd_pkts / fwd_pkts if fwd_pkts > 0 else 0.0,
-        "Avg Packet Size": avg_packet_size,
-        "Avg Fwd Segment Size": avg_fwd_segment_size,
-        "Avg Bwd Segment Size": avg_bwd_segment_size,
-        "Subflow Fwd Packets": subflow_fwd_packets,
-        "Subflow Fwd Bytes": subflow_fwd_bytes,
-        "Subflow Bwd Packets": subflow_bwd_packets,
-        "Subflow Bwd Bytes": subflow_bwd_bytes,
-        "Init Fwd Win Bytes": init_fwd_win_bytes,
-        "Init Bwd Win Bytes": init_bwd_win_bytes,
-        "Fwd Act Data Packets": fwd_act_data_packets,
-        "Fwd Seg Size Min": fwd_segment_size_min,
-        "Active Mean": active_mean,
-        "Active Std": active_std,
-        "Active Max": active_max,
-        "Active Min": active_min,
-        "Idle Mean": idle_mean,
-        "Idle Std": idle_std,
-        "Idle Max": idle_max,
-        "Idle Min": idle_min,
-
-        # --- Model v4 Shortened Names (16 Set) ---
-        "flow_dur": flow_age_us,
-        "fwd_pkts": fwd_pkts,
-        "bwd_pkts": bwd_pkts,
-        "fwd_bytes": fwd_bytes,
-        "bwd_bytes": bwd_bytes,
-        "fwd_len_max": fwd_avg_pkt_len,
-        "bwd_len_max": bwd_avg_pkt_len,
-        "fwd_len_mean": fwd_avg_pkt_len,
-        "bwd_len_mean": bwd_avg_pkt_len,
-        "fwd_len_std": fwd_pkt_len_std,
-        "bwd_len_std": bwd_pkt_len_std,
-        "pkts_per_sec": flow_pkts_per_sec,
-        "ack_flag": ack_flag_count,
-        "psh_flag": psh_flag_count,
-        "header_fwd": fwd_header_length,
-        "header_bwd": bwd_header_length,
+        'flow_duration': age_ms,
+        'total_fwd_packets': fwd_pkts,
+        'total_bwd_packets': bwd_pkts,
+        'total_fwd_bytes': fwd_bytes,
+        'total_bwd_bytes': bwd_bytes,
+        'flow_iat_mean': flow_iat_mean,
+        'flow_iat_std': flow_iat_mean * 0.1, 
+        'fwd_iat_mean': fwd_iat_mean,
+        'bwd_iat_mean': bwd_iat_mean,
+        'pkt_len_mean': total_bytes / max(total_pkts, 1),
+        'pkt_len_std': (total_bytes / max(total_pkts, 1)) * 0.2,
+        'spkts': fwd_pkts,
+        'dpkts': bwd_pkts,
+        'sbytes': fwd_bytes,
+        'dbytes': bwd_bytes,
+        'sload': (fwd_bytes * 8) / safe_age,
+        'dload': (bwd_bytes * 8) / safe_age,
+        'sloss': float(flow.get('emergency_fwd', 0)), # Placeholder for loss
+        'dloss': float(flow.get('emergency_bwd', 0)),
+        'sttl': float(event.get('ip', {}).get('ttl', 64)),
+        'dttl': float(flow.get('dttl', 0)), 
+        'swin': float(tcp.get('window', 0)),
+        'dwin': float(tcp.get('ack', 0) % 65535), # Approximation
+        'stcpb': float(tcp.get('seq', 0)),
+        'dtcpb': float(tcp.get('ack', 0)),
+        'tcprtt': float(flow.get('rtt', 0)),
+        'synack': float(flow.get('rtt', 0) * 0.6),
+        'ackdat': float(flow.get('rtt', 0) * 0.4),
+        'sinpkt': fwd_iat_mean,
+        'dinpkt': bwd_iat_mean,
+        'sjit': fwd_iat_mean * 0.05,
+        'djit': bwd_iat_mean * 0.05,
+        'ct_state_ttl': float(ct_stats['ct_src_ltm'] * 0.5), # Heuristic
+        'ct_flw_http_mthd': 1.0 if event.get('http', {}).get('http_method') in ['GET', 'POST'] else 0.0,
+        'ct_srv_src': ct_stats['ct_srv_src'],
+        'ct_srv_dst': ct_stats['ct_srv_dst'],
+        'ct_dst_ltm': ct_stats['ct_dst_ltm'],
+        'ct_src_ltm': ct_stats['ct_src_ltm'],
+        'ct_src_dport_ltm': ct_stats['ct_src_dport_ltm'],
+        'ct_dst_sport_ltm': ct_stats['ct_dst_sport_ltm'],
+        'ct_dst_src_ltm': ct_stats['ct_dst_src_ltm'],
+        'smeansz': fwd_bytes / max(fwd_pkts, 1),
+        'dmeansz': bwd_bytes / max(bwd_pkts, 1),
+        'trans_depth': float(event.get('http', {}).get('depth', 0)),
+        'res_bdy_len': float(event.get('http', {}).get('length', 0)),
+        'is_sm_ips_ports': 1.0 if src_ip == dst_ip and src_port == dst_port else 0.0,
+        'is_ftp_login': 1.0 if service == 'ftp' and event.get('ftp', {}).get('command') == 'USER' else 0.0,
+        'ct_ftp_cmd': float(event.get('ftp', {}).get('command_count', 0)),
+        'app_proto': proto_val
     }
     
-    # ===== BUILD FEATURE VECTOR IN EXACT ORDER =====
     feature_vector = []
-    missing_features = []
-    
     for feature_name in features:
-        if feature_name in feature_dict:
-            value = feature_dict[feature_name]
-            feature_vector.append(float(value))
-        else:
-            feature_vector.append(0.0)
-            missing_features.append(feature_name)
-            
-    if missing_features:
-        logger.warning(f"Event missing {len(missing_features)} features: {missing_features[:5]}...")
+        feature_vector.append(float(feature_dict.get(feature_name, 0.0)))
     
     return feature_vector
 
 def validate_feature_vector(vector: list, expected_dim: int = None) -> bool:
-    if not isinstance(vector, list):
-        return False
+    if not isinstance(vector, list): return False
     if expected_dim is not None and len(vector) != expected_dim:
-        logger.error(f"Feature vector length mismatch: expected {expected_dim}, got {len(vector)}")
+        logger.error(f"Dim mismatch: expected {expected_dim}, got {len(vector)}")
         return False
     return True
 
 def extract_features_batch(events: list[dict], features: list = None) -> list[list | None]:
-    """
-    Extract features for a batch of events efficiently.
-    
-    Args:
-        events: List of Suricata EVE JSON event dictionaries
-        features: List of feature names
-        
-    Returns:
-        List containing the feature vector or None for each event.
-    """
-    if features is None:
-        features = load_feature_names()
-        
+    if features is None: features = load_feature_names()
     return [extract_features_from_eve(event, features) for event in events]

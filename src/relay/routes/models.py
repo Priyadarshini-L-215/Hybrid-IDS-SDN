@@ -142,9 +142,9 @@ async def run_training(
     """Triggers the model training pipeline, optionally adding data from a PCAP."""
     logger.info("Starting model training pipeline", from_pcap=bool(pcap_path))
     try:
-        import subprocess
+        import sys
         project_root = Path(__file__).resolve().parents[3]
-        python_path = project_root / ".venv" / "bin" / "python3"
+        python_path = sys.executable
         
         # 1. If PCAP provided, convert and append to dataset first
         if pcap_path:
