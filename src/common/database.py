@@ -71,6 +71,7 @@ class DatabaseHandler:
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT UNIQUE,
                 timestamp TEXT,
                 event_type TEXT,
                 src_ip TEXT,
@@ -87,6 +88,11 @@ class DatabaseHandler:
                 is_mitigated INTEGER DEFAULT 0,
                 ja3_hash TEXT,
                 ja3_string TEXT,
+                shap_top3 TEXT,
+                enrichment TEXT,
+                mitre_id TEXT,
+                anomaly_score REAL,
+                correlation_id TEXT,
                 raw_event BLOB,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -105,6 +111,12 @@ class DatabaseHandler:
             ''')
             # Migrations for existing DBs
             try:
+                cursor.execute("ALTER TABLE alerts ADD COLUMN event_id TEXT")
+                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_event_id ON alerts(event_id)")
+            except sqlite3.Error as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.warning(f"DB migration skipped for event_id column: {e}")
+            try:
                 cursor.execute("ALTER TABLE alerts ADD COLUMN mitigation TEXT")
             except sqlite3.Error as e:
                 if "duplicate column name" not in str(e).lower():
@@ -120,9 +132,19 @@ class DatabaseHandler:
             except sqlite3.Error as e:
                 if "duplicate column name" not in str(e).lower():
                     logger.warning(f"DB migration skipped for ja3 columns: {e}")
+            try:
+                cursor.execute("ALTER TABLE alerts ADD COLUMN shap_top3 TEXT")
+                cursor.execute("ALTER TABLE alerts ADD COLUMN enrichment TEXT")
+                cursor.execute("ALTER TABLE alerts ADD COLUMN mitre_id TEXT")
+                cursor.execute("ALTER TABLE alerts ADD COLUMN anomaly_score REAL")
+                cursor.execute("ALTER TABLE alerts ADD COLUMN correlation_id TEXT")
+            except sqlite3.Error as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.warning(f"DB migration skipped for forensic columns: {e}")
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON alerts(timestamp DESC)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_prediction ON alerts(prediction)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip ON alerts(src_ip)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip_ts ON alerts(src_ip, timestamp DESC)')
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Failed to initialize database: {e}")
@@ -138,11 +160,13 @@ class DatabaseHandler:
             cursor = conn.cursor()
             cursor.execute('''
             INSERT INTO alerts (
-                timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
+                event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
                 protocol, alert_sig, prediction, confidence, severity, category, 
-                mitigation, is_mitigated, ja3_hash, ja3_string, raw_event
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                mitigation, is_mitigated, ja3_hash, ja3_string, 
+                shap_top3, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
+                alert_data.get('event_id'),
                 alert_data.get('timestamp'),
                 alert_data.get('event_type'),
                 alert_data.get('src_ip'),
@@ -159,6 +183,11 @@ class DatabaseHandler:
                 1 if alert_data.get('is_mitigated') else 0,
                 alert_data.get('ja3_hash'),
                 alert_data.get('ja3_string'),
+                json.dumps(alert_data.get('shap_top3', [])),
+                json.dumps(alert_data.get('enrichment', {})),
+                alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
+                alert_data.get('anomaly_score', 0.0),
+                alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
                 sqlite3.Binary(compressed_raw)
             ))
             conn.commit()
@@ -174,6 +203,7 @@ class DatabaseHandler:
                 raw_json = json.dumps(alert_data.get('raw_event'))
                 compressed_raw = zlib.compress(raw_json.encode('utf-8'))
                 params.append((
+                    alert_data.get('event_id'),
                     alert_data.get('timestamp'),
                     alert_data.get('event_type'),
                     alert_data.get('src_ip'),
@@ -190,6 +220,11 @@ class DatabaseHandler:
                     1 if alert_data.get('is_mitigated') else 0,
                     alert_data.get('ja3_hash'),
                     alert_data.get('ja3_string'),
+                    json.dumps(alert_data.get('shap_top3', [])),
+                    json.dumps(alert_data.get('enrichment', {})),
+                    alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
+                    alert_data.get('anomaly_score', 0.0),
+                    alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
                     sqlite3.Binary(compressed_raw)
                 ))
             
@@ -198,10 +233,11 @@ class DatabaseHandler:
             cursor = conn.cursor()
             cursor.executemany('''
             INSERT INTO alerts (
-                timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
+                event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
                 protocol, alert_sig, prediction, confidence, severity, category, 
-                mitigation, is_mitigated, ja3_hash, ja3_string, raw_event
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                mitigation, is_mitigated, ja3_hash, ja3_string, 
+                shap_top3, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', params)
             conn.commit()
         except sqlite3.Error as e:
@@ -298,9 +334,10 @@ class DatabaseHandler:
             
             # 4. Recent history & Latency Stats
             cursor.execute("""
-                SELECT timestamp, prediction, confidence, alert_sig, mitigation, raw_event
+                SELECT timestamp, prediction, confidence, alert_sig, mitigation, 
+                       shap_top3, enrichment, anomaly_score, raw_event
                 FROM alerts WHERE src_ip = ? 
-                ORDER BY timestamp DESC LIMIT 10
+                ORDER BY timestamp DESC LIMIT 20
             """, (ip,))
             history_rows = cursor.fetchall()
             
@@ -322,6 +359,12 @@ class DatabaseHandler:
                             cti_data = evt.get("enrichment", {}).get("cti")
                 except Exception:
                     pass
+                try:
+                    for field in ['shap_top3', 'enrichment']:
+                        if h.get(field):
+                            h[field] = json.loads(h[field])
+                except Exception: pass
+
                 h.pop('raw_event', None)
                 history.append(h)
             
@@ -441,6 +484,43 @@ class DatabaseHandler:
             logger.error(f"Stats query failed: {e}")
             return {"total_processed": 0, "attack_total": 0, "normal_total": 0}
 
+    def get_alert_timeline(self, src_ip, limit=50):
+        """Returns a time-sorted list of alerts for a specific IP, with XAI data."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM alerts 
+                WHERE src_ip = ? 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            """, (src_ip, limit))
+            rows = cursor.fetchall()
+            
+            timeline = []
+            for row in rows:
+                alert = dict(row)
+                # Parse JSON fields
+                for field in ['shap_top3', 'enrichment']:
+                    try:
+                        if alert.get(field):
+                            alert[field] = json.loads(alert[field])
+                    except Exception:
+                        alert[field] = {} if field == 'enrichment' else []
+                
+                # Handle raw_event decompression
+                try:
+                    if alert.get('raw_event'):
+                        decompressed = zlib.decompress(alert['raw_event']).decode('utf-8')
+                        alert['raw_event'] = json.loads(decompressed)
+                except Exception:
+                    alert['raw_event'] = {}
+                timeline.append(alert)
+            return timeline
+        except sqlite3.Error as e:
+            logger.error(f"Timeline query failed for {src_ip}: {e}")
+            return []
+
     def close(self):
         self._stop_event.set()
         if hasattr(self._local, "conn") and self._local.conn:
@@ -467,4 +547,5 @@ def get_stats(): return _get_handler().get_stats()
 def get_ip_forensics(ip): return _get_handler().get_ip_forensics(ip)
 def find_similar_ips(ip, limit=5): return _get_handler().find_similar_ips(ip, limit)
 def add_false_positive(alert_id): return _get_handler().add_false_positive(alert_id)
+def get_alert_timeline(src_ip, limit=50): return _get_handler().get_alert_timeline(src_ip, limit)
 db = _get_handler()

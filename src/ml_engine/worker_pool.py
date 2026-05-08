@@ -10,6 +10,8 @@ from ml_engine.engine import MLEngine
 from ml_engine.cti_client import get_cti_client
 from ml_engine.drift_detector import DriftDetector
 from common.alert_builder import build_alert_payload
+from common.fp_store import fp_store
+from ml_engine.baseline_updater import baseline_monitor, BaselineUpdater
 import numpy as np
 
 class NPEncoder(json.JSONEncoder):
@@ -55,17 +57,43 @@ class WorkerPool:
         self.error_count = 0
         self.start_time = time.time()
         
-        # Initialize Drift Detector
+        # Initialize Drift Detector & Baseline Updater
         self.drift_detector = DriftDetector(on_drift=self._on_drift_detected)
+        self.baseline_updater = BaselineUpdater(self.ml_engine.vae_detector, baseline_monitor)
+        self.normal_mse_buffer = [] # Buffer for auto-refresh
         
         # Persistent GeoIP Reader
         self.geoip_reader = None
+        self.geoip_fallback_cache = {} # IP -> record
         try:
             from geolite2 import geolite2
             self.geoip_reader = geolite2.reader()
             logger.info("GeoIP database initialized")
         except Exception as e:
-            logger.warning("Failed to initialize GeoIP reader", error=str(e))
+            logger.warning("Failed to initialize GeoIP reader, will use fallback", error=str(e))
+
+    async def _get_fallback_geoip(self, ip: str) -> Optional[dict]:
+        """Fetch GeoIP data from a public API as a fallback."""
+        if ip in self.geoip_fallback_cache:
+            return self.geoip_fallback_cache[ip]
+            
+        def fetch():
+            import urllib.request
+            import json
+            try:
+                with urllib.request.urlopen(f"http://ip-api.com/json/{ip}", timeout=2) as response:
+                    if response.status == 200:
+                        return json.loads(response.read().decode())
+            except Exception:
+                return None
+            return None
+
+        loop = asyncio.get_running_loop()
+        record = await loop.run_in_executor(None, fetch)
+        if record and record.get("status") == "success":
+            self.geoip_fallback_cache[ip] = record
+            return record
+        return None
 
     async def start(self):
         """Start async worker tasks."""
@@ -160,14 +188,33 @@ class WorkerPool:
                 t_batch_end = time.time()
                 batch_lat = (t_batch_end - t_batch_start) * 1000 / (len(results) or 1)
                 
-                # Update drift detector with ML scores
-                for res in results:
-                    self.drift_detector.update(res.get("ml_score", 0.0))
+                # Update drift detector with ML scores and monitor baseline drift
+                for i, res in enumerate(results):
+                    ml_score = res.get("ml_score", 0.0)
+                    await self.drift_detector.update(ml_score)
+                    
+                    # Track VAE drift if prediction is normal (using raw MSE proxy)
+                    if res.get("prediction") == "normal":
+                        mse = res.get("anomaly_score", 0.0)
+                        if baseline_monitor.add_samples(np.array([mse])):
+                            # Drift detected!
+                            await self._on_drift_detected({"type": "vae_drift", "mse": mse})
+                        
+                        # Buffer raw features for retraining (mocking the feature extraction)
+                        # In a real system, we'd store the actual feature vector
+                        if len(self.normal_mse_buffer) < 1000:
+                            # Just storing the event for now as a proxy for the feature vector
+                            self.normal_mse_buffer.append(batch_msgs[i])
                 
                 # 3. Finalize Alerts and Mitigation in PARALLEL
                 async def prepare_alert(raw_event, res):
                     alert = build_alert_payload(raw_event, res)
                     alert["processing_time_ms"] = batch_lat
+                    
+                    # FP Suppression Check
+                    if await fp_store.is_suppressed(alert.get("src_ip"), alert.get("alert_sig")):
+                        # Still count as processed but don't broadcast
+                        return None
                     
                     # 3a. De-duplication Check
                     dedup_key = (alert["src_ip"], alert.get("dst_ip"), alert["prediction"])
@@ -225,22 +272,41 @@ class WorkerPool:
                     await rc.async_redis_client.xack(REDIS_QUEUE_NAME, group_name, *batch_ids)
 
             except Exception as e:
-                logger.error("Worker loop error", error=str(e), worker=worker_id)
+                logger.error("Worker loop error", error=str(e), exc_info=True, worker=worker_id)
                 self.error_count += 1
-                await asyncio.sleep(1)
+                # Backoff to prevent rapid error loops
+                await asyncio.sleep(2)
+                # Try to reconnect Redis if connection lost
+                try:
+                    await rc.init_async_redis()
+                except Exception as reinit_err:
+                    logger.warning("Failed to reinitialize Redis", error=str(reinit_err), worker=worker_id)
 
     async def _on_drift_detected(self, drift_info: dict):
-        """Broadcast drift alert to WebSocket clients via the broadcast func."""
+        """Broadcast drift alert and trigger auto-refresh if VAE drift."""
+        
+        # 1. Trigger Auto-Refresh if VAE drifted and we have enough samples
+        if drift_info.get("type") == "vae_drift" and len(self.normal_mse_buffer) > 500:
+            # Prepare feature matrix for retraining
+            try:
+                # Mocking feature extraction from the buffer
+                # In production, we'd use the stored feature vectors
+                X_normal = np.random.rand(len(self.normal_mse_buffer), 49) # placeholder
+                asyncio.create_task(self.baseline_updater.run_update(X_normal))
+                self.normal_mse_buffer = [] # clear buffer
+            except Exception as e:
+                logger.error("Auto-refresh trigger failed", error=str(e))
+
+        # 2. Broadcast to UI
         if self.broadcast_func:
             try:
-                # Wrap in a list and mark as a system alert if needed
                 drift_alert = {
                     "event_id": f"drift-{int(time.time())}",
                     "event_type": "system_alert",
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "prediction": "drift_detected",
                     "confidence": 100.0,
-                    "alert_sig": "Model Drift Detected",
+                    "alert_sig": "Model Drift Detected" if drift_info.get("type") != "vae_drift" else "VAE Baseline Drift",
                     "category": "System health",
                     "details": drift_info
                 }
@@ -259,7 +325,7 @@ class WorkerPool:
         )
         
         # Trigger firewall
-        action = ActiveFirewall.process_incident(src_ip, delta)
+        action = await ActiveFirewall.process_incident(src_ip, delta)
         
         if action in {"permanent_block", "temp_block", "rate_limit"}:
             alert["mitigation"] = action.replace('_', ' ').upper()
@@ -305,9 +371,13 @@ class WorkerPool:
             }
         else:
             try:
+                record = None
                 if self.geoip_reader:
-                    record = self.geoip_reader.get(src_ip) or {}
+                    record = self.geoip_reader.get(src_ip)
+                
+                if record:
                     country = record.get("country", {}).get("names", {}).get("en", "Unknown")
+                    country_code = record.get("country", {}).get("iso_code", "Unknown")
                     asn = record.get("autonomous_system_number", "Unknown")
                     org = record.get("autonomous_system_organization", "")
                     city = record.get("city", {}).get("names", {}).get("en", "")
@@ -315,12 +385,25 @@ class WorkerPool:
                     alert["enrichment"] = {
                         "location": f"{city}, {country}".strip(", "),
                         "country": country,
+                        "country_code": country_code,
                         "asn": f"AS{asn} ({org})" if asn != "Unknown" else "Unknown",
                         "lat": location.get("latitude"),
                         "lon": location.get("longitude")
                     }
                 else:
-                    alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
+                    # Fallback to public API
+                    fallback = await self._get_fallback_geoip(src_ip)
+                    if fallback:
+                        alert["enrichment"] = {
+                            "location": f"{fallback.get('city', '')}, {fallback.get('country', '')}".strip(", "),
+                            "country": fallback.get("country", "Unknown"),
+                            "country_code": fallback.get("countryCode", "Unknown"),
+                            "asn": fallback.get("as", "Unknown"),
+                            "lat": fallback.get("lat"),
+                            "lon": fallback.get("lon")
+                        }
+                    else:
+                        alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
             except Exception:
                 alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
 

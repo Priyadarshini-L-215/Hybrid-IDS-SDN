@@ -28,18 +28,22 @@ class ConnectionManager:
         logger.info("Dashboard client disconnected", count=len(self.active_connections))
 
     async def broadcast(self, message: str):
-        """Sends a message to all connected clients concurrently."""
+        """Sends a message to all connected clients concurrently with timeout protection."""
+        # 1. Take a snapshot of connections and release lock immediately
         async with self._lock:
             if not self.active_connections:
                 return
+            connections = list(self.active_connections)
+        
+        # 2. Execute concurrently with timeout protection
+        if connections:
+            tasks = [asyncio.create_task(self._send_safe(c, message)) for c in connections]
+            # Wait for all with a timeout to prevent slow clients from blocking the pipeline
+            _, pending = await asyncio.wait(tasks, timeout=2.0)
             
-            # Create send tasks for all clients
-            tasks = []
-            for connection in self.active_connections:
-                tasks.append(self._send_safe(connection, message))
-            
-            # Execute concurrently
-            await asyncio.gather(*tasks)
+            if pending:
+                logger.warning("Broadcast timeout for some clients", count=len(pending))
+                for t in pending: t.cancel()
 
     async def _send_safe(self, websocket: WebSocket, message: str):
         """Helper to send message and handle stale connections."""

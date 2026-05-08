@@ -1,0 +1,39 @@
+{
+    "schema_version": "1.0",
+    "project": "Sentinel Core V4",
+    "active": {
+        "name": "v4.0.0",
+        "model_family": "hybrid_rf_vae",
+        "rf": {
+            "model": "rf_multi_model.pkl",
+            "scaler": "scaler_multi.pkl"
+        },
+        "vae": {
+            "encoder": "vae_encoder.keras",
+            "decoder": "vae_decoder.keras",
+            "scaler": "vae_scaler.pkl",
+            "config": "vae_config.json",
+            "threshold": 0.3
+        },
+        "feature_schema": {
+            "name": "UNSW-NB15",
+            "feature_count": 49
+        },
+        "metadata": "model_meta.json"
+    },
+    "backups": [
+        {
+            "name": "v3.1",
+            "path": "backup_v3.1"
+        },
+        {
+            "name": "vae_v3",
+            "path": "backup_vae_v3"
+        }
+    ],
+    "notes": [
+        "Use this manifest as the authoritative record for runtime model selection.",
+        "Update it after retraining or swapping artifacts.",
+        "Keep backup paths in sync with rollback-ready snapshots."
+    ]
+}

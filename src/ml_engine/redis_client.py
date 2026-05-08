@@ -34,23 +34,39 @@ except Exception as e:
 
 # Async client for high-performance non-blocking queue consumption
 async_redis_client = None
+_async_init_lock = None  # Will be initialized on first use
+_async_initialized = False
 
 async def init_async_redis():
-    """Initialize async Redis client."""
-    global async_redis_client
-    try:
-        import redis.asyncio as async_redis
-        async_redis_client = async_redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            db=REDIS_DB,
-            decode_responses=True,
-            socket_connect_timeout=5,
-        )
-        return True
-    except Exception as e:
-        logger.error(f"[Redis] Failed to create async client: {e}")
-        return False
+    """Initialize async Redis client with thread-safe locking."""
+    global async_redis_client, _async_init_lock, _async_initialized
+    
+    # Lazy initialize lock
+    if _async_init_lock is None:
+        import asyncio
+        _async_init_lock = asyncio.Lock()
+    
+    async with _async_init_lock:
+        # Check again after acquiring lock (double-check pattern)
+        if _async_initialized:
+            return async_redis_client is not None
+        
+        try:
+            import redis.asyncio as async_redis
+            async_redis_client = async_redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                decode_responses=True,
+                socket_connect_timeout=5,
+            )
+            _async_initialized = True
+            logger.info("Async Redis client initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"[Redis] Failed to create async client: {e}")
+            _async_initialized = True  # Mark as attempted to prevent retries
+            return False
 
 
 def test_redis():

@@ -550,23 +550,85 @@ h1 {
 
 /* --- FORENSIC TIMELINE --- */
 .timeline-mini {
-  margin-top: 0.5rem;
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.timeline-item {
+  position: relative;
+  padding-left: 1.5rem;
+}
+
+.timeline-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--background);
+  z-index: 2;
+  box-shadow: 0 0 10px var(--primary-glow);
 }
 
 .timeline-item::after {
   content: "";
   position: absolute;
-  left: -2px;
-  top: 0;
+  left: 4px;
+  top: 16px;
   width: 2px;
-  height: 100%;
+  height: calc(100% + 0.5rem);
   background: var(--glass-border);
-}
-
-.timeline-item:last-child {
-  padding-bottom: 0;
+  z-index: 1;
 }
 
 .timeline-item:last-child::after {
-  height: 10px;
+  display: none;
+}
+
+/* SHAP Visualization */
+.shap-row {
+  position: relative;
+}
+
+.shap-explanation-container {
+  background: rgba(0,0,0,0.2);
+  padding: 1.5rem;
+  border-radius: 16px;
+  border: 1px solid var(--glass-border);
+}
+
+/* Node Detail Side Panel */
+.node-detail-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 450px;
+  height: 100vh;
+  z-index: 1000;
+  padding: 2.5rem;
+  overflow-y: auto;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.6);
+  backdrop-filter: blur(8px);
+  z-index: 999;
+}
+
+.empty-state-small {
+  padding: 1rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-style: italic;
+  background: rgba(255,255,255,0.02);
+  border-radius: 12px;
+  border: 1px dashed var(--glass-border);
 }

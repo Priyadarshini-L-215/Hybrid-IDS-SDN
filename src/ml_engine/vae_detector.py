@@ -7,23 +7,27 @@ into a clean interface for use by the ML Engine.
 Updated to support the 49-feature UNSW-NB15 schema.
 """
 
-import logging
+import structlog
 import os
 import numpy as np
 from pathlib import Path
 import joblib
 from typing import Tuple, Optional, List, Union
 
-# Set Keras backend to torch to maintain consistency with other parts of the system if possible,
-# or let it default to tensorflow if installed. Keras 3 is backend-agnostic.
-if not os.environ.get("KERAS_BACKEND"):
-    os.environ["KERAS_BACKEND"] = "torch"
+# Note: Keras backend is now set at application entry point (consumer.py, relay/app.py)
+# before any ML module imports to ensure consistency across the application.
 
 try:
     import keras
     KERAS_AVAILABLE = True
 except ImportError:
     KERAS_AVAILABLE = False
+
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
 
 if KERAS_AVAILABLE:
     @keras.saving.register_keras_serializable()
@@ -36,7 +40,14 @@ if KERAS_AVAILABLE:
             epsilon = keras.random.normal(shape=(batch, dim))
             return z_mean + keras.ops.exp(0.5 * z_log_var) * epsilon
 
-logger = logging.getLogger(__name__)
+        def get_config(self):
+            return super().get_config()
+
+        @classmethod
+        def from_config(cls, config):
+            return cls(**config)
+
+logger = structlog.get_logger(__name__)
 
 class VaeAnomalyDetector:
     """
@@ -57,23 +68,35 @@ class VaeAnomalyDetector:
         self.encoder = None
         self.decoder = None
         self.scaler = None
-
-        if not KERAS_AVAILABLE:
-            logger.error("Keras not found. VAE detector unavailable.")
-            return
+        self.use_onnx = False
 
         try:
-            # Load MinMaxScaler
+            # 1. Load MinMaxScaler
             self.scaler = joblib.load(scaler_path)
             self.n_features = getattr(self.scaler, 'n_features_in_', 49)
-            logger.info(f"VAE scaler loaded from {scaler_path} (features={self.n_features})")
+            logger.info(f"VAE scaler loaded (features={self.n_features})")
 
-            # Load Keras models
-            custom_objects = {'Sampling': Sampling} if KERAS_AVAILABLE else {}
-            self.encoder = keras.models.load_model(encoder_path, custom_objects=custom_objects)
-            self.decoder = keras.models.load_model(decoder_path, custom_objects=custom_objects)
-            
-            logger.info(f"VAE encoder/decoder loaded | threshold={threshold}")
+            # 2. Check for ONNX alternatives
+            onnx_enc = Path(str(encoder_path).replace(".keras", ".onnx"))
+            onnx_dec = Path(str(decoder_path).replace(".keras", ".onnx"))
+
+            if ONNX_AVAILABLE and onnx_enc.exists() and onnx_dec.exists():
+                self.encoder = ort.InferenceSession(str(onnx_enc))
+                self.decoder = ort.InferenceSession(str(onnx_dec))
+                self.use_onnx = True
+                logger.info("VAE using ONNX runtime for inference")
+            elif KERAS_AVAILABLE:
+                # Load Keras models (original logic)
+                custom_objects = {'Sampling': Sampling}
+                keras.utils.get_custom_objects()['Sampling'] = Sampling
+                with keras.saving.custom_object_scope(custom_objects):
+                    self.encoder = keras.models.load_model(encoder_path, compile=False, safe_mode=False)
+                    self.decoder = keras.models.load_model(decoder_path, compile=False, safe_mode=False)
+                logger.info("VAE using Keras for inference")
+            else:
+                logger.error("Neither Keras nor ONNX available for VAE detector")
+                return
+
             self._ready = True
         except Exception as e:
             logger.error(f"Failed to load VAE detector: {e}")
@@ -101,17 +124,19 @@ class VaeAnomalyDetector:
                 X_input = X
 
             X_scaled = self.scaler.transform(X_input).astype(np.float32)
-
+ 
             # VAE Inference
-            encoder_output = self.encoder.predict(X_scaled, verbose=0)
-            if isinstance(encoder_output, list):
-                z = encoder_output[0]
+            if self.use_onnx:
+                input_name = self.encoder.get_inputs()[0].name
+                z = self.encoder.run(None, {input_name: X_scaled})[0]
+                input_name_dec = self.decoder.get_inputs()[0].name
+                X_recon = self.decoder.run(None, {input_name_dec: z})[0]
             else:
-                z = encoder_output
-
-            X_recon = self.decoder.predict(z, verbose=0)
+                encoder_output = self.encoder.predict(X_scaled, verbose=0)
+                z = encoder_output[0] if isinstance(encoder_output, list) else encoder_output
+                X_recon = self.decoder.predict(z, verbose=0)
+ 
             mse = np.mean(np.power(X_scaled - X_recon, 2), axis=1)
-
             return z, mse
         except Exception as e:
             logger.error(f"VAE get_latent_and_mse error: {e}")

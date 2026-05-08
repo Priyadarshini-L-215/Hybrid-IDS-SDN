@@ -28,6 +28,7 @@ from common.config import (
     AUTOENCODER_THRESHOLD,
     get_cfg
 )
+from common.model_manifest import get_active_model_spec, load_model_manifest
 from common.feature_extractor import extract_features_batch, load_feature_names, validate_feature_vector
 from ml_engine.decision_engine import DecisionEngine
 from ml_engine.anomaly_scorer import AnomalyScorer
@@ -51,6 +52,12 @@ class MLEngine:
         self.feature_order = []
         self.is_ready = False
         self.fallback_mode = False
+        self.stage_status = {
+            "rf": "not_loaded",
+            "scaler": "not_loaded",
+            "vae": "not_loaded",
+        }
+        self.load_warnings = []
         
         self.decision_engine = DecisionEngine()
         self.anomaly_scorer = AnomalyScorer(
@@ -66,13 +73,26 @@ class MLEngine:
 
     def _load_metadata(self):
         try:
+            manifest = load_model_manifest()
+            active_spec = get_active_model_spec()
+
             if self.meta_path.exists():
                 with open(self.meta_path, "r") as f:
                     self.meta = json.load(f)
-                logger.info("Model metadata loaded", version=self.meta.get("model_version"))
             else:
-                logger.warning("Model metadata missing, using defaults")
                 self.meta = {"model_version": "v3.0-unknown"}
+
+            if manifest:
+                self.meta["manifest_schema_version"] = manifest.get("schema_version", "unknown")
+                self.meta["manifest_active_model"] = active_spec.get("name", self.meta.get("model_version", "unknown"))
+                self.meta["manifest_model_family"] = active_spec.get("model_family", "unknown")
+                self.meta["manifest_feature_count"] = active_spec.get("feature_schema", {}).get("feature_count")
+
+            logger.info(
+                "Model metadata loaded",
+                version=self.meta.get("model_version"),
+                manifest=self.meta.get("manifest_active_model", "absent"),
+            )
         except Exception as e:
             logger.error("Failed to load metadata", error=str(e))
             self.meta = {"model_version": "v3.0-error"}
@@ -121,7 +141,8 @@ class MLEngine:
         """Loads Scaler and RF (prefers ONNX)."""
         try:
             # 1. Load Feature Order
-            order_path = Path("models/feature_order.json")
+            from common.config import MODELS_DIR
+            order_path = MODELS_DIR / "feature_order.json"
             if order_path.exists():
                 with open(order_path, "r") as f:
                     self.feature_order = json.load(f)["feature_order"]
@@ -135,18 +156,25 @@ class MLEngine:
             scaler_path = MODELS_DIR / ACTIVE_SCALER_FILE
             if scaler_path.exists():
                 self.scaler = joblib.load(scaler_path)
+                self.stage_status["scaler"] = "loaded"
                 logger.info("Scaler loaded", path=str(scaler_path))
+            else:
+                self.load_warnings.append(f"Missing scaler: {scaler_path}")
             
             # 3. Load RF (Check extension)
             model_path = MODELS_DIR / ACTIVE_MODEL_FILE
             if ONNX_AVAILABLE and model_path.suffix == ".onnx" and model_path.exists():
                 self.rf_session = ort.InferenceSession(str(model_path))
                 self.rf_model = None
+                self.stage_status["rf"] = "loaded_onnx"
                 logger.info("ONNX RF Pipeline loaded", path=str(model_path))
             elif model_path.exists():
                 self.rf_model = joblib.load(model_path)
                 self.rf_session = None
+                self.stage_status["rf"] = "loaded_pickle"
                 logger.info("Pkl RF Model loaded", path=str(model_path))
+            else:
+                self.load_warnings.append(f"Missing active model: {model_path}")
 
             # 4. Load VAE Anomaly Detector (Stage 3 — Keras)
             vae_encoder_path = MODELS_DIR / "vae_encoder.keras"
@@ -170,14 +198,17 @@ class MLEngine:
                     threshold=self.vae_threshold,
                 )
                 if self.vae_detector.is_ready:
+                    self.stage_status["vae"] = "loaded"
                     logger.info("VAE Anomaly Detector loaded (Keras)",
                                 threshold=self.vae_threshold,
                                 encoder=str(vae_encoder_path))
                 else:
                     logger.warning("VAE Detector failed to initialise; anomaly detection disabled")
+                    self.stage_status["vae"] = "disabled"
                     self.vae_detector = None
             else:
                 logger.warning("VAE Keras model files not found; anomaly detection disabled")
+                self.stage_status["vae"] = "missing"
             
             # 5. Initialize SHAP Explainer (if RF pkl available)
             if self.rf_model and not self.shap_explainer:
@@ -195,6 +226,8 @@ class MLEngine:
 
             if (self.rf_model or self.rf_session) and self.scaler:
                 self.is_ready = True
+                if self.stage_status.get("vae") in {"missing", "disabled"}:
+                    self.fallback_mode = False
                 logger.info("ML Engine is fully READY")
             else:
                 logger.warning("ML Engine incomplete, entering FALLBACK (Signature-only)")
@@ -203,6 +236,29 @@ class MLEngine:
         except Exception as e:
             logger.error("Failed to load models", error=str(e))
             self.fallback_mode = True
+
+    def get_status(self) -> Dict[str, Any]:
+        """Returns runtime status for dashboard and diagnostics."""
+        if self.fallback_mode:
+            mode = "fallback"
+        elif self.is_ready and self.stage_status.get("vae") == "loaded":
+            mode = "full"
+        elif self.is_ready:
+            mode = "degraded"
+        else:
+            mode = "unavailable"
+
+        return {
+            "status": mode,
+            "ready": self.is_ready,
+            "fallback_mode": self.fallback_mode,
+            "feature_count": len(self.feature_order),
+            "stages": dict(self.stage_status),
+            "warnings": list(self.load_warnings),
+            "model_version": self.meta.get("model_version", "unknown"),
+            "vae_enabled": self.vae_detector is not None,
+            "vae_threshold": self.vae_threshold,
+        }
 
     def predict_batch(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -233,6 +289,8 @@ class MLEngine:
                 valid_indices.append(idx)
             else:
                 invalid_count += 1
+
+        valid_index_map = {event_idx: pos for pos, event_idx in enumerate(valid_indices)}
 
         if invalid_count:
             logger.warning(
@@ -368,10 +426,9 @@ class MLEngine:
             
             # Layer 3: Anomaly (Real)
             anomaly_score = 0.0
-            if i in valid_indices:
-                v_idx = valid_indices.index(i)
-                if v_idx < len(valid_anomaly_scores):
-                    anomaly_score = valid_anomaly_scores[v_idx]
+            v_idx = valid_index_map.get(i)
+            if v_idx is not None and v_idx < len(valid_anomaly_scores):
+                anomaly_score = valid_anomaly_scores[v_idx]
             
             shap_top3 = batch_shap_results.get(i, [])
             

@@ -58,7 +58,11 @@ data/*.db-wal
 data/logs/*.log
 data/logs/*.json
 data/logs/*.txt
+data/logs/*.jsonl
+data/logs/*.log*
 *.log
+*.log*
+*.rdb
 # Root temporary/log/output files
 *_log.txt
 *_pid.txt

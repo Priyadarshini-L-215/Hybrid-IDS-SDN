@@ -1,4 +1,5 @@
 import subprocess
+import asyncio
 import logging
 import threading
 import ipaddress
@@ -25,12 +26,13 @@ class ActiveFirewall:
     Supports dual-mode: legacy (ipset/iptables) and sdn (Ryu Controller).
     """
     
-    _lock = threading.Lock()
+    _lock: Optional[asyncio.Lock] = None
     _protected_ips: Set[str] = set()
     _redis_client: Optional[redis.Redis] = None
     _sdn_client: Optional[SDNClient] = None
     _initialized = False
     _backend = "legacy" # Default to legacy
+    _decay_task: Optional[asyncio.Task] = None
     
     # Redis Keys
     REDIS_REPUTATION_KEY = "sentinel_reputation"
@@ -40,9 +42,12 @@ class ActiveFirewall:
     SET_LIMITED = "sentinel_limited"
 
     @classmethod
-    def _initialize(cls):
+    async def _initialize(cls):
         """Setup backend and background decay task."""
-        with cls._lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+            
+        async with cls._lock:
             if cls._initialized: return
             cls._protected_ips = get_protected_ips()
             
@@ -56,7 +61,8 @@ class ActiveFirewall:
                 logger.info("Mitigation Backend set to LEGACY (ipset/iptables)")
             
             # ALWAYS setup kernel sets for fallback reliability
-            cls._setup_kernel_sets()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, cls._setup_kernel_sets)
             
             # Initialize Redis connection for shared reputation
             try:
@@ -66,32 +72,33 @@ class ActiveFirewall:
             
             cls._initialized = True
             
-            # Start decay thread
-            threading.Thread(target=cls._decay_loop, daemon=True).start()
+            # Start decay task instead of thread
+            cls._decay_task = asyncio.create_task(cls._decay_loop())
             
             # Cold-start: Load existing high-reputation offenders from Redis into backend
-            cls._repopulate_from_reputation()
+            await cls._repopulate_from_reputation()
             
             logger.info("IPS Firewall initialized", shared_reputation=True, protected_count=len(cls._protected_ips))
 
     @classmethod
-    def close(cls):
+    async def close(cls):
         """Release long-lived mitigation resources when shutting down."""
-        with cls._lock:
+        if cls._lock is None: return
+        
+        async with cls._lock:
+            if cls._decay_task:
+                cls._decay_task.cancel()
+                try:
+                    await cls._decay_task
+                except asyncio.CancelledError:
+                    pass
+                cls._decay_task = None
+
             if cls._sdn_client is None:
                 return
 
             try:
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-
-                if loop and loop.is_running():
-                    loop.create_task(cls._sdn_client.close())
-                else:
-                    asyncio.run(cls._sdn_client.close())
+                await cls._sdn_client.close()
             except Exception as e:
                 logger.warning("Failed to close SDN client cleanly", error=str(e))
             finally:
@@ -102,14 +109,10 @@ class ActiveFirewall:
         """Initialize ipset sets and the custom iptables chain (Legacy mode)."""
         try:
             # 1. Create ipset sets with timeout support
-            # Note: -! flag prevents error if set exists, but WON'T update params.
-            # If creation fails, we destroy and recreate to ensure params match.
-            
             def create_set_safe(name, params):
                 res = subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], capture_output=True)
                 if res.returncode != 0:
                     logger.warning(f"ipset {name} creation failed. Flushing iptables and recreating...", error=res.stderr.decode())
-                    # Mismatch or busy: we need to clear iptables rules using this set first
                     subprocess.run(["sudo", "iptables", "-F", "SENTINEL_IPS"], check=False)
                     subprocess.run(["sudo", "ipset", "destroy", name], check=False)
                     subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], check=True)
@@ -120,14 +123,9 @@ class ActiveFirewall:
             # 2. Ensure iptables chain exists and rules are present
             CHAIN_NAME = "SENTINEL_IPS"
             subprocess.run(["sudo", "iptables", "-N", CHAIN_NAME], check=False)
-            
-            # Flush the chain to ensure clean state with modern rules
             subprocess.run(["sudo", "iptables", "-F", CHAIN_NAME], check=True)
 
-            # Rule 1: Permanent Blocks (Instant Drop)
             subprocess.run(["sudo", "iptables", "-A", CHAIN_NAME, "-m", "set", "--match-set", cls.SET_BLOCKS, "src", "-j", "DROP"], check=True)
-            
-            # Rule 2: Rate Limiting (Permit up to threshold, then drop)
             subprocess.run([
                 "sudo", "iptables", "-A", CHAIN_NAME, 
                 "-m", "set", "--match-set", cls.SET_LIMITED, "src",
@@ -148,19 +146,21 @@ class ActiveFirewall:
             logger.error("Failed to setup kernel firewall", error=str(e))
 
     @classmethod
-    def _repopulate_from_reputation(cls):
+    async def _repopulate_from_reputation(cls):
         """On startup, read Redis reputation and re-block active offenders."""
         if not cls._redis_client: return
         try:
-            reputation = cls._redis_client.hgetall(cls.REDIS_REPUTATION_KEY)
+            loop = asyncio.get_running_loop()
+            reputation = await loop.run_in_executor(None, cls._redis_client.hgetall, cls.REDIS_REPUTATION_KEY)
+            
             count = 0
             for ip, score in reputation.items():
                 s = float(score)
                 if s >= REPUTATION_PERM_BLOCK:
-                    cls.block(ip, ttl=0)
+                    await cls.block(ip, ttl=0)
                     count += 1
                 elif s >= REPUTATION_TEMP_BLOCK:
-                    cls.block(ip, ttl=BLOCK_TTL)
+                    await cls.block(ip, ttl=BLOCK_TTL)
                     count += 1
             if count > 0:
                 logger.info("Firewall cold-start complete", reblocked_count=count)
@@ -168,45 +168,49 @@ class ActiveFirewall:
             logger.error("Failed to repopulate firewall from Redis", error=str(e))
 
     @classmethod
-    def _decay_loop(cls):
+    async def _decay_loop(cls):
         """Decays reputation scores every minute."""
         while True:
-            time.sleep(60)
+            await asyncio.sleep(60)
             if not cls._redis_client: continue
             
             try:
-                pipe = cls._redis_client.pipeline()
-                count = 0
-                for ip, score in cls._redis_client.hscan_iter(cls.REDIS_REPUTATION_KEY):
-                    val = float(score)
-                    new_score = val * 0.9
+                loop = asyncio.get_running_loop()
+                def do_decay():
+                    pipe = cls._redis_client.pipeline()
+                    rehabilitated = []
+                    for ip, score in cls._redis_client.hscan_iter(cls.REDIS_REPUTATION_KEY):
+                        val = float(score)
+                        new_score = val * 0.9
+                        
+                        if val >= REPUTATION_TEMP_BLOCK and new_score < REPUTATION_TEMP_BLOCK:
+                            rehabilitated.append(ip)
+                        
+                        if new_score < 0.1:
+                            pipe.hdel(cls.REDIS_REPUTATION_KEY, ip)
+                        else:
+                            pipe.hset(cls.REDIS_REPUTATION_KEY, ip, new_score)
                     
-                    # If score falls below block threshold, unblock in the firewall
-                    if val >= REPUTATION_TEMP_BLOCK and new_score < REPUTATION_TEMP_BLOCK:
-                        logger.info("IP rehabilitated via decay", ip=ip, score=round(new_score, 2))
-                        cls.unblock(ip)
-                    
-                    if new_score < 0.1:
-                        pipe.hdel(cls.REDIS_REPUTATION_KEY, ip)
-                    else:
-                        pipe.hset(cls.REDIS_REPUTATION_KEY, ip, new_score)
-                    
-                    count += 1
-                    if count % 500 == 0:
-                        pipe.execute()
-                        pipe = cls._redis_client.pipeline()
+                    pipe.execute()
+                    return rehabilitated
                 
-                pipe.execute()
+                rehabilitated_ips = await loop.run_in_executor(None, do_decay)
+                for ip in rehabilitated_ips:
+                    logger.info("IP rehabilitated via decay", ip=ip)
+                    await cls.unblock(ip)
+                    
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error("Decay loop failed", error=str(e))
 
     @classmethod
-    def process_incident(cls, src_ip: str, delta: float) -> str:
+    async def process_incident(cls, src_ip: str, delta: float) -> str:
         """
         Updates IP reputation and triggers mitigation if thresholds reached.
         Returns: action taken
         """
-        if not cls._initialized: cls._initialize()
+        if not cls._initialized: await cls._initialize()
         
         if src_ip in cls._protected_ips:
             return "skipped"
@@ -214,20 +218,21 @@ class ActiveFirewall:
         if not cls._redis_client: return "logged"
         
         try:
-            new_score = cls._redis_client.hincrbyfloat(cls.REDIS_REPUTATION_KEY, src_ip, delta)
+            loop = asyncio.get_running_loop()
+            new_score = await loop.run_in_executor(None, cls._redis_client.hincrbyfloat, cls.REDIS_REPUTATION_KEY, src_ip, delta)
             
             if new_score < 0: 
-                cls._redis_client.hset(cls.REDIS_REPUTATION_KEY, src_ip, 0)
+                await loop.run_in_executor(None, cls._redis_client.hset, cls.REDIS_REPUTATION_KEY, src_ip, 0)
                 return "logged"
 
             if new_score >= REPUTATION_PERM_BLOCK:
-                cls.block(src_ip, ttl=0)
+                await cls.block(src_ip, ttl=0)
                 return "permanent_block"
             elif new_score >= REPUTATION_TEMP_BLOCK:
-                cls.block(src_ip, ttl=BLOCK_TTL)
+                await cls.block(src_ip, ttl=BLOCK_TTL)
                 return "temp_block"
             elif new_score >= REPUTATION_LIMIT:
-                cls.rate_limit(src_ip)
+                await cls.rate_limit(src_ip)
                 return "rate_limit"
             
             return "logged"
@@ -236,99 +241,112 @@ class ActiveFirewall:
             return "logged"
 
     @classmethod
-    def block(cls, ip: str, ttl: int = 0):
+    async def block(cls, ip: str, ttl: int = 0):
         """Adds IP to block set or installs SDN flow."""
-        if not cls._initialized: cls._initialize()
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            logger.error("Invalid IP address format", ip=ip)
+            return False
+        
+        if not cls._initialized: await cls._initialize()
         
         success = False
         if cls._backend == "sdn" and cls._sdn_client:
-            # Try SDN block
             try:
-                success = cls._sdn_client.block_sync(ip, ttl)
+                success = await cls._sdn_client.block(ip, ttl)
             except Exception as e:
                 logger.error("SDN block failed", error=str(e))
                 if SDN_FALLBACK_TO_IPSET:
-                    logger.warn("Falling back to ipset for block", ip=ip)
-                    cls._legacy_block(ip, ttl)
+                    logger.warning("Falling back to ipset for block", ip=ip)
+                    await cls._legacy_block(ip, ttl)
                     success = True
         else:
-            cls._legacy_block(ip, ttl)
+            await cls._legacy_block(ip, ttl)
             success = True
             
         if success and ttl == 0 and cls._redis_client:
-            cls._redis_client.hset(cls.REDIS_REPUTATION_KEY, ip, REPUTATION_PERM_BLOCK)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, cls._redis_client.hset, cls.REDIS_REPUTATION_KEY, ip, REPUTATION_PERM_BLOCK)
+        
+        return success
 
     @classmethod
-    def _legacy_block(cls, ip: str, ttl: int = 0):
+    async def _legacy_block(cls, ip: str, ttl: int = 0):
         try:
-            # Check if IPv6 - ipset sets created in _setup_kernel_sets are IPv4 (family inet)
-            try:
-                if ipaddress.ip_address(ip).version == 6:
-                    logger.warning("Skipping IPv6 block (not yet supported by legacy backend)", ip=ip)
-                    return
-            except ValueError:
-                pass
+            if ipaddress.ip_address(ip).version == 6:
+                logger.warning("Skipping IPv6 block (not yet supported by legacy backend)", ip=ip)
+                return
 
-            subprocess.run(["sudo", "ipset", "add", cls.SET_BLOCKS, ip, "timeout", str(ttl), "-!"], check=True)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "add", cls.SET_BLOCKS, ip, "timeout", str(ttl), "-!"], True)
             logger.warning("Legacy Block (ipset)", ip=ip, ttl=ttl)
         except Exception as e:
             logger.error("Legacy block failed", ip=ip, error=str(e))
 
     @classmethod
-    def rate_limit(cls, ip: str):
+    async def rate_limit(cls, ip: str):
         """Adds IP to rate-limited set."""
-        if not cls._initialized: cls._initialize()
         try:
-            subprocess.run(["sudo", "ipset", "add", cls.SET_LIMITED, ip, "-!"], check=True)
+            ipaddress.ip_address(ip)
+        except ValueError:
+            logger.error("Invalid IP address format", ip=ip)
+            return False
+        
+        if not cls._initialized: await cls._initialize()
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "add", cls.SET_LIMITED, ip, "-!"], True)
             logger.warning("IP Rate Limited", ip=ip)
         except Exception as e:
             logger.error("Rate limit operation failed", ip=ip, error=str(e))
 
     @classmethod
-    def unblock(cls, ip: str):
+    async def unblock(cls, ip: str):
         """Removes IP from both blocks and clears shared reputation."""
-        if not cls._initialized: cls._initialize()
+        if not cls._initialized: await cls._initialize()
         
         if cls._backend == "sdn" and cls._sdn_client:
             try:
-                cls._sdn_client.unblock_sync(ip)
+                await cls._sdn_client.unblock(ip)
             except Exception as e:
                 logger.error("SDN unblock failed", error=str(e))
         
-        # Always try legacy unblock just in case
         try:
-            # Check if IPv6
             try:
                 if ipaddress.ip_address(ip).version == 6:
-                    # Clear from Redis anyway
                     if cls._redis_client:
-                        cls._redis_client.hdel(cls.REDIS_REPUTATION_KEY, ip)
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, cls._redis_client.hdel, cls.REDIS_REPUTATION_KEY, ip)
                     return
             except ValueError:
                 pass
 
-            subprocess.run(["sudo", "ipset", "del", cls.SET_BLOCKS, ip, "-!"], check=True)
-            subprocess.run(["sudo", "ipset", "del", cls.SET_LIMITED, ip, "-!"], check=True)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", cls.SET_BLOCKS, ip, "-!"], False)
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", cls.SET_LIMITED, ip, "-!"], False)
+            
             if cls._redis_client:
-                cls._redis_client.hdel(cls.REDIS_REPUTATION_KEY, ip)
+                await loop.run_in_executor(None, cls._redis_client.hdel, cls.REDIS_REPUTATION_KEY, ip)
             logger.info("IP Unblocked manually", ip=ip)
         except Exception as e:
             logger.error("Unblock operation failed", ip=ip, error=str(e))
 
     @classmethod
-    def is_blocked(cls, ip: str) -> bool:
+    async def is_blocked(cls, ip: str) -> bool:
         """Checks if an IP is currently in the block set (permanent or temporary)."""
-        if not cls._initialized: cls._initialize()
+        if not cls._initialized: await cls._initialize()
         try:
-            result = subprocess.run(["sudo", "ipset", "test", cls.SET_BLOCKS, ip], capture_output=True, text=True)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "test", cls.SET_BLOCKS, ip], False, True, True)
             return result.returncode == 0
         except Exception:
             return False
 
     @classmethod
-    def get_status(cls) -> Dict[str, Any]:
+    async def get_status(cls) -> Dict[str, Any]:
         """Returns summary counts."""
-        detailed = cls.get_detailed_status()
+        detailed = await cls.get_detailed_status()
         return {
             "backend": cls._backend,
             "permanent": len(detailed["permanent_ips"]),
@@ -337,7 +355,7 @@ class ActiveFirewall:
         }
 
     @classmethod
-    def get_detailed_status(cls) -> Dict[str, Any]:
+    async def get_detailed_status(cls) -> Dict[str, Any]:
         """Returns actual list of IPs."""
         perm = []
         temp = []
@@ -345,21 +363,21 @@ class ActiveFirewall:
         
         if cls._redis_client:
             try:
-                reputation = cls._redis_client.hgetall(cls.REDIS_REPUTATION_KEY)
+                loop = asyncio.get_running_loop()
+                reputation = await loop.run_in_executor(None, cls._redis_client.hgetall, cls.REDIS_REPUTATION_KEY)
                 reputation = {k: float(v) for k, v in reputation.items()}
             except Exception as e:
                 logger.error("Failed to fetch shared reputation", error=str(e))
 
-        # Merge results from both backends if possible
         if cls._backend == "sdn" and cls._sdn_client:
             try:
-                sdn_flows = cls._sdn_client.get_flows_sync()
-                # For now SDN only returns blocked IPs
+                sdn_flows = await cls._sdn_client.get_flows()
                 perm.extend(sdn_flows.get("blocked_ips", []))
             except Exception as e:
                 logger.error("SDN flow fetch failed", error=str(e))
 
-        def _parse_ipset(set_name, is_perm):
+        def _parse_ipset(set_name):
+            ips = {"perm": [], "temp": []}
             try:
                 result = subprocess.run(["sudo", "ipset", "list", set_name], capture_output=True, text=True)
                 if result.returncode == 0:
@@ -372,22 +390,29 @@ class ActiveFirewall:
                         if in_members and line.strip():
                             parts = line.split()
                             ip = parts[0]
-                            if ip in perm: continue # Avoid duplicates
-                            
-                            if is_perm:
-                                timeout = int(parts[2]) if len(parts) >= 3 else 0
-                                if timeout == 0: perm.append(ip)
-                                else: temp.append(ip)
-                            else:
-                                temp.append(ip)
+                            timeout = int(parts[2]) if len(parts) >= 3 else 0
+                            if timeout == 0: ips["perm"].append(ip)
+                            else: ips["temp"].append(ip)
             except Exception as e:
                 logger.error(f"Failed to list ipset members for {set_name}", error=str(e))
+            return ips
 
-        _parse_ipset(cls.SET_BLOCKS, True)
-        _parse_ipset(cls.SET_LIMITED, False)
+        loop = asyncio.get_running_loop()
+        blocks = await loop.run_in_executor(None, _parse_ipset, cls.SET_BLOCKS)
+        limited = await loop.run_in_executor(None, _parse_ipset, cls.SET_LIMITED)
+
+        perm.extend(blocks["perm"])
+        temp.extend(blocks["temp"])
+        temp.extend(limited["perm"]) # Limited is always temporary in sense of timeout 3600
+        temp.extend(limited["temp"])
+
+        # Deduplicate
+        perm = list(set(perm))
+        temp = list(set(temp))
 
         return {
             "permanent_ips": perm,
             "temporary_ips": temp,
             "reputation": reputation
         }
+

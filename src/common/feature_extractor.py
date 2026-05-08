@@ -7,6 +7,8 @@ Includes a StatefulFeatureTracker for temporal connection-tracking features.
 import json
 import logging
 import joblib
+import threading
+import time
 from pathlib import Path
 from collections import deque
 
@@ -16,9 +18,11 @@ logger = logging.getLogger(__name__)
 class StatefulFeatureTracker:
     def __init__(self, window_size=100):
         self.window = deque(maxlen=window_size)
+        self._lock = threading.Lock()
 
     def update(self, event_meta):
-        self.window.append(event_meta)
+        with self._lock:
+            self.window.append(event_meta)
 
     def get_ct_stats(self, src_ip, dst_ip, service, dst_port, src_port):
         ct_srv_src = 0
@@ -29,26 +33,27 @@ class StatefulFeatureTracker:
         ct_dst_sport_ltm = 0
         ct_dst_src_ltm = 0
         
-        for entry in self.window:
-            # Matches Source IP
-            if entry['src_ip'] == src_ip:
-                ct_src_ltm += 1
-                if entry['service'] == service:
-                    ct_srv_src += 1
+        with self._lock:
+            for entry in self.window:
+                # Matches Source IP
+                if entry['src_ip'] == src_ip:
+                    ct_src_ltm += 1
+                    if entry['service'] == service:
+                        ct_srv_src += 1
+                    if entry['dst_ip'] == dst_ip:
+                        ct_dst_src_ltm += 1
+                
+                # Matches Destination IP
                 if entry['dst_ip'] == dst_ip:
-                    ct_dst_src_ltm += 1
-            
-            # Matches Destination IP
-            if entry['dst_ip'] == dst_ip:
-                ct_dst_ltm += 1
-                if entry['service'] == service:
-                    ct_srv_dst += 1
-                if entry['dst_port'] == dst_port:
-                    ct_src_dport_ltm += 1
-            
-            # Matches Source Port for destination sport check
-            if entry['src_port'] == src_port and entry['dst_ip'] == dst_ip:
-                ct_dst_sport_ltm += 1
+                    ct_dst_ltm += 1
+                    if entry['service'] == service:
+                        ct_srv_dst += 1
+                    if entry['dst_port'] == dst_port:
+                        ct_src_dport_ltm += 1
+                
+                # Matches Source Port for destination sport check
+                if entry['src_port'] == src_port and entry['dst_ip'] == dst_ip:
+                    ct_dst_sport_ltm += 1
                     
         return {
             'ct_srv_src': float(ct_srv_src),

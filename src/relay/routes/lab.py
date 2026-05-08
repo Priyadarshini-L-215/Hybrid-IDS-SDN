@@ -109,7 +109,7 @@ async def run_payload_simulation(request: Dict[str, Any]):
     logger.info("Simulating Payload Injection", target=target)
     
     try:
-        import httpx
+        import requests
         # Send multiple patterns to trigger SQLi regex
         payloads = [
             "' OR '1'='1' --",
@@ -118,14 +118,16 @@ async def run_payload_simulation(request: Dict[str, Any]):
             "<script>alert('xss')</script>"
         ]
         
-        async with httpx.AsyncClient() as client:
+        def _send_payloads():
+            from common.config import API_PORT
             for p in payloads:
                 try:
                     # We send it to port 5000 (ourselves)
-                    from common.config import API_PORT
-                    await client.get(f"http://{target}:{API_PORT}/api/health?id={p}", timeout=1.0)
+                    requests.get(f"http://{target}:{API_PORT}/api/health?id={p}", timeout=1.0)
                 except Exception as e:
                     logger.debug("Failed to send HTTP payload in simulation", error=str(e))
+        
+        await asyncio.to_thread(_send_payloads)
                 
         return {"success": True, "message": f"Malicious payloads ({len(payloads)}) injected towards {target}"}
     except Exception as e:

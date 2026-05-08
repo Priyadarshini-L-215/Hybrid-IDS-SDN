@@ -1,4 +1,4 @@
-import httpx
+import requests
 import asyncio
 import structlog
 import time
@@ -11,14 +11,13 @@ CACHE_TTL = 3600  # 1 hour
 MAX_CACHE_SIZE = 1000
 
 class CTIClient:
-    """Asynchronous client for External Cyber Threat Intelligence."""
+    """Asynchronous client for External Cyber Threat Intelligence using requests as fallback for httpx."""
     
     BASE_URL = "https://otx.alienvault.com/api/v1"
     
     def __init__(self, api_key: str = ALIENTVAULT_KEY):
         self.api_key = api_key
         self.cache: Dict[str, tuple] = {}  # {ip: (data, timestamp)}
-        self.client = httpx.AsyncClient(timeout=5.0)
 
     async def get_ip_reputation(self, ip: str) -> Dict[str, Any]:
         """Fetches reputation data for an IP from AlienVault OTX."""
@@ -33,12 +32,23 @@ class CTIClient:
             else:
                 del self.cache[ip]
 
-        try:
+        def fetch():
             url = f"{self.BASE_URL}/indicators/IPv4/{ip}/general"
             headers = {"X-OTX-API-KEY": self.api_key}
+            try:
+                response = requests.get(url, headers=headers, timeout=5.0)
+                return response
+            except Exception as e:
+                logger.error("CTI network request failed", ip=ip, error=str(e))
+                return None
+
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, fetch)
             
-            response = await self.client.get(url, headers=headers)
-            
+            if response is None:
+                return {"status": "error", "message": "Network failure"}
+
             if response.status_code == 200:
                 data = response.json()
                 
@@ -81,9 +91,8 @@ class CTIClient:
         return min(score, 1.0)
 
     async def close(self):
-        if self.client is not None:
-            await self.client.aclose()
-            self.client = None
+        # Requests doesn't need explicit close for simple GETs
+        pass
 
 
 async def close_cti_client():

@@ -15,6 +15,12 @@ STARTUP_LOG_FILE="$PROJECT_ROOT/data/logs/startup.log"
 STARTUP_TIMEOUT=60
 APP_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
+# Force CPU-only ML startup unless the operator explicitly overrides it.
+export KERAS_BACKEND="${KERAS_BACKEND:-torch}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:--1}"
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
+export TF_ENABLE_ONEDNN_OPTS="${TF_ENABLE_ONEDNN_OPTS:-0}"
+
 # ============================================================================
 # UTILITIES
 # ============================================================================

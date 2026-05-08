@@ -4,6 +4,11 @@ import structlog
 from pathlib import Path
 import sys
 import numpy as np
+import os
+
+# Set Keras backend BEFORE importing any ML modules
+if not os.environ.get("KERAS_BACKEND"):
+    os.environ["KERAS_BACKEND"] = "torch"
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -13,6 +18,7 @@ from ml_engine.worker_pool import WorkerPool, NPEncoder
 from ml_engine.engine import MLEngine
 from ml_engine import redis_client as rc
 from common.database import batch_add_alerts
+from common.db_writer import alert_writer
 import json
 
 # Initialize structured logging
@@ -28,21 +34,24 @@ async def broadcast_and_persist(alerts: list):
     if not alerts:
         return
 
-    # 1. Persist to SQLite (Offload blocking call to executor)
+    # 1. Persist to SQLite (Queued for background writing)
     try:
-        loop = asyncio.get_running_loop()
-        # batch_add_alerts is synchronous
-        await loop.run_in_executor(None, batch_add_alerts, alerts)
-        logger.debug("Persisted batch to SQLite", count=len(alerts))
+        await alert_writer.add_alerts(alerts)
+        logger.debug("Queued batch for SQLite writing", count=len(alerts))
     except Exception as e:
-        logger.error("Failed to persist alerts to DB", error=str(e))
+        logger.error("Failed to queue alerts for DB", error=str(e))
 
-    # 2. Broadcast to Redis Stream
+    # 2. Broadcast to Redis Stream (Trimmed for performance)
     if rc.async_redis_client:
         try:
             pipe = rc.async_redis_client.pipeline()
             for alert in alerts:
-                alert_json = json.dumps(alert, cls=NPEncoder)
+                # Create a shallow copy and remove large raw_event for real-time broadcast
+                # It will still be persisted to DB via alert_writer (which has the original list)
+                broadcast_payload = alert.copy()
+                broadcast_payload.pop('raw_event', None)
+                
+                alert_json = json.dumps(broadcast_payload, cls=NPEncoder)
                 pipe.xadd(
                     REDIS_ALERT_STREAM,
                     {"alert": alert_json},
@@ -109,7 +118,8 @@ async def main():
         # Windows doesn't have SIGHUP or add_signal_handler(SIGHUP)
         logger.warning("SIGHUP signal handler NOT registered. Config reloading via signal disabled (expected on Windows).")
 
-    # 3. Start workers
+    # 3. Start workers and DB writer
+    await alert_writer.start()
     await pool.start()
     
     logger.info("ML Engine is ACTIVE and monitoring Redis Stream", broadcast="Redis Stream (sentinel_alerts_stream)")
@@ -124,6 +134,7 @@ async def shutdown(pool):
     logger.info("Shutdown signal received")
     _RUNNING = False
     await pool.stop()
+    await alert_writer.stop()
     await rc.close_async_redis()
     logger.info("ML Engine shut down gracefully")
 

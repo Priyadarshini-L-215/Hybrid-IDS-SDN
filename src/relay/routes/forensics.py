@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import structlog
@@ -48,45 +49,42 @@ async def submit_feedback(feedback: AlertFeedback):
         logger.error("Failed to save feedback", error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error saving feedback")
 
-@router.get("/trail/{alert_id}")
-async def get_forensic_trail(alert_id: str):
+@router.get("/ip/{ip_address}")
+async def get_ip_forensics_details(ip_address: str):
     """
-    Retrieves deep forensic data for a specific alert by reconstructing the IP's activity trail.
+    Returns the full IP timeline, reputation score, and GeoIP data for the drill-down panel.
     """
     from common.database import db
+    from ml_engine.firewall import ActiveFirewall
     try:
-        # 1. Get the alert details to find the source IP
-        conn = db._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT src_ip FROM alerts WHERE id = ?", (alert_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Alert not found")
+        loop = asyncio.get_running_loop()
+        # 1. Get base forensics from DB
+        forensics = await loop.run_in_executor(None, db.get_ip_forensics, ip_address)
         
-        ip = row['src_ip']
-        
-        # 2. Get full forensics for this IP
-        forensics = db.get_ip_forensics(ip)
         if not forensics:
-            return {"alert_id": alert_id, "ip": ip, "status": "Limited forensic history"}
-            
-        # 3. Find similar IPs
-        similar_nodes = db.find_similar_ips(ip, limit=3)
-        
+            return {
+                "ip": ip_address,
+                "alert_count": 0,
+                "history": [],
+                "reputation_score": 0,
+                "geo": {"country": "Unknown", "city": "Unknown", "asn": "Unknown"}
+            }
+
+        # 2. Get current firewall status
+        is_mitigated = False
+        try:
+            is_mitigated = await ActiveFirewall.is_blocked(ip_address)
+        except Exception: pass
+
+        # 3. Find similar IPs for correlation
+        similar_nodes = await loop.run_in_executor(None, db.find_similar_ips, ip_address, 3)
+
+        # 4. Aggregate results
         return {
-            "alert_id": alert_id,
-            "target_ip": ip,
-            "node_intelligence": {
-                "total_events": forensics.get("total_events"),
-                "first_seen": forensics.get("first_seen"),
-                "last_seen": forensics.get("last_seen"),
-                "ja3_hash": forensics.get("ja3_hash"),
-                "avg_latency": forensics.get("avg_latency_ms")
-            },
-            "timeline": forensics.get("history", []),
-            "threat_enrichment": forensics.get("cti"),
+            **forensics,
+            "is_mitigated": is_mitigated,
             "lateral_movement_risk": similar_nodes
         }
     except Exception as e:
-        logger.error("Forensics reconstruction failed", error=str(e))
-        raise HTTPException(status_code=500, detail="Forensic engine error")
+        logger.error("Failed to fetch IP forensics", ip=ip_address, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

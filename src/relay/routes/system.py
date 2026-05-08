@@ -2,7 +2,8 @@ import asyncio
 import os
 import yaml
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from pydantic import BaseModel, Field, IPvAnyAddress
 
 from fastapi import APIRouter, HTTPException
 import structlog
@@ -10,7 +11,8 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 
 from common.config import CONFIG_PATH
-from common.database import get_recent_alerts, get_stats, init_db
+from common.database import get_recent_alerts, get_stats, init_db, db
+from common.fp_store import fp_store
 from ml_engine import redis_client as rc
 from ml_engine.firewall import ActiveFirewall
 from common.config import DEV_MODE
@@ -18,6 +20,16 @@ from common.config import DEV_MODE
 logger = structlog.get_logger("relay.routes.system")
 
 router = APIRouter(prefix="/api", tags=["System"])
+
+class IPRequest(BaseModel):
+    ip: IPvAnyAddress = Field(..., description="Target IP address")
+
+class FalsePositiveRequest(BaseModel):
+    alert_id: int = Field(..., description="ID of the alert to mark")
+    src_ip: IPvAnyAddress = Field(..., description="Source IP to unblock")
+
+class ConfigUpdate(BaseModel):
+    config: Dict[str, Any] = Field(..., description="Full configuration object")
 
 @router.get("/health")
 async def health():
@@ -40,7 +52,67 @@ async def get_alerts(limit: int = 100):
         }
     except Exception as e:
         logger.error("Failed to fetch alerts", error=str(e))
-        return {"alerts": [], "error": str(e)}
+        return {"alerts": [], "error": str(e)}@router.get("/alerts/{alert_id}")
+async def get_alert_detail(alert_id: str):
+    """Fetches full details for a single alert including raw event data."""
+    try:
+        def fetch_one(aid):
+            conn = db._get_conn()
+            cursor = conn.cursor()
+            
+            # Check if aid is numeric (internal ID) or string (event_id)
+            if aid.isdigit():
+                cursor.execute("SELECT * FROM alerts WHERE id = ?", (int(aid),))
+            else:
+                cursor.execute("SELECT * FROM alerts WHERE event_id = ?", (aid,))
+                
+            row = cursor.fetchone()
+            if not row: return None
+            
+            alert = dict(row)
+            # Decompress raw_event
+            try:
+                import zlib
+                import json
+                raw_data = alert.get('raw_event')
+                if raw_data:
+                    decompressed = zlib.decompress(raw_data).decode('utf-8')
+                    alert['raw_event'] = json.loads(decompressed)
+                
+                # Parse JSON fields
+                for field in ['shap_top3', 'enrichment']:
+                    if alert.get(field):
+                        alert[field] = json.loads(alert[field])
+            except Exception:
+                alert['raw_event'] = {}
+            return alert
+
+        loop = asyncio.get_running_loop()
+        alert = await loop.run_in_executor(None, fetch_one, alert_id)
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        return alert
+    except HTTPException: raise
+    except Exception as e:
+        logger.error("Failed to fetch alert detail", id=alert_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/baseline/status")
+async def get_baseline_status():
+    """Returns the current status of the VAE baseline and drift monitor."""
+    from ml_engine.baseline_updater import baseline_monitor
+    import time
+    
+    return {
+        "is_calibrated": baseline_monitor.baseline_mean is not None,
+        "drift_detected": baseline_monitor.drift_detected,
+        "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(baseline_monitor.last_refresh)),
+        "baseline_stats": {
+            "mean": round(baseline_monitor.baseline_mean, 6) if baseline_monitor.baseline_mean else 0,
+            "std": round(baseline_monitor.baseline_std, 6) if baseline_monitor.baseline_std else 0
+        }
+    }
 
 
 @router.get("/config")
@@ -56,22 +128,40 @@ async def get_config():
         raise HTTPException(status_code=500, detail="Failed to read configuration file")
 
 @router.post("/config")
-async def update_config(new_config: Dict[str, Any]):
-    """Updates and saves the sentinel_config.yaml file."""
+async def update_config(req: ConfigUpdate):
+    """Updates and saves the sentinel_config.yaml file and reloads in all services."""
+    new_config = req.config
     try:
         with open(CONFIG_PATH, "w") as f:
             yaml.dump(new_config, f, default_flow_style=False)
         
         logger.info("Configuration updated successfully")
         
+        # Reload config in relay service locally
+        try:
+            from common.config import refresh_config
+            refresh_config()
+            logger.info("Config refreshed in relay service")
+        except Exception as e:
+            logger.warning("Failed to refresh config locally", error=str(e))
+        
+        # Signal consumer process to reload config as well
         try:
             import subprocess
             import signal
             pid_res = subprocess.run(["pgrep", "-f", "src/ml_engine/consumer.py"], capture_output=True, text=True)
             if pid_res.returncode == 0:
-                for pid in pid_res.stdout.split():
-                    os.kill(int(pid), signal.SIGHUP)
-                logger.info("Signaled consumer to reload config")
+                signaled_count = 0
+                for pid_str in pid_res.stdout.split():
+                    try:
+                        pid = int(pid_str.strip())
+                        os.kill(pid, signal.SIGHUP)
+                        signaled_count += 1
+                        logger.info("Signaled consumer to reload config", pid=pid)
+                    except (ValueError, ProcessLookupError, PermissionError) as e:
+                        logger.warning(f"Failed to signal PID {pid_str}", error=str(e))
+                if signaled_count == 0:
+                    logger.warning("No consumer processes found to signal")
         except Exception as e:
             logger.warning("Failed to signal consumer for reload", error=str(e))
             
@@ -81,47 +171,60 @@ async def update_config(new_config: Dict[str, Any]):
         raise HTTPException(status_code=500, detail="Failed to save configuration")
 
 @router.post("/mitigation/unblock")
-async def unblock_ip(request: Dict[str, Any]):
-    ip = request.get("ip")
-    if not ip:
-        raise HTTPException(status_code=400, detail="IP address required")
+async def unblock_ip(req: IPRequest):
+    ip = str(req.ip)
     
     logger.info("Manual unblock requested", ip=ip)
-    ActiveFirewall.unblock(ip)
+    await ActiveFirewall.unblock(ip)
     return {"success": True, "message": f"IP {ip} unblocked"}
 
 @router.post("/mitigation/block")
-async def block_ip(request: Dict[str, Any]):
-    ip = request.get("ip")
-    if not ip:
-        raise HTTPException(status_code=400, detail="IP address required")
+async def block_ip(req: IPRequest):
+    ip = str(req.ip)
     
     logger.info("Manual block requested", ip=ip)
-    ActiveFirewall.block(ip)
+    await ActiveFirewall.block(ip)
     return {"success": True, "message": f"IP {ip} blocked"}
 
 @router.post("/feedback/false-positive")
-async def mark_false_positive(request: Dict[str, Any]):
+async def mark_false_positive(req: FalsePositiveRequest):
     """
     Marks an alert as a False Positive.
     Action: Unblocks IP, resets reputation delta, and logs for retraining.
     """
-    alert_id = request.get("alert_id")
-    src_ip = request.get("src_ip")
-    
-    if not alert_id or not src_ip:
-        raise HTTPException(status_code=400, detail="alert_id and src_ip required")
+    alert_id = req.alert_id
+    src_ip = str(req.src_ip)
     
     logger.warning("Human-in-the-loop: False Positive marked", alert_id=alert_id, ip=src_ip)
     
     # 1. Immediate Mitigation: Unblock the IP
-    ActiveFirewall.unblock(src_ip)
+    await ActiveFirewall.unblock(src_ip)
     
     # 2. Persistence: Log to false_positives table
-    # success = db.add_false_positive(alert_id) # Fix: db is not defined, should use database module
     from common.database import add_false_positive
-    success = add_false_positive(alert_id)
+    loop = asyncio.get_running_loop()
+    success = await loop.run_in_executor(None, add_false_positive, alert_id)
     
+    # 3. Suppression: Add to Redis FP store to prevent re-alerting
+    if success:
+        try:
+            # Fetch alert details to get the signature
+            # Database.get_alert_by_id doesn't exist, I'll use a direct query or add it
+            # I'll add a helper to DatabaseHandler or just use a query here
+            def get_sig(aid):
+                conn = db._get_conn()
+                cursor = conn.cursor()
+                cursor.execute("SELECT alert_sig FROM alerts WHERE id = ?", (aid,))
+                row = cursor.fetchone()
+                return row['alert_sig'] if row else None
+            
+            sig = await loop.run_in_executor(None, get_sig, alert_id)
+            if sig:
+                await fp_store.add_suppression(src_ip, sig)
+                logger.info("Benign traffic suppressed", ip=src_ip, sig=sig)
+        except Exception as e:
+            logger.error("Failed to add suppression", error=str(e))
+            
     return {
         "success": success, 
         "message": f"IP {src_ip} unblocked and alert {alert_id} logged as False Positive"
@@ -132,6 +235,7 @@ async def get_pipeline_status():
     """Detailed diagnostics for the dashboard."""
     import time
     from common.config import LOG_DIR
+    from relay.app import get_ml_engine
     
     # 1. Check Consumer Heartbeat (Redis-based)
     consumer_ok = False
@@ -161,8 +265,13 @@ async def get_pipeline_status():
     loop = asyncio.get_running_loop()
     stats = await loop.run_in_executor(None, get_stats)
 
+    # 4. ML Engine runtime state
+    ml_engine = get_ml_engine()
+    ml_status = ml_engine.get_status() if ml_engine else {"status": "unavailable", "ready": False}
+
     return {
         "status": "active" if (consumer_ok and redis_ok) else "degraded",
+        "ml_engine": ml_status,
         "redis_ok": redis_ok,
         "queue_depth": queue_depth,
         "stats": {
@@ -170,8 +279,8 @@ async def get_pipeline_status():
             "attacks": stats.get("attack_total", 0),
             "normal": stats.get("normal_total", 0)
         },
-        "ipset": ActiveFirewall.get_status(),
-        "ipset_detailed": ActiveFirewall.get_detailed_status(),
+        "ipset": await ActiveFirewall.get_status(),
+        "ipset_detailed": await ActiveFirewall.get_detailed_status(),
         "checks": {
             "consumer_running": consumer_ok, 
             "redis_ok": redis_ok,
@@ -236,7 +345,7 @@ async def get_node_intelligence(ip: str):
 async def get_sdn_status():
     """Returns SDN controller connectivity and basic stats."""
     from ml_engine.firewall import ActiveFirewall
-    status = ActiveFirewall.get_status()
+    status = await ActiveFirewall.get_status()
     if status.get("backend") == "sdn":
         return status
     return {"status": "disabled", "backend": "legacy"}

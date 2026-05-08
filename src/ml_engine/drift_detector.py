@@ -7,6 +7,7 @@ Design Principles:
   - Stateful: Maintains a single ADWIN instance per MLEngine instance
 """
 import time
+import asyncio
 import structlog
 from typing import Optional, Callable
 
@@ -31,13 +32,14 @@ class DriftDetector:
         self._last_drift_time = 0.0
         self._cooldown_sec = 300  # Minimum 5 min between drift alerts
         self._sample_count = 0
+        self._lock = asyncio.Lock()
 
         if RIVER_AVAILABLE:
             # ADWIN (Adaptive Windowing) detects change in mean/variance
             self._detector = river_drift.ADWIN(delta=0.002)
             logger.info("ADWIN drift detector initialized", delta=0.002)
 
-    def update(self, score: float) -> bool:
+    async def update(self, score: float) -> bool:
         """
         Feed one ML confidence score into ADWIN.
         Returns True if drift was detected this update.
@@ -45,11 +47,7 @@ class DriftDetector:
         if self._detector is None:
             return False
 
-        import threading
-        if not hasattr(self, "_lock"):
-            self._lock = threading.Lock()
-
-        with self._lock:
+        async with self._lock:
             self._sample_count += 1
             # Normalize score if needed, but ADWIN handles most distributions
             self._detector.update(score)
@@ -64,7 +62,6 @@ class DriftDetector:
                 if self.on_drift:
                     import asyncio
                     # Call the provided callback (likely async)
-                    # Use drift_info dict for the dashboard alert
                     drift_info = {
                         "type": "drift_alert",
                         "detector": "ADWIN",
@@ -73,11 +70,13 @@ class DriftDetector:
                         "timestamp": now
                     }
                     
-                    # Handle both sync and async callbacks
-                    if asyncio.iscoroutinefunction(self.on_drift):
-                        asyncio.create_task(self.on_drift(drift_info))
-                    else:
-                        self.on_drift(drift_info)
+                    try:
+                        if asyncio.iscoroutinefunction(self.on_drift):
+                            await self.on_drift(drift_info)
+                        else:
+                            self.on_drift(drift_info)
+                    except Exception as e:
+                        logger.error("Drift callback failed", error=str(e))
                         
                 return True
         return False

@@ -15,6 +15,15 @@ import {
 } from 'recharts';
 import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 import ForceGraph2D from 'react-force-graph-2d';
+
+// Custom hooks and utilities
+import { useAlertStream } from './hooks/useAlertStream';
+import { useHealthStatus } from './hooks/useHealthStatus';
+import { useStats } from './hooks/useStats';
+import ErrorBoundary from './components/ErrorBoundary';
+import ShapPanel from './components/ShapPanel';
+import { apiClient } from './utils/apiClient';
+
 import './App.css';
 
 const geoUrl = "https://raw.githubusercontent.com/lotusms/world-map-data/master/world-110m.json";
@@ -30,6 +39,20 @@ const formatTimestamp = (ts) => {
 };
 
 const COLORS = ['#38bdf8', '#f43f5e', '#10b981', '#f59e0b', '#8b5cf6'];
+const toLowerText = (value) => String(value ?? '').toLowerCase();
+const containsText = (value, query) => toLowerText(value).includes(toLowerText(query));
+const toUpperText = (value, fallback = '') => (value == null ? fallback : String(value).toUpperCase());
+
+const getFlagEmoji = (countryCode) => {
+  if (!countryCode || countryCode === 'Unknown') return '🌐';
+  const codePoints = countryCode
+    .toUpperCase()
+    .split('')
+    .map(char =>  127397 + char.charCodeAt());
+  try {
+    return String.fromCodePoint(...codePoints);
+  } catch (e) { return '🌐'; }
+};
 
 // --- UI COMPONENTS ---
 const Badge = ({ children, variant = 'info' }) => (
@@ -74,7 +97,8 @@ const StatCard = ({ label, value, icon: Icon, color = 'var(--primary)' }) => (
   </GlassCard>
 );
 
-const CompactIP = ({ ip, onClick }) => {
+const CompactIP = ({ ip, onClick, type }) => {
+  if (type === 'system_alert') return <span className="text-muted" style={{ fontSize: '0.7rem', letterSpacing: '1px' }}>SYSTEM</span>;
   if (!ip || ip === '---') return <span>---</span>;
   
   const isLocal = ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('127.') || ip.startsWith('172.');
@@ -112,22 +136,39 @@ const CompactIP = ({ ip, onClick }) => {
 
 // --- MAIN APPLICATION ---
 function App() {
+  // ===== CUSTOM HOOKS (State Management) =====
+  const { alerts, updateAlert, isConnected, bufferSize } = useAlertStream();
+  const { health, isHealthy, refresh: refreshHealth } = useHealthStatus();
+  const { stats, chartData } = useStats(alerts);
+
+  // ===== UI STATE ONLY =====
   const [activeTab, setActiveTab] = useState('overview');
-  const [connected, setConnected] = useState(false);
-  const [health, setHealth] = useState(null);
-  const [alerts, setAlerts] = useState([]);
-  const [stats, setStats] = useState({ processed_total: 0, attacks: 0, normal: 0 });
-  const [chartData, setChartData] = useState(
-    Array.from({ length: 30 }, (_, i) => {
-      const d = new Date(Date.now() - (29 - i) * 2000);
-      return { time: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }), normal: 0, attacks: 0 };
-    })
-  );
   const [latency, setLatency] = useState(0);
   const [expandedRow, setExpandedRow] = useState(null);
 
+  /**
+   * Toggles alert expansion and lazy-loads full forensic data (raw_event, enrichment)
+   * if not already present (e.g., received via trimmed WebSocket broadcast).
+   */
+  const toggleExpandRow = async (alert) => {
+    const eid = alert.event_id;
+    const isExpanding = expandedRow !== eid;
+    
+    setExpandedRow(isExpanding ? eid : null);
+    
+    if (isExpanding && !alert.raw_event && alert.id) {
+      try {
+        const fullAlert = await apiClient.get(`/api/alerts/${alert.id}`);
+        if (fullAlert) {
+          updateAlert(fullAlert);
+        }
+      } catch (err) {
+        console.error("Failed to lazy load alert detail", err);
+      }
+    }
+  };
+
   // Configuration
-  const [config, setConfig] = useState(null);
   const [saveStatus, setSaveStatus] = useState(null);
 
   // Simulation
@@ -135,11 +176,19 @@ function App() {
   const [scanProfile, setScanProfile] = useState('quick');
   const [simulating, setSimulating] = useState(false);
   const [simOutput, setSimOutput] = useState('');
+  const simConsoleRef = useRef(null);
+
+  // Auto-scroll simulation console
+  useEffect(() => {
+    if (simConsoleRef.current) {
+      simConsoleRef.current.scrollTop = simConsoleRef.current.scrollHeight;
+    }
+  }, [simOutput]);
 
   // Evaluation
-  const [modelList, setModelList] = useState({ models: [], scalers: [], active_model: '', active_scaler: '' });
   const [evaluating, setEvaluating] = useState(false);
   const [evalResult, setEvalResult] = useState(null);
+  const [evalLoading, setEvalLoading] = useState(false);
 
   // Model Control (Settings)
   const [models, setModels] = useState([]);
@@ -147,6 +196,7 @@ function App() {
   const [activeModel, setActiveModel] = useState('');
   const [activeScaler, setActiveScaler] = useState('');
   const [swapping, setSwapping] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
 
   // Node Intel
   const [selectedIp, setSelectedIp] = useState(null);
@@ -164,11 +214,17 @@ function App() {
     setSystemLogs(prev => [{ ts: new Date().toISOString(), msg }, ...prev].slice(0, 50));
   };
 
-  const ws = useRef(null);
-  const statsRef = useRef({ processed_total: 0, attacks: 0, normal: 0 });
+  // NOTE: Removed refs (statsRef, lastStatsRef, ws) - now handled by custom hooks!
 
   // --- DERIVED DATA ---
-  const graphData = useMemo(() => {
+  const [graphData, setGraphData] = useState({ nodes: [], links: [] });
+  const lastGraphUpdateRef = useRef(0);
+
+  // Throttled graph data update (every 2 seconds) to prevent jitter
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastGraphUpdateRef.current < 2000 && alerts.length > 0) return;
+
     const nodes = new Map();
     const links = [];
     
@@ -177,8 +233,8 @@ function App() {
 
     // Process recent alerts for graph
     alerts.slice(0, 30).forEach(alert => {
-      const src = alert.src_ip;
-      const isAttack = alert.prediction?.toLowerCase().includes('attack');
+      const src = alert.src_ip || 'unknown';
+      const isAttack = containsText(alert.prediction, 'attack');
       
       if (!nodes.has(src)) {
         nodes.set(src, { 
@@ -191,7 +247,8 @@ function App() {
       links.push({ source: src, target: 'INTERNAL', value: isAttack ? 2 : 1 });
     });
 
-    return { nodes: Array.from(nodes.values()), links };
+    setGraphData({ nodes: Array.from(nodes.values()), links });
+    lastGraphUpdateRef.current = now;
   }, [alerts]);
 
   const mapMarkers = useMemo(() => {
@@ -201,23 +258,23 @@ function App() {
         id: a.event_id || i,
         name: a.enrichment.location,
         coordinates: [a.enrichment.lon, a.enrichment.lat],
-        isAttack: a.prediction?.toLowerCase().includes('attack')
+        isAttack: containsText(a.prediction, 'attack')
       }))
       .slice(0, 15);
   }, [alerts]);
 
   const filteredAlerts = useMemo(() => {
     return alerts.filter(a => {
-      const prediction = (a.prediction || '').toLowerCase();
+      const prediction = toLowerText(a.prediction);
       const matchesQuery = !filterQuery || 
-        a.src_ip.includes(filterQuery) || 
-        prediction.includes(filterQuery.toLowerCase()) ||
-        a.protocol?.toLowerCase().includes(filterQuery.toLowerCase());
+        containsText(a.src_ip, filterQuery) || 
+        containsText(a.prediction, filterQuery) ||
+        containsText(a.protocol, filterQuery);
       
       const matchesLevel = filterLevel === 'ALL' || 
-        (filterLevel === 'ATTACKS' && (prediction.includes('attack') || prediction.includes('anomaly'))) ||
-        (filterLevel === 'SUSPICIOUS' && prediction.includes('suspicious')) ||
-        (filterLevel === 'NORMAL' && prediction.includes('normal'));
+        (filterLevel === 'ATTACKS' && (containsText(a.prediction, 'attack') || containsText(a.prediction, 'anomaly'))) ||
+        (filterLevel === 'SUSPICIOUS' && containsText(a.prediction, 'suspicious')) ||
+        (filterLevel === 'NORMAL' && containsText(a.prediction, 'normal'));
         
       return matchesQuery && matchesLevel;
     });
@@ -234,47 +291,23 @@ function App() {
 
   const lastStatsRef = useRef({ processed: 0, attacks: 0 });
 
-  // --- API CALLS ---
-  const fetchStatus = async () => {
-    try {
-      const res = await fetch('/api/pipeline/status');
-      const data = await res.json();
-      setHealth(data);
-      if (data.stats) {
-        setStats(data.stats);
-        statsRef.current = data.stats;
-      }
-    } catch (e) { console.error("Status fetch failed", e); }
-  };
-
-  const fetchAlerts = async () => {
-    try {
-      const res = await fetch('/api/alerts');
-      const data = await res.json();
-      if (data.alerts) {
-        setAlerts(data.alerts);
-        setStats({ processed_total: data.total_processed, attacks: data.attack_total, normal: data.normal_total });
-        statsRef.current = { processed_total: data.total_processed, attacks: data.attack_total, normal: data.normal_total };
-        lastStatsRef.current = { processed: data.total_processed, attacks: data.attack_total };
-        addLog(`Alerts: Synchronized ${data.alerts.length} events from database`);
-      }
-    } catch (e) { console.error("Alerts fetch failed", e); }
-  };
-
+  // --- API CALLS (Simplified with apiClient & hooks) ---
   const fetchNodeIntel = async (ip) => {
     if (!ip || ip === '---') return;
     setSelectedIp(ip);
     setLoadingIntel(true);
     setNodeIntel(null);
     try {
-      const res = await fetch(`/api/intelligence/node/${ip}`);
-      const data = await res.json();
+      // Use the new forensics IP endpoint for detailed timeline
+      const data = await apiClient.get(`/api/forensics/ip/${ip}`);
       setNodeIntel(data);
-      addLog(`Intelligence: Analyzed node ${ip} (Risk: ${data.reputation_score}%)`);
+      addLog(`Forensics: Reconstructed trail for ${ip} (${data.history?.length || 0} events)`);
     } catch (e) { 
-      console.error("Intel fetch failed", e); 
-      addLog(`Error: Failed to fetch intelligence for ${ip}`);
-    } finally { setLoadingIntel(false); }
+      apiClient.handleError(e, `Failed to fetch forensics for ${ip}`);
+      addLog(`Error: Forensic analysis failed for ${ip}`);
+    } finally { 
+      setLoadingIntel(false); 
+    }
   };
 
   const runSimulation = async (type, payload = {}) => {
@@ -282,14 +315,13 @@ function App() {
     setSimOutput(`> Starting ${type.toUpperCase()} simulation...\n`);
     try {
       const endpoint = type === 'nmap' ? '/api/simulation/nmap/scan' : '/api/simulation/attack/ddos';
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: scanTarget, ...payload })
-      });
-      const data = await res.json();
+      const data = await apiClient.post(endpoint, { target: scanTarget, ...payload });
       setSimOutput(prev => prev + (data.raw_output || data.message || data.error || 'Done.'));
-    } catch (e) { setSimOutput(prev => prev + `[ERROR] ${e.message}`); } finally { setSimulating(false); }
+    } catch (e) { 
+      setSimOutput(prev => prev + `[ERROR] ${e.message}`);
+    } finally { 
+      setSimulating(false); 
+    }
   };
 
   const handleFileUpload = async (e) => {
@@ -297,54 +329,59 @@ function App() {
     if (!file) return;
     setEvaluating(true);
     setEvalResult(null);
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('label_column', 'Label'); // Default
     try {
-      const res = await fetch('/api/evaluate/dataset', { method: 'POST', body: formData });
-      setEvalResult(await res.json());
-    } catch (e) { console.error("Eval failed", e); } finally { setEvaluating(false); }
+      const result = await apiClient.uploadFile('/api/evaluate/dataset', file, {
+        formFields: { label_column: 'Label' }
+      });
+      setEvalResult(result);
+    } catch (e) { 
+      apiClient.handleError(e, 'Evaluation failed');
+    } finally { 
+      setEvaluating(false); 
+    }
   };
 
   const blockAction = async (ip, action) => {
     try {
-      await fetch(`/api/mitigation/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ip })
-      });
-      fetchStatus();
+      await apiClient.post(`/api/mitigation/${action}`, { ip });
+      refreshHealth(); // Refresh health status from hook
       if (selectedIp === ip) fetchNodeIntel(ip);
-    } catch (e) { console.error("Mitigation failed", e); }
+    } catch (e) { 
+      apiClient.handleError(e, `Mitigation action failed`);
+    }
   };
 
   const fetchModels = async () => {
+    setModelsLoading(true);
     try {
-      const res = await fetch('/api/models');
-      const data = await res.json();
+      const data = await apiClient.get('/api/models');
       setModels(data.models || []);
       setScalers(data.scalers || []);
       setActiveModel(data.active_model || '');
       setActiveScaler(data.active_scaler || '');
-    } catch (e) { console.error("Failed to fetch models", e); }
+    } catch (e) { 
+      apiClient.handleError(e, 'Failed to fetch models');
+    } finally {
+      setModelsLoading(false);
+    }
   };
 
   const swapModel = async () => {
     setSwapping(true);
     try {
-      const res = await fetch('/api/models/active', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_file: activeModel, scaler_file: activeScaler })
+      const data = await apiClient.post('/api/models/active', {
+        model_file: activeModel,
+        scaler_file: activeScaler
       });
-      const data = await res.json();
       if (data.success) {
         setSaveStatus({ type: 'success', msg: 'Engine updated successfully' });
+        addLog('Engine: Model configuration updated');
       } else {
         setSaveStatus({ type: 'error', msg: data.error || 'Update failed' });
       }
     } catch (e) { 
       setSaveStatus({ type: 'error', msg: e.message });
+      apiClient.handleError(e, 'Model swap failed');
     } finally { 
       setSwapping(false);
       setTimeout(() => setSaveStatus(null), 3000);
@@ -355,90 +392,64 @@ function App() {
     window.open(`/api/pcap/download/${eventId || 'latest'}`, '_blank');
   };
 
-  // --- LIFECYCLE ---
+  const exportAlerts = async () => {
+    try {
+      const csv = [
+        ['Timestamp', 'Source IP', 'Classification', 'Confidence', 'Protocol', 'Port'].join(','),
+        ...filteredAlerts.map(a => 
+          [
+            a.timestamp || '',
+            a.src_ip || '',
+            a.prediction || '',
+            (a.confidence || 0).toFixed(2),
+            a.protocol || '',
+            a.dst_port || ''
+          ].join(',')
+        )
+      ].join('\n');
+      
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', `alerts-${new Date().toISOString().slice(0,10)}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      addLog(`Export: CSV downloaded with ${filteredAlerts.length} alerts`);
+    } catch (e) {
+      console.error('CSV export error:', e);
+      addLog(`Error: CSV export failed - ${e.message}`);
+    }
+  };
+
+  const refreshAlerts = async () => {
+    try {
+      const data = await apiClient.get('/api/alerts');
+      // Note: Alerts are managed by useAlertStream hook
+      // This just logs the refresh action and refreshes the health status
+      addLog(`Alerts: Refresh requested (${data.alerts?.length || 0} events available)`);
+      refreshHealth();
+    } catch (e) {
+      apiClient.handleError(e, 'Failed to refresh alerts');
+      addLog(`Error: Failed to refresh alerts`);
+    }
+  };
+
+  // --- LIFECYCLE & INITIALIZATION ---
   useEffect(() => {
-    fetchStatus(); fetchAlerts(); fetchModels();
-    const timer = setInterval(fetchStatus, 3000);
-    return () => clearInterval(timer);
+    // Fetch models on mount
+    fetchModels();
   }, []);
 
-  const alertBuffer = useRef([]);
-
+  // Update latency from first alert in stream
   useEffect(() => {
-    const connect = () => {
-      const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/alerts`;
-      ws.current = new WebSocket(WS_URL);
-      ws.current.onopen = () => setConnected(true);
-      ws.current.onmessage = (event) => {
-        try {
-          const alert = JSON.parse(event.data);
-          alertBuffer.current.push(alert);
-        } catch (e) {}
-      };
-      ws.current.onclose = () => { setConnected(false); setTimeout(connect, 3000); };
-    };
-    connect();
-
-    // Throttled UI flush loop (60fps max)
-    let animationFrame;
-    const flushBuffer = () => {
-      if (alertBuffer.current.length > 0) {
-        const batch = [...alertBuffer.current];
-        alertBuffer.current = [];
-        
-        setAlerts(prev => {
-          const next = [...batch, ...prev].slice(0, 100);
-          return next;
-        });
-
-        // Update stats once per batch
-        const batchStats = batch.reduce((acc, a) => {
-          const prediction = a.prediction?.toLowerCase() || '';
-          const isAttack = prediction.includes('attack') || prediction.includes('suspicious') || prediction.includes('anomaly');
-          acc.processed += 1;
-          if (isAttack) acc.attacks += 1;
-          else acc.normal += 1;
-          return acc;
-        }, { processed: 0, attacks: 0, normal: 0 });
-
-        setStats(prev => {
-          const next = {
-            processed_total: prev.processed_total + batchStats.processed,
-            attacks: prev.attacks + batchStats.attacks,
-            normal: prev.normal + batchStats.normal
-          };
-          // Sync with ref for the chart interval
-          statsRef.current = next;
-          return next;
-        });
-
-        if (batch[0].processing_time_ms) setLatency(batch[0].processing_time_ms);
-      }
-      animationFrame = requestAnimationFrame(flushBuffer);
-    };
-    animationFrame = requestAnimationFrame(flushBuffer);
-
-    return () => {
-      ws.current?.close();
-      cancelAnimationFrame(animationFrame);
-    };
-  }, []);
-
-  // Chart data sync
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const current = statsRef.current;
-      const last = lastStatsRef.current;
-      const deltaTotal = current.processed_total - last.processed;
-      const deltaAttacks = current.attacks - last.attacks;
-      setChartData(prev => {
-        const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-        return [...prev, { time: now, normal: Math.max(0, deltaTotal - deltaAttacks), attacks: deltaAttacks }].slice(-30);
-      });
-      lastStatsRef.current = { processed: current.processed_total, attacks: current.attacks };
-    }, 2000);
-    return () => clearInterval(timer);
-  }, []);
+    if (alerts.length > 0 && alerts[0].processing_time_ms) {
+      setLatency(alerts[0].processing_time_ms);
+    }
+  }, [alerts]);
 
   return (
     <div className="dashboard-container">
@@ -478,8 +489,8 @@ function App() {
 
         <div className="sidebar-footer">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-            <div className={`badge-dot ${connected ? 'bg-success' : 'bg-danger'}`} style={{ width: '8px', height: '8px', background: connected ? 'var(--success)' : 'var(--danger)' }} />
-            <span>CORE {connected ? 'ONLINE' : 'OFFLINE'}</span>
+            <div className={`badge-dot ${isConnected ? 'bg-success' : 'bg-danger'}`} style={{ width: '8px', height: '8px', background: isConnected ? 'var(--success)' : 'var(--danger)' }} />
+            <span>CORE {isConnected ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
           <div style={{ opacity: 0.5 }}>v3.1.2-STABLE</div>
         </div>
@@ -504,7 +515,7 @@ function App() {
               <span className="metric-value">{health?.queue_depth || 0}</span>
             </div>
             <div className="status-hover-wrapper" style={{ cursor: 'pointer' }}>
-              <Badge variant={connected ? 'success' : 'danger'}>{connected ? 'SYSTEM READY' : 'OFFLINE'}</Badge>
+              <Badge variant={isConnected ? 'success' : 'danger'}>{isConnected ? 'SYSTEM READY' : 'OFFLINE'}</Badge>
               <div className="engine-tooltip glass">
                 <div style={{ marginBottom: '1rem', fontWeight: 900, fontSize: '0.65rem', color: 'var(--primary)', letterSpacing: '0.1em' }}>ENGINE INTEGRITY</div>
                 {[
@@ -524,7 +535,8 @@ function App() {
 
         <AnimatePresence mode="wait">
           {activeTab === 'overview' && (
-            <motion.div key="overview" className="content-stack" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+            <ErrorBoundary>
+              <motion.div key="overview" className="content-stack" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
               <div className="stats-grid">
                 <StatCard label="Total Ingress" value={stats.processed_total?.toLocaleString()} icon={Database} />
                 <StatCard label="Threat Vectors" value={stats.attacks?.toLocaleString()} icon={Flame} color="var(--danger)" />
@@ -543,8 +555,8 @@ function App() {
                       <div style={{ display: 'flex', gap: '8px' }}>
                         <button className="btn btn-secondary btn-sm" onClick={() => setFilterLevel('ALL')} style={{ opacity: filterLevel === 'ALL' ? 1 : 0.5 }}>ALL</button>
                         <button className="btn btn-danger btn-sm" onClick={() => setFilterLevel('ATTACKS')} style={{ opacity: filterLevel === 'ATTACKS' ? 1 : 0.5 }}>THREATS</button>
-                        <button className="btn btn-secondary btn-sm" title="Export CSV" onClick={() => addLog('Export: CSV generation started')}><Download size={12} /></button>
-                        <button className="btn btn-secondary btn-sm" onClick={fetchAlerts}><RotateCcw size={12} /></button>
+                        <button className="btn btn-secondary btn-sm" title="Export CSV" onClick={exportAlerts}><Download size={12} /></button>
+                        <button className="btn btn-secondary btn-sm" onClick={refreshAlerts} title="Refresh alerts"><RotateCcw size={12} /></button>
                       </div>
                     </div>
                     <div className="filter-bar">
@@ -563,21 +575,32 @@ function App() {
                     <table className="alerts-table">
                       <thead><tr><th>Timestamp</th><th>Source Node</th><th>Classification</th><th>Score</th><th>Mitigation</th></tr></thead>
                       <tbody>
-                        {filteredAlerts.map((alert, i) => {
+                        {filteredAlerts.map((alert) => {
                           const prediction = (alert.prediction || 'Unknown').toLowerCase();
                           const isAttack = prediction.includes('attack') || prediction.includes('anomaly');
                           const isSuspicious = prediction.includes('suspicious');
                           const confidence = typeof alert.confidence === 'number' ? alert.confidence : 0;
+                          const isExpanded = expandedRow === alert.event_id; // CHANGED: event_id instead of index
                           
                           return (
-                            <React.Fragment key={alert.event_id || i}>
+                            <React.Fragment key={alert.event_id}>
                               <tr 
-                                onClick={() => setExpandedRow(expandedRow === i ? null : i)}
+                                onClick={() => toggleExpandRow(alert)}
                                 className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`}
                               >
                                 <td className="text-muted" style={{ fontSize: '0.65rem', fontWeight: 800 }}>{new Date(alert.timestamp).toLocaleTimeString()}</td>
-                                <td>
-                                  <CompactIP ip={alert.src_ip} onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} />
+                                <td style={{ minWidth: '180px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ fontSize: '1.2rem' }}>{getFlagEmoji(alert.enrichment?.country_code)}</span>
+                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                      <CompactIP 
+                                        ip={alert.src_ip} 
+                                        type={alert.event_type}
+                                        onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} 
+                                      />
+                                      <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>{alert.event_type === 'system_alert' ? 'Sentinel Internal' : (alert.enrichment?.city || 'Internal/Local')}</span>
+                                    </div>
+                                  </div>
                                 </td>
                                 <td>
                                   <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
@@ -598,12 +621,12 @@ function App() {
                                    </Badge>
                                 </td>
                               </tr>
-                              {expandedRow === i && (
+                              {isExpanded && (
                                 <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
                                   <td colSpan="5" style={{ padding: '1.5rem' }}>
                                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1.5rem' }}>
                                         <div>
-                                          <h4 style={{ fontSize: '0.6rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Decision Matrix</h4>
+                                          <ShapPanel alert={alert} />
                                           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Signature</span><span>{alert.forensics?.stage_scores?.signature ? 'DETECTED' : 'CLEAN'}</span></div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Neural</span><span>{(alert.forensics?.stage_scores?.ml * 100).toFixed(1)}%</span></div>
@@ -707,9 +730,11 @@ function App() {
                  </div>
               </GlassCard>
             </motion.div>
+            </ErrorBoundary>
           )}
           
           {activeTab === 'visual' && (
+            <ErrorBoundary>
             <motion.div key="visual" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '1.5rem' }}>
                   <GlassCard title="Global Threat Vector Map" icon={Globe} subtitle="Geographic distribution of detected sources">
@@ -772,9 +797,11 @@ function App() {
                   </GlassCard>
                </div>
             </motion.div>
+            </ErrorBoundary>
           )}
 
           {activeTab === 'mitigation' && (
+            <ErrorBoundary>
             <motion.div key="mitigation" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
                 <GlassCard title="Active Blocklist" icon={ShieldCheck} subtitle="Nodes currently restricted by IPS">
@@ -829,9 +856,11 @@ function App() {
                 </GlassCard>
               </div>
             </motion.div>
+            </ErrorBoundary>
           )}
 
           {activeTab === 'lab' && (
+            <ErrorBoundary>
             <motion.div key="lab" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
                 <GlassCard title="Simulation Lab" icon={Flame} subtitle="Traffic Generation & Vulnerability Scanning">
@@ -858,13 +887,21 @@ function App() {
                    </div>
                 </GlassCard>
                 <GlassCard title="Execution Console" icon={Terminal} subtitle="Tool standard output (STDOUT/STDERR)">
-                   <pre className="terminal-output" style={{ height: '400px' }}>{simOutput || 'Awaiting simulation initialization...'}</pre>
+                   <pre 
+                     ref={simConsoleRef} 
+                     className="terminal-output" 
+                     style={{ height: '400px', overflowY: 'auto' }}
+                   >
+                     {simOutput || 'Awaiting simulation initialization...'}
+                   </pre>
                 </GlassCard>
               </div>
             </motion.div>
+            </ErrorBoundary>
           )}
 
           {activeTab === 'eval' && (
+            <ErrorBoundary>
             <motion.div key="eval" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
                 <GlassCard title="Model Evaluation" icon={Fingerprint} subtitle="Offline dataset validation">
@@ -917,22 +954,25 @@ function App() {
                 </GlassCard>
               </div>
             </motion.div>
+            </ErrorBoundary>
           )}
 
           {activeTab === 'settings' && (
+            <ErrorBoundary>
             <motion.div key="settings" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
                 <GlassCard title="Neural Engine Control" icon={Cpu} subtitle="Hot-swappable inference models and scalers">
                    <div className="content-stack">
+                      {modelsLoading && <p style={{ fontSize: '0.75rem', color: 'var(--primary)' }} className="pulse-fast">LOADING MODELS...</p>}
                       <div>
                         <label className="stat-label">Active Neural Model (.onnx)</label>
-                        <select className="input-field" value={activeModel} onChange={e => setActiveModel(e.target.value)}>
+                        <select className="input-field" value={activeModel} onChange={e => setActiveModel(e.target.value)} disabled={modelsLoading}>
                           {models.map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                       </div>
                       <div>
                         <label className="stat-label">Feature Scaler (.pkl)</label>
-                        <select className="input-field" value={activeScaler} onChange={e => setActiveScaler(e.target.value)}>
+                        <select className="input-field" value={activeScaler} onChange={e => setActiveScaler(e.target.value)} disabled={modelsLoading}>
                           {scalers.map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
                       </div>
@@ -966,6 +1006,7 @@ function App() {
                 </GlassCard>
               </div>
             </motion.div>
+            </ErrorBoundary>
           )}
         </AnimatePresence>
 
@@ -1035,19 +1076,36 @@ function App() {
                     </div>
                   </GlassCard>
 
-                  <GlassCard title="Forensic Timeline" icon={History}>
-                     <div className="timeline-mini" style={{ maxHeight: '300px', overflowY: 'auto', paddingRight: '5px' }}>
-                        {nodeIntel.recent_activity?.map((entry, idx) => (
-                          <div key={idx} className="timeline-item" style={{ borderLeft: '2px solid var(--border)', paddingLeft: '1.5rem', paddingBottom: '1.5rem', position: 'relative' }}>
-                             <div style={{ position: 'absolute', left: '-5px', top: '0', width: '8px', height: '8px', borderRadius: '50%', background: entry.prediction === 'attack' ? 'var(--danger)' : 'var(--primary)', border: '2px solid var(--bg-dark)' }} />
-                             <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 800, marginBottom: '4px' }}>{new Date(entry.timestamp).toLocaleString()}</div>
-                             <div style={{ fontSize: '0.75rem', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
-                               <span>{entry.alert_sig || 'General Traffic'}</span>
-                               <span style={{ color: entry.prediction === 'attack' ? 'var(--danger)' : 'var(--success)' }}>{entry.prediction.toUpperCase()}</span>
-                             </div>
-                             {entry.mitigation && <div style={{ fontSize: '0.65rem', marginTop: '4px', opacity: 0.7 }}>Action: <span className="text-primary">{entry.mitigation}</span></div>}
-                          </div>
-                        ))}
+                  <GlassCard title="Forensic Timeline" icon={History} subtitle="Behavioral activity reconstruction">
+                     <div className="timeline-mini" style={{ maxHeight: '400px', overflowY: 'auto', paddingRight: '10px' }}>
+                        {nodeIntel.history?.length > 0 ? (
+                          nodeIntel.history.map((entry, idx) => (
+                            <div key={idx} className="timeline-item">
+                               <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 800, marginBottom: '4px' }}>{new Date(entry.timestamp).toLocaleString()}</div>
+                               <div style={{ fontSize: '0.75rem', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
+                                 <span style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.alert_sig || 'General Traffic'}</span>
+                                 <Badge variant={entry.prediction?.toLowerCase().includes('attack') ? 'danger' : 'success'}>
+                                   {entry.prediction}
+                                 </Badge>
+                               </div>
+                               {entry.shap_top3?.length > 0 && (
+                                 <div style={{ fontSize: '0.65rem', marginTop: '6px', color: 'var(--text-secondary)', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                   <Zap size={10} className="text-warning" />
+                                   Key Driver: <span className="text-primary">{entry.shap_top3[0][0] || entry.shap_top3[0].feature}</span>
+                                 </div>
+                               )}
+                               {entry.mitigation && (
+                                 <div style={{ fontSize: '0.65rem', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                   <Shield size={10} className="text-primary" />
+                                   <span style={{ opacity: 0.7 }}>Response: </span>
+                                   <span className="text-primary" style={{ fontWeight: 700 }}>{entry.mitigation}</span>
+                                 </div>
+                               )}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="empty-state-small">No historical alerts found for this IP.</div>
+                        )}
                      </div>
                   </GlassCard>
 

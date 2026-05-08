@@ -73,11 +73,23 @@ async def push_to_redis(data_list: list):
         return False
 
 def normalize_eve(event: dict) -> RawEvent:
-    """Standardizes Suricata EVE JSON into a RawEvent schema."""
+    """Standardizes Suricata EVE JSON into a RawEvent schema with IP validation."""
+    import ipaddress
+    
+    def validate_ip(ip_str):
+        try:
+            ipaddress.ip_address(ip_str)
+            return ip_str
+        except (ValueError, TypeError):
+            return "0.0.0.0"
+
+    src_ip = validate_ip(event.get("src_ip", "0.0.0.0"))
+    dst_ip = validate_ip(event.get("dest_ip") or event.get("dst_ip") or "0.0.0.0")
+
     return RawEvent(
         event_type=event.get("event_type", "unknown"),
-        src_ip=event.get("src_ip", "0.0.0.0"),
-        dst_ip=event.get("dest_ip") or event.get("dst_ip") or "0.0.0.0",
+        src_ip=src_ip,
+        dst_ip=dst_ip,
         src_port=event.get("src_port") or 0,
         dst_port=event.get("dest_port") or event.get("dst_port") or 0,
         proto=str(event.get("proto") or "TCP"),

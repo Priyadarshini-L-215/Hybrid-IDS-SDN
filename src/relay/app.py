@@ -3,6 +3,10 @@ import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+# Set Keras backend BEFORE importing any ML modules
+if not os.environ.get("KERAS_BACKEND"):
+    os.environ["KERAS_BACKEND"] = "torch"
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -102,7 +106,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
-        ActiveFirewall.close()
+        await ActiveFirewall.close()
     except Exception:
         pass
     logger.info("Relay shutting down")
@@ -132,16 +136,33 @@ app.include_router(simulation.router)
 # --- WEBSOCKET ---
 @app.websocket("/ws/alerts")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    """WebSocket endpoint for real-time alert streaming."""
+    try:
+        await manager.connect(websocket)
+    except Exception as e:
+        logger.error("Failed to establish WebSocket connection", error=str(e))
+        try:
+            await websocket.close(code=1000, reason="Connection failed")
+        except Exception:
+            pass
+        return
+    
     try:
         while True:
             # Keep connection alive and wait for client to close
             await websocket.receive_text()
     except WebSocketDisconnect:
-        await manager.disconnect(websocket)
+        logger.debug("WebSocket client disconnected")
+        try:
+            await manager.disconnect(websocket)
+        except Exception as e:
+            logger.debug("Error disconnecting WebSocket", error=str(e))
     except Exception as e:
-        logger.error("WebSocket error", error=str(e))
-        await manager.disconnect(websocket)
+        logger.error("WebSocket error", error=str(e), exc_info=True)
+        try:
+            await manager.disconnect(websocket)
+        except Exception:
+            pass
 
 # --- STATIC FILES (React) ---
 ui_dist = Path("ui/dist")

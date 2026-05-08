@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel, Field
 import structlog
 import yaml
 
@@ -13,6 +14,32 @@ from common.config import CONFIG_PATH, MODELS_DIR
 from ml_engine.evaluator import validate_dataset, evaluate_dataset
 
 logger = structlog.get_logger("relay.routes.models")
+
+class ModelActivationRequest(BaseModel):
+    model_file: str = Field(..., description="Filename of the ML model")
+    scaler_file: str = Field(..., description="Filename of the associated scaler")
+
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024 # 100MB
+MAX_PCAP_SIZE = 50 * 1024 * 1024   # 50MB
+
+async def validate_file(file: UploadFile, allowed_exts: list, max_size: int):
+    # 1. Extension check
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {allowed_exts}")
+    
+    # 2. Size check
+    # We read a bit to check size if not provided
+    size = 0
+    if hasattr(file.file, "seek") and hasattr(file.file, "tell"):
+        file.file.seek(0, 2)
+        size = file.file.tell()
+        file.file.seek(0)
+    
+    if size > max_size:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum allowed: {max_size / (1024*1024)}MB")
+    
+    return True
 
 router = APIRouter(prefix="/api", tags=["Models"])
 
@@ -43,10 +70,10 @@ async def list_models():
         return {"models": [], "scalers": [], "error": str(e)}
 
 @router.post("/models/active")
-async def set_active_model(request: Dict[str, str]):
+async def set_active_model(req: ModelActivationRequest):
     """Updates the active model in config and reloads the engine."""
-    model_file = request.get("model_file")
-    scaler_file = request.get("scaler_file")
+    model_file = req.model_file
+    scaler_file = req.scaler_file
     
     if not model_file or not scaler_file:
         raise HTTPException(status_code=400, detail="model_file and scaler_file are required")
@@ -105,6 +132,7 @@ async def run_evaluation(
     source = None
     try:
         if file:
+            await validate_file(file, [".csv"], MAX_UPLOAD_SIZE)
             content = await file.read()
             source = io.BytesIO(content)
             logger.info("Evaluating uploaded file", filename=file.filename)
@@ -206,6 +234,7 @@ async def run_pcap_evaluation(
         # If file uploaded, save to temp first
         temp_pcap = None
         if file:
+            await validate_file(file, [".pcap", ".pcapng"], MAX_PCAP_SIZE)
             temp_pcap = project_root / "data" / "pcap_eval" / f"upload_{int(time.time())}.pcap"
             temp_pcap.parent.mkdir(parents=True, exist_ok=True)
             with open(temp_pcap, "wb") as f:
