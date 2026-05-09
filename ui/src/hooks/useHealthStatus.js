@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { apiClient } from '../utils/apiClient';
 
 /**
  * Custom hook for managing health status polling
@@ -24,20 +25,10 @@ export const useHealthStatus = () => {
   const fetchStatus = async (isPolling = false) => {
     try {
       if (!isPolling) setIsLoading(true);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
-
-      const res = await fetch('/api/pipeline/status', { 
-        signal: controller.signal 
+      
+      const data = await apiClient.get('/api/pipeline/status', {
+        timeout: 10000 // 10s timeout
       });
-
-      clearTimeout(timeout);
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-      }
-
-      const data = await res.json();
       
       // Only update if data actually changed (reduce re-renders)
       if (JSON.stringify(data) !== JSON.stringify(lastHealthRef.current)) {
@@ -55,11 +46,7 @@ export const useHealthStatus = () => {
       setError(null);
       if (!isPolling) setIsLoading(false);
     } catch (e) {
-      if (e.name === 'AbortError') {
-        setError('Health check timeout (>10s)');
-      } else {
-        setError(`Health check failed: ${e.message}`);
-      }
+      setError(`Health check failed: ${e.message}`);
       setIsHealthy(false);
       if (!isPolling) setIsLoading(false);
     }

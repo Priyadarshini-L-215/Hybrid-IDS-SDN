@@ -1,54 +1,65 @@
+"""
+WebSocket Connection Manager
+
+Manages active WebSocket connections and broadcasts alerts to all connected clients.
+Handles stale connection cleanup after failed sends.
+"""
 import asyncio
-from typing import Set, Dict
 import structlog
 from fastapi import WebSocket
 
-logger = structlog.get_logger(__name__)
+logger = structlog.get_logger("ws_manager")
+
 
 class ConnectionManager:
-    """
-    Manages active WebSocket connections.
-    Handles fan-out broadcasting and graceful cleanup.
-    """
-    
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
+        self.active_connections: set[WebSocket] = set()
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         async with self._lock:
             self.active_connections.add(websocket)
-        logger.info("New dashboard client connected", count=len(self.active_connections))
+        logger.info("WebSocket client connected", total=len(self.active_connections))
 
     async def disconnect(self, websocket: WebSocket):
         async with self._lock:
-            if websocket in self.active_connections:
-                self.active_connections.remove(websocket)
-        logger.info("Dashboard client disconnected", count=len(self.active_connections))
+            self.active_connections.discard(websocket)
+        logger.info("WebSocket client disconnected", total=len(self.active_connections))
 
     async def broadcast(self, message: str):
-        """Sends a message to all connected clients concurrently with timeout protection."""
-        # 1. Take a snapshot of connections and release lock immediately
+        """
+        Broadcast a message to all connected clients.
+        Stale connections (those that fail to receive) are collected and removed
+        after the broadcast round completes to avoid mutating the set mid-iteration.
+        """
         async with self._lock:
             if not self.active_connections:
                 return
             connections = list(self.active_connections)
-        
-        # 2. Execute concurrently with timeout protection
-        if connections:
-            tasks = [asyncio.create_task(self._send_safe(c, message)) for c in connections]
-            # Wait for all with a timeout to prevent slow clients from blocking the pipeline
-            _, pending = await asyncio.wait(tasks, timeout=2.0)
-            
-            if pending:
-                logger.warning("Broadcast timeout for some clients", count=len(pending))
-                for t in pending: t.cancel()
 
-    async def _send_safe(self, websocket: WebSocket, message: str):
-        """Helper to send message and handle stale connections."""
-        try:
-            await websocket.send_text(message)
-        except Exception:
-            # Connection likely closed; will be handled by disconnect() in the route handler
-            pass
+        stale: set[WebSocket] = set()
+
+        # Send to all connections concurrently; track failures without throwing
+        async def _send_safe(ws: WebSocket):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                stale.add(ws)
+
+        tasks = [asyncio.create_task(_send_safe(c)) for c in connections]
+
+        # Wait up to 2 seconds for all sends; cancel stragglers
+        done, pending = await asyncio.wait(tasks, timeout=2.0)
+        for t in pending:
+            t.cancel()
+
+        # Remove stale connections discovered during this broadcast
+        if stale:
+            async with self._lock:
+                self.active_connections -= stale
+            logger.warning(
+                "Removed stale WebSocket connections",
+                removed=len(stale),
+                remaining=len(self.active_connections),
+            )

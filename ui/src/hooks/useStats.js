@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { apiClient } from '../utils/apiClient';
 
 /**
  * Custom hook for managing derived statistics from alerts
@@ -42,6 +43,46 @@ export const useStats = (alerts) => {
   useEffect(() => {
     statsRef.current = stats;
   }, [stats]);
+  
+  // Initial fetch for historical stats to prevent zero-reset on reload
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      try {
+        const data = await apiClient.get('/api/alerts');
+        if (data) {
+          console.log('[Stats] Hydrating stats from API:', data.total_processed);
+
+          const totalProcessed = data.total_processed || 0;
+          const attackTotal = data.attack_total || 0;
+          const normalTotal = data.normal_total || 0;
+
+          setStats(prev => ({
+            processed_total: Math.max(prev.processed_total, totalProcessed),
+            attacks: Math.max(prev.attacks, attackTotal),
+            normal: Math.max(prev.normal, normalTotal)
+          }));
+
+          // Update refs to prevent huge delta on first chart tick
+          lastStatsRef.current = {
+            processed_total: Math.max(lastStatsRef.current.processed_total, totalProcessed),
+            attacks: Math.max(lastStatsRef.current.attacks, attackTotal)
+          };
+
+          // Seed seenIds so historical alerts aren't double-counted
+          if (data.alerts) {
+            data.alerts.forEach(a => {
+              const id = a.event_id || a.id;
+              if (id) seenIds.current.add(id);
+            });
+          }
+        }
+      } catch (err) {
+        console.error('[Stats] Failed to fetch initial data:', err);
+      }
+    };
+    
+    fetchInitialData();
+  }, []);
 
   // Process new alerts
   useEffect(() => {

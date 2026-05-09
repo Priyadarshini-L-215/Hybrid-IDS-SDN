@@ -34,7 +34,7 @@ const ShapPanel = ({ alert }) => {
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px' }}>
                   <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{feature}</span>
                   <span style={{ color: getShapColor(value), fontWeight: 700 }}>
-                    {value > 0 ? '+' : ''}{value.toFixed(4)}
+                    {typeof value === 'number' ? `${value > 0 ? '+' : ''}${value.toFixed(4)}` : 'N/A'}
                   </span>
                 </div>
                 <div style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>

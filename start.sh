@@ -25,6 +25,38 @@ export TF_ENABLE_ONEDNN_OPTS="${TF_ENABLE_ONEDNN_OPTS:-0}"
 # UTILITIES
 # ============================================================================
 
+check_lock() {
+    if [ -f "$STATE_LOCK_FILE" ]; then
+        local pid
+        pid=$(cat "$STATE_LOCK_FILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_error "Sentinel is already running (PID: $pid). Use ./stop.sh first."
+            exit 1
+        fi
+        log_warn "Stale lock file found. Removing..."
+        rm -f "$STATE_LOCK_FILE"
+    fi
+    echo $$ > "$STATE_LOCK_FILE"
+}
+
+wait_for_port() {
+    local port=$1
+    local name=$2
+    local timeout=${3:-30}
+    log_info "Waiting for $name on port $port (timeout: ${timeout}s)..."
+    local elapsed=0
+    while [ $elapsed -lt "$timeout" ]; do
+        if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+            log_success "$name is responsive on port $port"
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    log_error "$name (port $port) failed to start"
+    return 1
+}
+
 log_info() {
     local msg="[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $1"
     echo "$msg" | tee -a "$STARTUP_LOG_FILE"
@@ -194,7 +226,8 @@ cleanup_stale_processes() {
     pkill -9 -f "src/ml_engine/ingestion.py" 2>/dev/null || true
     pkill -9 -f "relay.app:app" 2>/dev/null || true
     pkill -9 -f "uvicorn.*relay.app" 2>/dev/null || true
-    pkill -9 -f "npm.*dev" 2>/dev/null || true
+    # UI dev server should be managed separately per implementation plan
+    # pkill -9 -f "npm.*dev" 2>/dev/null || true
     pkill -9 -f "ryu-manager" 2>/dev/null || true
     pkill -9 -f "src/sdn/honeypot.py" 2>/dev/null || true
     
@@ -356,7 +389,7 @@ start_relay() {
     "$APP_PYTHON" -m uvicorn relay.app:app --host 0.0.0.0 --port "$API_PORT" >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
     local pid=$!
     echo "relay_pid=$pid" >> "$STATE_FILE"
-    wait_for_condition "Relay API" "nc -z 127.0.0.1 $API_PORT" 15
+    wait_for_port "$API_PORT" "Relay API"
 }
 
 start_ui() {
@@ -375,13 +408,11 @@ start_ui() {
 # ============================================================================
 
 main() {
-    echo "================================================================="
-    echo "            SENTINEL CORE: HYBRID ML-POWERED IPS"
-    echo "            SDN-ENHANCED EDITION"
-    echo "================================================================="
-    
     setup_logging
     source_env_file
+    check_lock
+    
+    echo "================================================================="
     ensure_sudo_access
     
     # Start Redis first because the validator needs it
@@ -407,9 +438,13 @@ main() {
     log_success "SENTINEL CORE IS NOW ACTIVE"
     echo "Dashboard: http://127.0.0.1:${API_PORT}"
     
-    # Tail logs if interactive
-    if [ -t 1 ]; then
-        # Use a more descriptive log tail
+    # Keep alive if not interactive (e.g. running under systemd)
+    if [ ! -t 1 ]; then
+        log_info "Running in non-interactive mode. Staying alive..."
+        while true; do sleep 60; done
+    else
+        # Tail logs if interactive
+        log_info "Interactive mode. Tailing logs..."
         tail -f "$PROJECT_ROOT/data/logs/relay.log" "$PROJECT_ROOT/data/logs/consumer.log"
     fi
 }

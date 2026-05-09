@@ -24,7 +24,24 @@ class ApiClient {
     this.defaultTimeout = 30000; // 30 seconds
     this.maxRetries = 3;
     this.baseRetryDelay = 1000; // 1 second
-    this.onToast = null; // Callback for toast notifications
+    this.onToast = null;
+    this._apiKey = typeof window !== 'undefined' ? localStorage.getItem('sentinel_api_key') : '';
+  }
+
+  setApiKey(key) {
+    this._apiKey = key;
+    if (typeof window !== 'undefined') {
+      if (key) localStorage.setItem('sentinel_api_key', key);
+      else localStorage.removeItem('sentinel_api_key');
+    }
+  }
+
+  getHeaders(headers = {}) {
+    const h = { ...headers };
+    if (this._apiKey) {
+      h['X-Sentinel-Key'] = this._apiKey;
+    }
+    return h;
   }
 
   /**
@@ -129,7 +146,8 @@ class ApiClient {
     return this.retry(() =>
       this.fetchWithTimeout(url, {
         method: 'GET',
-        ...options
+        ...options,
+        headers: this.getHeaders(options.headers)
       })
     );
   }
@@ -141,10 +159,10 @@ class ApiClient {
     return this.retry(() =>
       this.fetchWithTimeout(url, {
         method: 'POST',
-        headers: {
+        headers: this.getHeaders({
           'Content-Type': 'application/json',
           ...options.headers
-        },
+        }),
         body: JSON.stringify(body),
         ...options
       })
@@ -175,7 +193,8 @@ class ApiClient {
     return this.retry(() =>
       this.fetchWithTimeout(url, {
         method: 'DELETE',
-        ...options
+        ...options,
+        headers: this.getHeaders(options.headers)
       })
     );
   }

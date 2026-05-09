@@ -13,9 +13,15 @@ class FalsePositiveStore:
     PREFIX = "sentinel:suppress:"
     DEFAULT_TTL = 86400  # 24 hours
 
-    def __init__(self, redis_client=None):
-        # We'll use the async redis client from rc
-        self.redis = redis_client or rc.async_redis_client
+    def __init__(self):
+        # NOTE: Do NOT bind rc.async_redis_client here — it is None at import time.
+        # Use the lazy property below so Redis is resolved at call time.
+        pass
+
+    @property
+    def redis(self):
+        """Lazily resolves the async Redis client at call time."""
+        return rc.async_redis_client
 
     async def add_suppression(self, src_ip: str, alert_sig: str, ttl: int = DEFAULT_TTL):
         """

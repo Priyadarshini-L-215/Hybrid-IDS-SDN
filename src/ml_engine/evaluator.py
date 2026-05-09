@@ -101,14 +101,25 @@ def evaluate_dataset(csv_source: Union[str, Path, io.BytesIO], ml_engine, label_
             
         # 4. Metrics Generation
         # Map labels if necessary (e.g. if dataset uses 0/1 but model uses normal/attack)
-        # For now we assume the dataset labels match our prediction classes: normal, attack, suspicious
-        # Or we can do a simple heuristic if they are binary.
+        y_true_mapped = []
+        for val in y_true:
+            v_str = str(val).lower()
+            if v_str in ["0", "0.0", "normal", "benign"]:
+                y_true_mapped.append("normal")
+            elif v_str in ["1", "1.0", "attack", "malicious", "anomaly"]:
+                y_true_mapped.append("attack")
+            else:
+                y_true_mapped.append(v_str)
         
-        unique_true = set(y_true)
+        unique_true = set(y_true_mapped)
         unique_pred = set(predictions)
         logger.info("Labels found", true=unique_true, pred=unique_pred)
         
-        report = classification_report(y_true, predictions, output_dict=True, zero_division=0)
+        # Ensure they are all strings to avoid sklearn type mixing errors
+        y_true_final = [str(x) for x in y_true_mapped]
+        pred_final = [str(x) for x in predictions]
+        
+        report = classification_report(y_true_final, pred_final, output_dict=True, zero_division=0)
         
         return {
             "success": True,

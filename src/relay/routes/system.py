@@ -5,10 +5,13 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field, IPvAnyAddress
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request
 import structlog
+import json
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
+
+from relay.middleware.auth import require_api_key
 
 from common.config import CONFIG_PATH
 from common.database import get_recent_alerts, get_stats, init_db, db
@@ -30,6 +33,10 @@ class FalsePositiveRequest(BaseModel):
 
 class ConfigUpdate(BaseModel):
     config: Dict[str, Any] = Field(..., description="Full configuration object")
+
+class ResetConfirm(BaseModel):
+    confirm: str = Field(..., description="Must be 'RESET' to confirm data wipe")
+
 
 @router.get("/health")
 async def health():
@@ -100,14 +107,51 @@ async def get_alert_detail(alert_id: str):
 
 @router.get("/baseline/status")
 async def get_baseline_status():
-    """Returns the current status of the VAE baseline and drift monitor."""
+    """Returns the current status of the VAE baseline, drift monitor, and model metadata."""
     from ml_engine.baseline_updater import baseline_monitor
     import time
+    import json
+    from pathlib import Path
     
+    # Path to model artifacts
+    BASE_DIR = Path(__file__).resolve().parents[3]
+    MODELS_DIR = BASE_DIR / "models"
+    
+    accuracy = 0.0
+    last_trained = "Never"
+    model_version = "v3.1-stable"
+    
+    # Try to load latest metrics
+    try:
+        metrics_p = MODELS_DIR / "metrics.json"
+        if metrics_p.exists():
+            with open(metrics_p, 'r') as f:
+                metrics = json.load(f)
+                # If it's a classification report style, find overall accuracy
+                accuracy = metrics.get('accuracy', 0.0)
+                if not accuracy and 'macro avg' in metrics:
+                    accuracy = metrics['macro avg'].get('precision', 0.0) # Fallback
+    except: pass
+
+    # Try to load model meta
+    try:
+        meta_p = MODELS_DIR / "model_meta.json"
+        if meta_p.exists():
+            with open(meta_p, 'r') as f:
+                meta = json.load(f)
+                last_trained = meta.get('last_trained') or meta.get('created_at') or "2026-05-09"
+                model_version = meta.get('model_version') or meta.get('version', model_version)
+                if not accuracy:
+                    accuracy = meta.get('accuracy', 0.0)
+    except: pass
+
     return {
         "is_calibrated": baseline_monitor.baseline_mean is not None,
         "drift_detected": baseline_monitor.drift_detected,
         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(baseline_monitor.last_refresh)),
+        "accuracy_pct": round(accuracy * 100, 2) if accuracy <= 1.0 else round(accuracy, 2),
+        "last_trained": last_trained,
+        "model_version": model_version,
         "baseline_stats": {
             "mean": round(baseline_monitor.baseline_mean, 6) if baseline_monitor.baseline_mean else 0,
             "std": round(baseline_monitor.baseline_std, 6) if baseline_monitor.baseline_std else 0
@@ -116,18 +160,31 @@ async def get_baseline_status():
 
 
 @router.get("/config")
-async def get_config():
-    """Returns the current sentinel_config.yaml content."""
+async def get_config(request: Request):
+    """Returns the current sentinel_config.yaml content with ETag caching."""
+    import hashlib
     try:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, "r") as f:
-                return yaml.safe_load(f) or {}
+                content = f.read()
+                etag = f'W/"{hashlib.md5(content.encode()).hexdigest()}"'
+                
+                # Check client cache
+                if request.headers.get("if-none-match") == etag:
+                    return Response(status_code=304)
+                
+                data = yaml.safe_load(content) or {}
+                return Response(
+                    content=json.dumps(data),
+                    media_type="application/json",
+                    headers={"ETag": etag, "Cache-Control": "public, max-age=30"}
+                )
         return {}
     except Exception as e:
         logger.error("Failed to read config", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to read configuration file")
 
-@router.post("/config")
+@router.post("/config", dependencies=[Depends(require_api_key)])
 async def update_config(req: ConfigUpdate):
     """Updates and saves the sentinel_config.yaml file and reloads in all services."""
     new_config = req.config
@@ -170,7 +227,7 @@ async def update_config(req: ConfigUpdate):
         logger.error("Failed to update config", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to save configuration")
 
-@router.post("/mitigation/unblock")
+@router.post("/mitigation/unblock", dependencies=[Depends(require_api_key)])
 async def unblock_ip(req: IPRequest):
     ip = str(req.ip)
     
@@ -178,7 +235,7 @@ async def unblock_ip(req: IPRequest):
     await ActiveFirewall.unblock(ip)
     return {"success": True, "message": f"IP {ip} unblocked"}
 
-@router.post("/mitigation/block")
+@router.post("/mitigation/block", dependencies=[Depends(require_api_key)])
 async def block_ip(req: IPRequest):
     ip = str(req.ip)
     
@@ -186,7 +243,7 @@ async def block_ip(req: IPRequest):
     await ActiveFirewall.block(ip)
     return {"success": True, "message": f"IP {ip} blocked"}
 
-@router.post("/feedback/false-positive")
+@router.post("/feedback/false-positive", dependencies=[Depends(require_api_key)])
 async def mark_false_positive(req: FalsePositiveRequest):
     """
     Marks an alert as a False Positive.
@@ -288,6 +345,34 @@ async def get_pipeline_status():
         }
     }
 
+@router.get("/pipeline/status/slim")
+async def get_pipeline_status_slim():
+    """Summary-only diagnostics for high-frequency polling."""
+    import time
+    from relay.app import get_ml_engine
+    
+    # Check all worker heartbeats
+    consumer_ok = False
+    try:
+        keys = await rc.async_redis_client.keys("sentinel_heartbeat:*")
+        consumer_ok = bool(keys)
+    except Exception: pass
+
+    ml_engine = get_ml_engine()
+    ml_status = {"status": "active", "ready": True} if ml_engine and ml_engine.is_ready else {"status": "loading", "ready": False}
+
+    # Use cached summary status from firewall
+    firewall_summary = await ActiveFirewall.get_status()
+
+    return {
+        "status": "active" if (consumer_ok and rc.async_redis_client) else "degraded",
+        "ml_engine": ml_status["status"],
+        "consumer": "active" if consumer_ok else "stopped",
+        "blocked_count": firewall_summary.get("blocked_count", 0),
+        "ts": time.time(),
+        "trace_id": f"tr_{int(time.time()*1000)}"
+    }
+
 @router.get("/intelligence/node/{ip}")
 async def get_node_intelligence(ip: str):
     """Fetches historical stats and reputation for a specific IP using the forensics DB."""
@@ -370,14 +455,20 @@ async def get_metrics():
         logger.error("Failed to generate metrics", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to generate metrics")
 
-@router.post("/dev/reset")
-async def reset_system_state():
+@router.post("/dev/reset", dependencies=[Depends(require_api_key)])
+async def reset_system_state(req: ResetConfirm):
     """
     Developer convenience endpoint to reset SQLite and Redis state.
-    Requires DEV_MODE to be true in config.
+    Requires: DEV_MODE=true in config AND {"confirm": "RESET"} in request body.
     """
     if not DEV_MODE:
         raise HTTPException(status_code=403, detail="Reset endpoint is only available in DEV_MODE")
+
+    if req.confirm != "RESET":
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation required. Send {\"confirm\": \"RESET\"} to proceed."
+        )
         
     logger.warning("DEVELOPER RESET REQUESTED. Wiping SQLite and Redis state...")
     

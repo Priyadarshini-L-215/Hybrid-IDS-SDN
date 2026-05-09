@@ -7,7 +7,17 @@ reusable function.
 """
 import hashlib
 import json
+import uuid
+import math
 from common.mitre_mapper import get_mitre_info
+
+def safe_float(v):
+    try:
+        val = float(v or 0.0)
+        return 0.0 if math.isnan(val) or math.isinf(val) else val
+    except (ValueError, TypeError):
+        return 0.0
+
 
 
 SIGNATURE_MAP = {
@@ -57,7 +67,7 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
     """
     alert_info = event.get("alert", {})
     final_classification = prediction.get("prediction", prediction.get("classification", "normal"))
-    final_confidence = float(prediction.get("confidence") or 0.0)
+    final_confidence = safe_float(prediction.get("confidence") or 0.0)
 
     # Normalize confidence if it's already in [0, 100]
     if final_confidence > 1.0:
@@ -88,8 +98,7 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
             sig = f"{proto} Potential Probe (Port {port})" if is_malicious else f"{proto} Flow"
 
     if event_id is None:
-        raw_hash = hashlib.md5(str(event.get("raw", event)).encode()).hexdigest()[:6]
-        event_id = f"{event.get('timestamp')}-{event.get('flow_id', '0')}-{event.get('event_type')}-{raw_hash}"
+        event_id = str(uuid.uuid4())
 
     normalized_sig = normalize_signature(sig)
 
@@ -116,7 +125,7 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         "is_simulation": event.get("is_simulation"),
         "mitre": get_mitre_info(final_classification, normalized_sig),
         "shap_top3": prediction.get("shap_top3", []),
-        "anomaly_score": prediction.get("anomaly_score", 0.0),
+        "anomaly_score": safe_float(prediction.get("anomaly_score")),
         "ja3_hash": event.get("tls", {}).get("ja3", {}).get("hash"),
         "ja3_string": event.get("tls", {}).get("ja3", {}).get("string"),
         "enrichment": {}, # Populated by worker pool
@@ -124,8 +133,8 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
             "packet_hash": hashlib.sha256(str(event.get("raw", event)).encode()).hexdigest()[:16],
             "stage_scores": {
                 "signature": 1.0 if sig_present else 0.0,
-                "ml": float(prediction.get("ml_score", 0.0)),
-                "anomaly": float(prediction.get("anomaly_score", 0.0))
+                "ml": safe_float(prediction.get("ml_score")),
+                "anomaly": safe_float(prediction.get("anomaly_score"))
             },
             "correlation_id": hashlib.md5(f"{event.get('src_ip')}-{event.get('dst_ip')}".encode()).hexdigest()[:8]
         },

@@ -1,7 +1,8 @@
 {
-    "model_name": "Sentinel Core V4",
-    "version": "4.0.0",
-    "architecture": "Calibrated Random Forest",
+    "active_model": "rf_multi_model.pkl",
+    "active_scaler": "scaler_multi.pkl",
+    "architecture": "Hybrid Random Forest",
+    "feature_count": 49,
     "manifold_features": [
         "flow_dur",
         "fwd_pkts",
@@ -20,11 +21,14 @@
         "header_fwd",
         "header_bwd"
     ],
+    "model_name": "Sentinel Core V4",
+    "model_version": "v4.0.0-multi",
+    "preprocessing": "PowerTransformer (Yeo-Johnson)",
     "thresholds": {
         "CIC-IDS": 0.008,
-        "UNSW-NB15": 0.013,
         "NSL-KDD": 0.422,
+        "UNSW-NB15": 0.013,
         "default": 0.153
     },
-    "preprocessing": "PowerTransformer (Yeo-Johnson)"
+    "version": "v4.0.0-multi"
 }

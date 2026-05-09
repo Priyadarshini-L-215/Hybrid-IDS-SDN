@@ -12,7 +12,7 @@ detection:
       anomaly: 0.1
   dos_threshold: 100
   ml:
-    active_model: rf_multi_model.pkl
+    active_model: rf_multi_pipeline.onnx
     active_scaler: scaler_multi.pkl
   port_scan_threshold: 25
 mitigation:

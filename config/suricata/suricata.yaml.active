@@ -80,7 +80,7 @@ outputs:
       dir: /home/preet/FYP/data/pcaps
 
 af-packet:
-  - interface: eth2
+  - interface: eth1
     cluster-id: 99
     cluster-type: cluster_flow
     defrag: yes

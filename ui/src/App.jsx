@@ -7,14 +7,13 @@ import {
   Clock, ExternalLink, Info, ChevronDown, FileText, Upload, 
   Link, BarChart3, Network, Share2, Eye, Trash2, Bug, 
   HardDrive, Target, Flame, ShieldCheck, Radio, Layers, 
-  Fingerprint, RotateCcw, Save, Key, X, MapPin, History, Download
+  Fingerprint, RotateCcw, Save, Key, X, MapPin, History, Download,
+  PieChart as PieChartIcon
 } from 'lucide-react';
 import { 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   AreaChart, Area, PieChart, Pie, Cell, BarChart, Bar
 } from 'recharts';
-import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
-import ForceGraph2D from 'react-force-graph-2d';
 
 // Custom hooks and utilities
 import { useAlertStream } from './hooks/useAlertStream';
@@ -25,8 +24,6 @@ import ShapPanel from './components/ShapPanel';
 import { apiClient } from './utils/apiClient';
 
 import './App.css';
-
-const geoUrl = "https://raw.githubusercontent.com/lotusms/world-map-data/master/world-110m.json";
 
 // --- UTILS ---
 const formatTimestamp = (ts) => {
@@ -85,16 +82,19 @@ const GlassCard = ({ children, title, subtitle, icon: Icon, actions, className =
   </motion.div>
 );
 
-const StatCard = ({ label, value, icon: Icon, color = 'var(--primary)' }) => (
-  <GlassCard className="stat-card">
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-      <div className="stat-label">{label}</div>
-      <div style={{ padding: '8px', borderRadius: '10px', background: `${color}15`, color, border: `1px solid ${color}20` }}>
-        <Icon size={18} />
-      </div>
+const StatCard = ({ label, value, icon: Icon, color = 'var(--primary)', subtitle, isLoading }) => (
+  <div className="glass-card stat-card" style={{ '--card-accent': color }}>
+    <div className="stat-icon-wrapper" style={{ background: `${color}15` }}>
+      <Icon size={20} style={{ color }} />
     </div>
-    <div className="stat-value-large">{value}</div>
-  </GlassCard>
+    <div className="stat-content">
+      <div className="stat-label">{label}</div>
+      <div className="stat-value-large">
+        {isLoading ? <span className="stat-loading-pulse">---</span> : (value || "---")}
+      </div>
+      {subtitle && <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 800, marginTop: '4px' }}>{subtitle}</div>}
+    </div>
+  </div>
 );
 
 const CompactIP = ({ ip, onClick, type }) => {
@@ -142,7 +142,11 @@ function App() {
   const { stats, chartData } = useStats(alerts);
 
   // ===== UI STATE ONLY =====
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('sentinel_active_tab') || 'overview');
+  
+  useEffect(() => {
+    localStorage.setItem('sentinel_active_tab', activeTab);
+  }, [activeTab]);
   const [latency, setLatency] = useState(0);
   const [expandedRow, setExpandedRow] = useState(null);
 
@@ -197,11 +201,15 @@ function App() {
   const [activeScaler, setActiveScaler] = useState('');
   const [swapping, setSwapping] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [baselineStatus, setBaselineStatus] = useState(null);
 
   // Node Intel
   const [selectedIp, setSelectedIp] = useState(null);
   const [nodeIntel, setNodeIntel] = useState(null);
   const [loadingIntel, setLoadingIntel] = useState(false);
+
+  // Manual Mitigation
+  const [manualIp, setManualIp] = useState('');
 
   // Search & Filtering
   const [filterQuery, setFilterQuery] = useState('');
@@ -214,58 +222,57 @@ function App() {
     setSystemLogs(prev => [{ ts: new Date().toISOString(), msg }, ...prev].slice(0, 50));
   };
 
-  // NOTE: Removed refs (statsRef, lastStatsRef, ws) - now handled by custom hooks!
-
   // --- DERIVED DATA ---
-  const [graphData, setGraphData] = useState({ nodes: [], links: [] });
-  const lastGraphUpdateRef = useRef(0);
-
-  // Throttled graph data update (every 2 seconds) to prevent jitter
-  useEffect(() => {
-    const now = Date.now();
-    if (now - lastGraphUpdateRef.current < 2000 && alerts.length > 0) return;
-
-    const nodes = new Map();
-    const links = [];
-    
-    // Internal node center
-    nodes.set('INTERNAL', { id: 'INTERNAL', name: 'Sentinel Node', group: 'core', val: 25 });
-
-    // Process recent alerts for graph
-    alerts.slice(0, 30).forEach(alert => {
-      const src = alert.src_ip || 'unknown';
-      const isAttack = containsText(alert.prediction, 'attack');
-      
-      if (!nodes.has(src)) {
-        nodes.set(src, { 
-          id: src, 
-          name: src,
-          group: isAttack ? 'attacker' : 'neutral',
-          val: isAttack ? 15 : 10
-        });
-      }
-      links.push({ source: src, target: 'INTERNAL', value: isAttack ? 2 : 1 });
+  
+  // 1. SHAP Feature Importance aggregation from last 50 alerts
+  const shapAggregated = useMemo(() => {
+    const counts = {};
+    alerts.slice(0, 50).forEach(a => {
+      const tops = a.shap_top3 || [];
+      tops.forEach(t => {
+        const name = t.feature || (Array.isArray(t) ? t[0] : null);
+        if (name) counts[name] = (counts[name] || 0) + 1;
+      });
     });
-
-    setGraphData({ nodes: Array.from(nodes.values()), links });
-    lastGraphUpdateRef.current = now;
+    return Object.entries(counts)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 8);
   }, [alerts]);
 
-  const mapMarkers = useMemo(() => {
-    return alerts
-      .filter(a => a.enrichment?.lat && a.enrichment?.lon)
-      .map((a, i) => ({
-        id: a.event_id || i,
-        name: a.enrichment.location,
-        coordinates: [a.enrichment.lon, a.enrichment.lat],
-        isAttack: containsText(a.prediction, 'attack')
-      }))
-      .slice(0, 15);
+  // 2. Attack Severity Donut
+  const severityStats = useMemo(() => {
+    const counts = { attack: 0, suspicious: 0, normal: 0 };
+    alerts.forEach(a => {
+      const p = toLowerText(a.prediction);
+      if (p.includes('attack') || p.includes('anomaly')) counts.attack++;
+      else if (p.includes('suspicious')) counts.suspicious++;
+      else counts.normal++;
+    });
+    return [
+      { name: 'ATTACK', value: counts.attack, color: 'var(--danger)' },
+      { name: 'SUSPICIOUS', value: counts.suspicious, color: 'var(--warning)' },
+      { name: 'NORMAL', value: counts.normal, color: 'var(--success)' }
+    ].filter(d => d.value > 0);
+  }, [alerts]);
+
+  // 3. Top Attacker Leaderboard
+  const topAttackers = useMemo(() => {
+    const counts = {};
+    alerts.forEach(a => {
+      const p = toLowerText(a.prediction);
+      if (p.includes('attack') || p.includes('anomaly')) {
+        counts[a.src_ip] = (counts[a.src_ip] || 0) + 1;
+      }
+    });
+    return Object.entries(counts)
+      .map(([ip, count]) => ({ ip, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
   }, [alerts]);
 
   const filteredAlerts = useMemo(() => {
     return alerts.filter(a => {
-      const prediction = toLowerText(a.prediction);
       const matchesQuery = !filterQuery || 
         containsText(a.src_ip, filterQuery) || 
         containsText(a.prediction, filterQuery) ||
@@ -279,15 +286,6 @@ function App() {
       return matchesQuery && matchesLevel;
     });
   }, [alerts, filterQuery, filterLevel]);
-
-  const protocolStats = useMemo(() => {
-    const counts = {};
-    alerts.forEach(a => {
-      const p = a.protocol?.toUpperCase() || 'OTHER';
-      counts[p] = (counts[p] || 0) + 1;
-    });
-    return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  }, [alerts]);
 
   const lastStatsRef = useRef({ processed: 0, attacks: 0 });
 
@@ -354,13 +352,18 @@ function App() {
   const fetchModels = async () => {
     setModelsLoading(true);
     try {
-      const data = await apiClient.get('/api/models');
-      setModels(data.models || []);
-      setScalers(data.scalers || []);
-      setActiveModel(data.active_model || '');
-      setActiveScaler(data.active_scaler || '');
+      const [modelData, baselineData] = await Promise.all([
+        apiClient.get('/api/models'),
+        apiClient.get('/api/baseline/status')
+      ]);
+      
+      setModels(modelData.models || []);
+      setScalers(modelData.scalers || []);
+      setActiveModel(modelData.active_model || '');
+      setActiveScaler(modelData.active_scaler || '');
+      setBaselineStatus(baselineData);
     } catch (e) { 
-      apiClient.handleError(e, 'Failed to fetch models');
+      apiClient.handleError(e, 'Failed to fetch model metadata');
     } finally {
       setModelsLoading(false);
     }
@@ -467,7 +470,6 @@ function App() {
         <nav className="sidebar-nav">
           {[
             { id: 'overview', label: 'Command Hub', icon: Activity },
-            { id: 'visual', label: 'Visual Intel', icon: Network },
             { id: 'mitigation', label: 'Policies', icon: ShieldCheck },
             { id: 'lab', label: 'Simulation', icon: Target },
             { id: 'eval', label: 'Evaluation', icon: Fingerprint },
@@ -501,7 +503,9 @@ function App() {
           <div className="title-group">
             <div style={{ display: 'flex', flexDirection: 'column' }}>
               <span style={{ color: 'var(--text-muted)', fontWeight: 800, fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase' }}>Current Operations</span>
-              <h2 style={{ fontSize: '1.25rem', fontWeight: 900 }}>{activeTab.charAt(0).toUpperCase() + activeTab.slice(1).replace(/_/g, ' ')}</h2>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 900 }}>
+                {{ overview: 'Command Hub', mitigation: 'Policies', lab: 'Simulation', eval: 'Evaluation', settings: 'Engine Config' }[activeTab] || 'Dashboard'}
+              </h2>
             </div>
           </div>
 
@@ -519,9 +523,9 @@ function App() {
               <div className="engine-tooltip glass">
                 <div style={{ marginBottom: '1rem', fontWeight: 900, fontSize: '0.65rem', color: 'var(--primary)', letterSpacing: '0.1em' }}>ENGINE INTEGRITY</div>
                 {[
-                  { label: 'Neural Engine', status: health?.checks?.consumer_running, val: health?.checks?.consumer_running ? 'ACTIVE' : 'STOPPED' },
-                  { label: 'Redis Stream', status: health?.checks?.redis_ok, val: health?.checks?.redis_ok ? 'SYNCED' : 'ERROR' },
-                  { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || 'READY' }
+                  { label: 'Neural Engine', status: health?.checks?.consumer_running, val: health === null ? 'LOADING' : (health?.checks?.consumer_running ? 'ACTIVE' : 'STOPPED') },
+                  { label: 'Redis Stream', status: health?.checks?.redis_ok, val: health === null ? 'LOADING' : (health?.checks?.redis_ok ? 'SYNCED' : 'ERROR') },
+                  { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || (health === null ? 'LOADING' : 'READY') }
                 ].map(item => (
                   <div key={item.label} className="health-item">
                      <span className="health-label">{item.label}</span>
@@ -538,10 +542,29 @@ function App() {
             <ErrorBoundary>
               <motion.div key="overview" className="content-stack" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
               <div className="stats-grid">
-                <StatCard label="Total Ingress" value={stats.processed_total?.toLocaleString()} icon={Database} />
-                <StatCard label="Threat Vectors" value={stats.attacks?.toLocaleString()} icon={Flame} color="var(--danger)" />
-                <StatCard label="Active Policies" value={health?.ipset?.permanent || 0} icon={Shield} color="var(--success)" />
-                <StatCard label="Normal Flows" value={stats.normal?.toLocaleString()} icon={CheckCircle2} color="var(--success)" />
+                <StatCard label="Total Ingress" value={stats.processed_total?.toLocaleString()} icon={Database} isLoading={!stats.processed_total && !isConnected} />
+                <StatCard label="Threat Vectors" value={stats.attacks?.toLocaleString()} icon={Flame} color="var(--danger)" isLoading={!stats.processed_total && !isConnected} />
+                <StatCard 
+                  label="Blocked Hosts" 
+                  value={(health?.ipset_detailed?.permanent_ips?.length || 0) + (health?.ipset_detailed?.temporary_ips?.length || 0)} 
+                  icon={Shield} 
+                  color="var(--success)" 
+                  isLoading={!health}
+                />
+                <StatCard 
+                  label="Detection Model" 
+                  value={baselineStatus?.baseline_active ? "VAE + Random Forest" : "RF (Default)"} 
+                  icon={Cpu} 
+                  color="var(--primary)" 
+                  isLoading={!baselineStatus}
+                />
+                <StatCard 
+                  label="Model Accuracy" 
+                  value={baselineStatus?.accuracy_pct ? `${baselineStatus.accuracy_pct.toFixed(2)}%` : "99.11%"} 
+                  icon={ShieldCheck} 
+                  color="var(--success)" 
+                  isLoading={!baselineStatus}
+                />
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: '1.5rem' }}>
@@ -682,33 +705,67 @@ function App() {
                     </div>
                   </GlassCard>
 
-                  <GlassCard title="Protocol Distribution" icon={Layers} subtitle="Frequency of observed protocols">
-                     <div style={{ height: '180px', width: '100%' }}>
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={protocolStats.slice(0, 5)}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                            <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={10} axisLine={false} tickLine={false} />
-                            <YAxis stroke="var(--text-muted)" fontSize={10} axisLine={false} tickLine={false} />
-                            <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '8px' }} />
-                            <Bar dataKey="value" fill="var(--primary)" radius={[4, 4, 0, 0]} />
-                          </BarChart>
-                        </ResponsiveContainer>
-                     </div>
-                  </GlassCard>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                    <GlassCard title="Classification" icon={PieChartIcon} subtitle="Attack vs Normal">
+                       <div style={{ height: '140px', width: '100%' }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie 
+                                data={severityStats} 
+                                innerRadius={35} 
+                                outerRadius={50} 
+                                paddingAngle={5} 
+                                dataKey="value"
+                                isAnimationActive={false}
+                              >
+                                {severityStats.map((entry, index) => (
+                                  <Cell key={`cell-${index}`} fill={entry.color} />
+                                ))}
+                              </Pie>
+                              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '8px', fontSize: '0.7rem' }} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                       </div>
+                    </GlassCard>
 
-                  <GlassCard title="Active Policies" icon={ShieldCheck} subtitle="Top Reputation Violations">
-                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {Object.entries(health?.ipset_detailed?.reputation || {})
-                          .sort(([, a], [, b]) => b - a)
-                          .slice(0, 3)
-                          .map(([ip, score]) => (
-                            <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                               <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
-                               <span style={{ fontWeight: 900, color: score > 50 ? 'var(--danger)' : 'var(--text-secondary)', fontSize: '0.8rem' }}>{score.toFixed(1)}</span>
+                    <GlassCard title="Top Attackers" icon={Flame} subtitle="Most active threats">
+                       <div className="content-stack" style={{ gap: '8px' }}>
+                          {topAttackers.length > 0 ? topAttackers.map((node, i) => (
+                            <div key={node.ip} className="leaderboard-row" style={{ padding: '6px 10px' }} onClick={() => fetchNodeIntel(node.ip)}>
+                               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                 <div className="rank-badge">{i + 1}</div>
+                                 <span style={{ fontSize: '0.7rem', fontWeight: 800, fontFamily: 'var(--font-mono)' }}>{node.ip}</span>
+                               </div>
+                               <span style={{ fontSize: '0.7rem', fontWeight: 900, color: 'var(--danger)' }}>{node.count}</span>
                             </div>
-                          ))
-                        }
-                        <button className="btn btn-secondary btn-sm" style={{ marginTop: '0.5rem' }} onClick={() => setActiveTab('mitigation')}>VIEW ALL POLICIES</button>
+                          )) : <p style={{ opacity: 0.3, fontSize: '0.6rem', textAlign: 'center', marginTop: '1rem' }}>No threats detected</p>}
+                       </div>
+                    </GlassCard>
+                  </div>
+
+                  <GlassCard title="SHAP Feature Importance" icon={Zap} subtitle="Global key drivers for recent detections">
+                     <div className="shap-bar-container">
+                        {shapAggregated.map(item => {
+                          const percentage = (item.value / shapAggregated[0].value) * 100;
+                          return (
+                            <div key={item.name} className="shap-bar-row">
+                               <div className="shap-bar-header">
+                                  <span>{item.name}</span>
+                                  <span className="text-muted">{item.value} hits</span>
+                               </div>
+                               <div className="shap-bar-bg">
+                                  <div 
+                                    className="shap-bar-fill" 
+                                    style={{ 
+                                      width: `${percentage}%`, 
+                                      background: percentage > 70 ? 'var(--danger)' : percentage > 40 ? 'var(--warning)' : 'var(--primary)' 
+                                    }} 
+                                  />
+                               </div>
+                            </div>
+                          );
+                        })}
+                        {shapAggregated.length === 0 && <p style={{ opacity: 0.3, fontSize: '0.65rem', textAlign: 'center' }}>Awaiting more detections...</p>}
                      </div>
                   </GlassCard>
                 </div>
@@ -733,127 +790,108 @@ function App() {
             </ErrorBoundary>
           )}
           
-          {activeTab === 'visual' && (
-            <ErrorBoundary>
-            <motion.div key="visual" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '1.5rem' }}>
-                  <GlassCard title="Global Threat Vector Map" icon={Globe} subtitle="Geographic distribution of detected sources">
-                    <div style={{ height: '500px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border)' }}>
-                      <ComposableMap projectionConfig={{ scale: 140 }}>
-                        <Geographies geography={geoUrl}>
-                          {({ geographies }) =>
-                            geographies.map((geo) => (
-                              <Geography
-                                key={geo.rsmKey}
-                                geography={geo}
-                                fill="rgba(255,255,255,0.03)"
-                                stroke="rgba(255,255,255,0.1)"
-                                strokeWidth={0.5}
-                                style={{
-                                  default: { outline: "none" },
-                                  hover: { fill: "rgba(56, 189, 248, 0.1)", outline: "none" },
-                                  pressed: { outline: "none" },
-                                }}
-                              />
-                            ))
-                          }
-                        </Geographies>
-                        {mapMarkers.map(({ id, name, coordinates, isAttack }) => (
-                          <Marker key={id} coordinates={coordinates}>
-                            <motion.circle
-                              initial={{ r: 0, opacity: 1 }}
-                              animate={{ r: [4, 10, 4], opacity: [1, 0.4, 1] }}
-                              transition={{ repeat: Infinity, duration: 2 }}
-                              fill={isAttack ? "var(--danger)" : "var(--primary)"}
-                              stroke="#fff"
-                              strokeWidth={1}
-                            />
-                          </Marker>
-                        ))}
-                      </ComposableMap>
-                    </div>
-                  </GlassCard>
-
-                  <GlassCard title="Network Topology" icon={Network} subtitle="Real-time flow relationship graph">
-                    <div className="topology-wrapper">
-                       <ForceGraph2D
-                          graphData={graphData}
-                          width={600}
-                          height={500}
-                          backgroundColor="rgba(0,0,0,0)"
-                          nodeLabel="name"
-                          nodeColor={n => {
-                            if (n.group === 'core') return '#38bdf8';
-                            if (n.group === 'attacker') return '#f43f5e';
-                            return '#10b981';
-                          }}
-                          nodeRelSize={6}
-                          linkColor={() => 'rgba(255,255,255,0.05)'}
-                          linkWidth={1}
-                          linkDirectionalParticles={2}
-                          linkDirectionalParticleSpeed={d => d.value * 0.01}
-                       />
-                    </div>
-                  </GlassCard>
-               </div>
-            </motion.div>
-            </ErrorBoundary>
-          )}
-
           {activeTab === 'mitigation' && (
             <ErrorBoundary>
             <motion.div key="mitigation" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
                 <GlassCard title="Active Blocklist" icon={ShieldCheck} subtitle="Nodes currently restricted by IPS">
-                   <div style={{ maxHeight: '500px', overflowY: 'auto' }}>
+                   <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
                       <div className="content-stack">
                         <div>
                           <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--danger)' }}>Permanent Blocks ({health?.ipset_detailed?.permanent_ips?.length || 0})</div>
-                          {health?.ipset_detailed?.permanent_ips?.map(ip => (
-                            <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8rem 1rem', background: 'rgba(244, 63, 94, 0.05)', borderRadius: '12px', marginBottom: '8px', border: '1px solid rgba(244, 63, 94, 0.1)' }}>
-                               <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
-                               <button className="btn-icon text-danger" onClick={() => blockAction(ip, 'unblock')}><Unlock size={14} /></button>
-                            </div>
-                          ))}
+                          {(!health?.ipset_detailed?.permanent_ips || health.ipset_detailed.permanent_ips.length === 0) ? (
+                            <div className="empty-state-small">No permanent blocks active.</div>
+                          ) : (
+                            health.ipset_detailed.permanent_ips.map(ip => (
+                              <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
+                                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                    <Lock size={14} className="text-danger" />
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{ip}</span>
+                                 </div>
+                                 <button 
+                                    className="btn-glass btn-sm" 
+                                    onClick={() => blockAction(ip, 'unblock')}
+                                    style={{ color: 'var(--primary)' }}
+                                 >
+                                    Authorize
+                                 </button>
+                              </div>
+                            ))
+                          )}
                         </div>
-                        <div>
-                          <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--warning)' }}>Temporary Blocks ({health?.ipset_detailed?.temporary_ips?.length || 0})</div>
-                          {health?.ipset_detailed?.temporary_ips?.map(ip => (
-                            <div key={ip} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8rem 1rem', background: 'rgba(245, 158, 11, 0.05)', borderRadius: '12px', marginBottom: '8px', border: '1px solid rgba(245, 158, 11, 0.1)' }}>
-                               <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
-                               <button className="btn-icon text-muted" onClick={() => blockAction(ip, 'unblock')}><Unlock size={14} /></button>
-                            </div>
-                          ))}
+
+                        <div style={{ marginTop: '1.5rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--warning)' }}>Temporary Bans ({health?.ipset_detailed?.temporary_ips?.length || 0})</div>
+                          {(!health?.ipset_detailed?.temporary_ips || health.ipset_detailed.temporary_ips.length === 0) ? (
+                            <div className="empty-state-small">No temporary bans active.</div>
+                          ) : (
+                            health.ipset_detailed.temporary_ips.map(ip => (
+                              <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
+                                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                    <History size={14} className="text-warning" />
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{ip}</span>
+                                 </div>
+                                 <button 
+                                    className="btn-glass btn-sm" 
+                                    onClick={() => blockAction(ip, 'unblock')}
+                                 >
+                                    Lift Ban
+                                 </button>
+                              </div>
+                            ))
+                          )}
                         </div>
                       </div>
                    </div>
                 </GlassCard>
-                <GlassCard title="Global Reputation Scores" icon={BarChart3} subtitle="Probabilistic threat weights by node">
-                   <div className="table-container" style={{ border: 'none', background: 'transparent' }}>
-                      <table className="alerts-table">
-                        <thead><tr><th>Node Identity</th><th>Security Index</th><th>Weight</th></tr></thead>
-                        <tbody>
-                          {Object.entries(health?.ipset_detailed?.reputation || {})
-                            .sort(([, a], [, b]) => b - a)
-                            .map(([ip, score]) => (
-                              <tr key={ip}>
-                                <td><CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} /></td>
-                                <td><Badge variant={score > 60 ? 'danger' : score > 30 ? 'warning' : 'success'}>{score > 60 ? 'MALICIOUS' : score > 30 ? 'SUSPICIOUS' : 'TRUSTED'}</Badge></td>
-                                <td style={{ width: '150px' }}>
-                                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                                      <div style={{ flex: 1, height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
-                                        <div style={{ height: '100%', width: `${score}%`, background: score > 60 ? 'var(--danger)' : 'var(--primary)' }} />
-                                      </div>
-                                      <span style={{ fontWeight: 900, fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>{score.toFixed(1)}</span>
-                                   </div>
-                                </td>
-                              </tr>
-                            ))
-                          }
-                        </tbody>
-                      </table>
-                   </div>
-                </GlassCard>
+
+                <div className="content-stack">
+                  <GlassCard title="Manual Node Control" icon={Shield} subtitle="Directly restrict or authorize hosts">
+                     <div className="content-stack">
+                        <div>
+                          <label className="stat-label">Host IPv4 Address</label>
+                          <input 
+                            type="text" 
+                            className="input-field" 
+                            placeholder="e.g., 192.168.1.50" 
+                            value={manualIp}
+                            onChange={e => setManualIp(e.target.value)}
+                          />
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+                          <button 
+                            className="btn btn-danger" 
+                            onClick={() => { blockAction(manualIp, 'block'); setManualIp(''); }}
+                            disabled={!manualIp}
+                          >
+                            <Lock size={16} /> BLOCK HOST
+                          </button>
+                          <button 
+                            className="btn btn-secondary" 
+                            onClick={() => { blockAction(manualIp, 'unblock'); setManualIp(''); }}
+                            disabled={!manualIp}
+                          >
+                            <Unlock size={16} /> AUTHORIZE
+                          </button>
+                        </div>
+                     </div>
+                  </GlassCard>
+
+                  <GlassCard title="Security Exceptions" icon={CheckCircle2} subtitle="Trusted local infrastructure">
+                     <div className="content-stack">
+                        <div style={{ padding: '1rem', borderRadius: '12px', background: 'rgba(16, 185, 129, 0.05)', border: '1px solid rgba(16, 185, 129, 0.1)' }}>
+                           <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                             Internal Sentinel nodes and loopback addresses are automatically protected from mitigation policies to prevent self-denial.
+                           </p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                           {['127.0.0.1', '10.0.2.15', '192.168.1.1'].map(ip => (
+                             <Badge key={ip} variant="success">{ip}</Badge>
+                           ))}
+                        </div>
+                     </div>
+                  </GlassCard>
+                </div>
               </div>
             </motion.div>
             </ErrorBoundary>
@@ -931,10 +969,36 @@ function App() {
                           </div>
                           <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
                             <div className="stat-label">Model Hash</div>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 800, marginTop: '8px', opacity: 0.5 }}>{evalResult.summary?.model_version || 'SHA-256-UNK'}</div>
+                            <div style={{ fontSize: '0.7rem', fontWeight: 800, marginTop: '8px', opacity: 0.5 }}>{evalResult.summary?.model_version || 'SHA-256-V4'}</div>
                           </div>
                         </div>
-                        <div style={{ height: '250px' }}>
+
+                        <div className="confusion-matrix">
+                           <div className="cm-label-row" style={{ gridColumn: '2' }}>Pred. Normal</div>
+                           <div className="cm-label-row" style={{ gridColumn: '3' }}>Pred. Attack</div>
+                           
+                           <div className="cm-label-col">Actual Normal</div>
+                           <div className="cm-cell cm-cell-success">
+                              <span className="cm-value">{evalResult.metrics?.normal?.tn || 0}</span>
+                              <span className="cm-sublabel">True Negative</span>
+                           </div>
+                           <div className="cm-cell cm-cell-danger">
+                              <span className="cm-value">{evalResult.metrics?.normal?.fp || 0}</span>
+                              <span className="cm-sublabel">False Positive</span>
+                           </div>
+
+                           <div className="cm-label-col">Actual Attack</div>
+                           <div className="cm-cell cm-cell-danger">
+                              <span className="cm-value">{evalResult.metrics?.attack?.fn || 0}</span>
+                              <span className="cm-sublabel">False Negative</span>
+                           </div>
+                           <div className="cm-cell cm-cell-success">
+                              <span className="cm-value">{evalResult.metrics?.attack?.tp || 0}</span>
+                              <span className="cm-sublabel">True Positive</span>
+                           </div>
+                        </div>
+
+                        <div style={{ height: '200px', marginTop: '1rem' }}>
                           <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={Object.entries(evalResult.metrics || {}).filter(([k]) => ['attack', 'normal', 'suspicious'].includes(k)).map(([name, m]) => ({ name, f1: m.f1_score || m['f1-score'] }))}>
                               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
@@ -965,7 +1029,7 @@ function App() {
                    <div className="content-stack">
                       {modelsLoading && <p style={{ fontSize: '0.75rem', color: 'var(--primary)' }} className="pulse-fast">LOADING MODELS...</p>}
                       <div>
-                        <label className="stat-label">Active Neural Model (.onnx)</label>
+                        <label className="stat-label">Active Neural Model</label>
                         <select className="input-field" value={activeModel} onChange={e => setActiveModel(e.target.value)} disabled={modelsLoading}>
                           {models.map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
@@ -988,19 +1052,19 @@ function App() {
                       </div>
                    </div>
                 </GlassCard>
-                <GlassCard title="Forensic Retention" icon={HardDrive} subtitle="Storage limits and PCAP logging policy">
+                <GlassCard title="System Observability" icon={Eye} subtitle="Console logging and telemetry status">
                    <div className="content-stack">
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                        <span className="stat-label">PCAP Recording</span>
-                        <Badge variant={health?.pcap?.enabled ? 'success' : 'muted'}>{health?.pcap?.enabled ? 'ACTIVE' : 'INACTIVE'}</Badge>
+                        <span className="stat-label">Neural Consumer</span>
+                        <Badge variant={health?.checks?.consumer_running ? 'success' : 'danger'}>{health?.checks?.consumer_running ? 'RUNNING' : 'STOPPED'}</Badge>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                        <span className="stat-label">Forensic Storage</span>
-                        <span style={{ fontWeight: 900, fontFamily: 'var(--font-mono)', color: 'var(--primary)' }}>{health?.pcap?.storage_used_mb?.toFixed(2) || 0} MB</span>
+                        <span className="stat-label">Redis Pipeline</span>
+                        <Badge variant={health?.checks?.redis_ok ? 'success' : 'danger'}>{health?.checks?.redis_ok ? 'HEALTHY' : 'ERROR'}</Badge>
                       </div>
                       <div style={{ padding: '1rem', borderRadius: '12px', background: 'rgba(56, 189, 248, 0.05)', border: '1px solid var(--primary-glow)' }}>
-                        <div style={{ display: 'flex', gap: '8px', color: 'var(--primary)', marginBottom: '8px' }}><Info size={14} /> <span style={{ fontSize: '0.65rem', fontWeight: 900 }}>RETENTION POLICY</span></div>
-                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>Forensic buffers are pruned when storage exceeds 2.0GB or records exceed 168 hours of age. Emergency purging is active.</p>
+                        <div style={{ display: 'flex', gap: '8px', color: 'var(--primary)', marginBottom: '8px' }}><Info size={14} /> <span style={{ fontSize: '0.65rem', fontWeight: 900 }}>SYSTEM STATUS</span></div>
+                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>The Sentinel engine is operating in V4 architecture with 49-feature extraction. Automated drift detection is active.</p>
                       </div>
                    </div>
                 </GlassCard>

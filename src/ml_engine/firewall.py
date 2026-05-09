@@ -16,6 +16,7 @@ from common.config import (
     SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, SDN_FALLBACK_TO_IPSET
 )
 from ml_engine.sdn_client import SDNClient
+from common.metrics import PROM_REPUTATION, PROM_BLOCKED, PROM_TEMP_BLOCKED, PROM_MITIGATIONS_TOTAL
 
 logger = structlog.get_logger(__name__)
 
@@ -227,13 +228,16 @@ class ActiveFirewall:
 
             if new_score >= REPUTATION_PERM_BLOCK:
                 await cls.block(src_ip, ttl=0)
-                return "permanent_block"
+                PROM_MITIGATIONS_TOTAL.labels(action="permanent_block").inc()
+                return "permanent_block" if delta > 0 else "logged"
             elif new_score >= REPUTATION_TEMP_BLOCK:
                 await cls.block(src_ip, ttl=BLOCK_TTL)
-                return "temp_block"
+                PROM_MITIGATIONS_TOTAL.labels(action="temp_block").inc()
+                return "temp_block" if delta > 0 else "logged"
             elif new_score >= REPUTATION_LIMIT:
                 await cls.rate_limit(src_ip)
-                return "rate_limit"
+                PROM_MITIGATIONS_TOTAL.labels(action="rate_limit").inc()
+                return "rate_limit" if delta > 0 else "logged"
             
             return "logged"
         except Exception as e:
@@ -343,6 +347,12 @@ class ActiveFirewall:
         except Exception:
             return False
 
+    # Caching for detailed status
+    _status_cache: Dict[str, Any] = {}
+    _status_cache_time: float = 0
+    _status_cache_ttl: int = 5
+    _status_lock = asyncio.Lock()
+
     @classmethod
     async def get_status(cls) -> Dict[str, Any]:
         """Returns summary counts."""
@@ -356,63 +366,82 @@ class ActiveFirewall:
 
     @classmethod
     async def get_detailed_status(cls) -> Dict[str, Any]:
-        """Returns actual list of IPs."""
-        perm = []
-        temp = []
-        reputation = {}
-        
-        if cls._redis_client:
-            try:
-                loop = asyncio.get_running_loop()
-                reputation = await loop.run_in_executor(None, cls._redis_client.hgetall, cls.REDIS_REPUTATION_KEY)
-                reputation = {k: float(v) for k, v in reputation.items()}
-            except Exception as e:
-                logger.error("Failed to fetch shared reputation", error=str(e))
+        """Returns actual list of IPs with TTL-based caching."""
+        async with cls._status_lock:
+            now = time.time()
+            if cls._status_cache and (now - cls._status_cache_time) < cls._status_cache_ttl:
+                return cls._status_cache
 
-        if cls._backend == "sdn" and cls._sdn_client:
-            try:
-                sdn_flows = await cls._sdn_client.get_flows()
-                perm.extend(sdn_flows.get("blocked_ips", []))
-            except Exception as e:
-                logger.error("SDN flow fetch failed", error=str(e))
+            perm = []
+            temp = []
+            reputation = {}
+            
+            if cls._redis_client:
+                try:
+                    loop = asyncio.get_running_loop()
+                    reputation = await loop.run_in_executor(None, cls._redis_client.hgetall, cls.REDIS_REPUTATION_KEY)
+                    reputation = {k: float(v) for k, v in reputation.items()}
+                except Exception as e:
+                    logger.error("Failed to fetch shared reputation", error=str(e))
 
-        def _parse_ipset(set_name):
-            ips = {"perm": [], "temp": []}
-            try:
-                result = subprocess.run(["sudo", "ipset", "list", set_name], capture_output=True, text=True)
-                if result.returncode == 0:
-                    lines = result.stdout.splitlines()
-                    in_members = False
-                    for line in lines:
-                        if line.startswith("Members:"):
-                            in_members = True
-                            continue
-                        if in_members and line.strip():
-                            parts = line.split()
-                            ip = parts[0]
-                            timeout = int(parts[2]) if len(parts) >= 3 else 0
-                            if timeout == 0: ips["perm"].append(ip)
-                            else: ips["temp"].append(ip)
-            except Exception as e:
-                logger.error(f"Failed to list ipset members for {set_name}", error=str(e))
-            return ips
+            if cls._backend == "sdn" and cls._sdn_client:
+                try:
+                    sdn_flows = await cls._sdn_client.get_flows()
+                    perm.extend(sdn_flows.get("blocked_ips", []))
+                except Exception as e:
+                    logger.error("SDN flow fetch failed", error=str(e))
 
-        loop = asyncio.get_running_loop()
-        blocks = await loop.run_in_executor(None, _parse_ipset, cls.SET_BLOCKS)
-        limited = await loop.run_in_executor(None, _parse_ipset, cls.SET_LIMITED)
+            def _parse_ipset(set_name):
+                ips = {"perm": [], "temp": []}
+                try:
+                    result = subprocess.run(["sudo", "ipset", "list", set_name], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.splitlines()
+                        in_members = False
+                        for line in lines:
+                            if line.startswith("Members:"):
+                                in_members = True
+                                continue
+                            if in_members and line.strip():
+                                parts = line.split()
+                                ip = parts[0]
+                                # ipset list format: "1.2.3.4 timeout 123"
+                                timeout = 0
+                                if "timeout" in parts:
+                                    try:
+                                        t_idx = parts.index("timeout")
+                                        timeout = int(parts[t_idx+1])
+                                    except (ValueError, IndexError):
+                                        timeout = 0
+                                if timeout == 0: ips["perm"].append(ip)
+                                else: ips["temp"].append(ip)
+                except Exception as e:
+                    logger.error(f"Failed to list ipset members for {set_name}", error=str(e))
+                return ips
 
-        perm.extend(blocks["perm"])
-        temp.extend(blocks["temp"])
-        temp.extend(limited["perm"]) # Limited is always temporary in sense of timeout 3600
-        temp.extend(limited["temp"])
-
-        # Deduplicate
-        perm = list(set(perm))
-        temp = list(set(temp))
-
-        return {
-            "permanent_ips": perm,
-            "temporary_ips": temp,
-            "reputation": reputation
-        }
-
+            loop = asyncio.get_running_loop()
+            sets_data = await loop.run_in_executor(None, lambda: [_parse_ipset(cls.SET_BLOCKS), _parse_ipset(cls.SET_LIMITED)])
+            
+            perm.extend(sets_data[0]["perm"])
+            temp.extend(sets_data[0]["temp"])
+            temp.extend(sets_data[1]["perm"]) # Limited is temporary by nature
+            temp.extend(sets_data[1]["temp"])
+            
+            # Deduplicate and sort
+            perm = sorted(list(set(perm)))
+            temp = sorted(list(set(temp)))
+            
+            result = {
+                "permanent_ips": perm,
+                "temporary_ips": temp,
+                "reputation": reputation
+            }
+            
+            # Update Prometheus Gauges
+            PROM_BLOCKED.set(len(perm))
+            PROM_TEMP_BLOCKED.set(len(temp))
+            PROM_REPUTATION.set(len(reputation))
+            
+            cls._status_cache = result
+            cls._status_cache_time = now
+            return result

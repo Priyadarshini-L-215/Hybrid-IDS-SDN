@@ -9,10 +9,45 @@ import logging
 import joblib
 import threading
 import time
+import hashlib
+import functools
 from pathlib import Path
 from collections import deque
 
 logger = logging.getLogger(__name__)
+
+# --- CACHING DECORATOR ---
+def event_cache(maxsize=128):
+    """
+    LRU Cache for feature extraction based on event payload fingerprint.
+    Prevents redundant calculations for identical burst events.
+    """
+    def decorator(func):
+        cache = {}
+        # We don't use functools.lru_cache because dicts are unhashable
+        # Instead we compute a stable hash of the event dict
+        @functools.wraps(func)
+        def wrapper(event_dict, *args, **kwargs):
+            # Create stable fingerprint
+            try:
+                # Only hash fields that matter for extraction
+                relevant_data = {k: v for k, v in event_dict.items() if k not in {'timestamp', 'flow_id', 'pcap_cnt'}}
+                fingerprint = hashlib.sha256(json.dumps(relevant_data, sort_keys=True).encode()).hexdigest()
+                
+                if fingerprint in cache:
+                    return cache[fingerprint]
+                
+                result = func(event_dict, *args, **kwargs)
+                
+                if len(cache) >= maxsize:
+                    # Simple FIFO eviction
+                    cache.pop(next(iter(cache)))
+                cache[fingerprint] = result
+                return result
+            except Exception:
+                return func(event_dict, *args, **kwargs)
+        return wrapper
+    return decorator
 
 # --- STATEFUL TRACKING ---
 class StatefulFeatureTracker:
@@ -32,29 +67,32 @@ class StatefulFeatureTracker:
         ct_src_dport_ltm = 0
         ct_dst_sport_ltm = 0
         ct_dst_src_ltm = 0
-        
+
+        # Copy the deque under lock (O(1) hold), then iterate the snapshot without blocking
         with self._lock:
-            for entry in self.window:
-                # Matches Source IP
-                if entry['src_ip'] == src_ip:
-                    ct_src_ltm += 1
-                    if entry['service'] == service:
-                        ct_srv_src += 1
-                    if entry['dst_ip'] == dst_ip:
-                        ct_dst_src_ltm += 1
-                
-                # Matches Destination IP
+            snapshot = list(self.window)
+
+        for entry in snapshot:
+            # Matches Source IP
+            if entry['src_ip'] == src_ip:
+                ct_src_ltm += 1
+                if entry['service'] == service:
+                    ct_srv_src += 1
                 if entry['dst_ip'] == dst_ip:
-                    ct_dst_ltm += 1
-                    if entry['service'] == service:
-                        ct_srv_dst += 1
-                    if entry['dst_port'] == dst_port:
-                        ct_src_dport_ltm += 1
-                
-                # Matches Source Port for destination sport check
-                if entry['src_port'] == src_port and entry['dst_ip'] == dst_ip:
-                    ct_dst_sport_ltm += 1
-                    
+                    ct_dst_src_ltm += 1
+
+            # Matches Destination IP
+            if entry['dst_ip'] == dst_ip:
+                ct_dst_ltm += 1
+                if entry['service'] == service:
+                    ct_srv_dst += 1
+                if entry['dst_port'] == dst_port:
+                    ct_src_dport_ltm += 1
+
+            # Matches Source Port for destination sport check
+            if entry['src_port'] == src_port and entry['dst_ip'] == dst_ip:
+                ct_dst_sport_ltm += 1
+
         return {
             'ct_srv_src': float(ct_srv_src),
             'ct_srv_dst': float(ct_srv_dst),
@@ -125,6 +163,7 @@ def get_proto_encoder():
                 logger.error(f"Failed to load le_proto.pkl: {e}")
     return _LE_PROTO
 
+@event_cache(maxsize=256)
 def extract_features_from_eve(event: dict, features: list = None) -> list | None:
     if event.get('event_type') not in ['flow', 'alert']:
         return None
@@ -181,6 +220,15 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         proto_val = 0.0
 
     # Feature Dictionary (49 features)
+    # Notes on feature accuracy:
+    # - IAT std, jitter: set to 0.0 — requires raw per-packet timestamps not available in EVE JSON
+    # - synack/ackdat: use Suricata's syn_rtt field if present, otherwise split rtt 60/40
+    # - dwin: TCP receive window size (not ACK number)
+    # - sloss/dloss: approximate from retransmission counts if available; else 0.0
+    rtt = float(flow.get('rtt', 0))
+    syn_rtt = float(flow.get('syn_rtt', rtt * 0.6))
+    ackdat = max(rtt - syn_rtt, 0.0)
+
     feature_dict = {
         'flow_duration': age_ms,
         'total_fwd_packets': fwd_pkts,
@@ -188,33 +236,34 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
         'total_fwd_bytes': fwd_bytes,
         'total_bwd_bytes': bwd_bytes,
         'flow_iat_mean': flow_iat_mean,
-        'flow_iat_std': flow_iat_mean * 0.1, 
+        'flow_iat_std': 0.0,            # Cannot compute without per-packet timestamps
         'fwd_iat_mean': fwd_iat_mean,
         'bwd_iat_mean': bwd_iat_mean,
         'pkt_len_mean': total_bytes / max(total_pkts, 1),
-        'pkt_len_std': (total_bytes / max(total_pkts, 1)) * 0.2,
+        'pkt_len_std': 0.0,             # Cannot compute without per-packet lengths
         'spkts': fwd_pkts,
         'dpkts': bwd_pkts,
         'sbytes': fwd_bytes,
         'dbytes': bwd_bytes,
         'sload': (fwd_bytes * 8) / safe_age,
         'dload': (bwd_bytes * 8) / safe_age,
-        'sloss': float(flow.get('emergency_fwd', 0)), # Placeholder for loss
-        'dloss': float(flow.get('emergency_bwd', 0)),
+        # sloss/dloss: use retransmission counts if Suricata exposes them, else 0.0
+        'sloss': float(flow.get('pkts_toserver_retrans', 0)),
+        'dloss': float(flow.get('pkts_toclient_retrans', 0)),
         'sttl': float(event.get('ip', {}).get('ttl', 64)),
-        'dttl': float(flow.get('dttl', 0)), 
+        'dttl': float(flow.get('dttl', 0)),
         'swin': float(tcp.get('window', 0)),
-        'dwin': float(tcp.get('ack', 0) % 65535), # Approximation
+        'dwin': float(tcp.get('window', 0)),  # TCP receive window, not ACK number
         'stcpb': float(tcp.get('seq', 0)),
         'dtcpb': float(tcp.get('ack', 0)),
-        'tcprtt': float(flow.get('rtt', 0)),
-        'synack': float(flow.get('rtt', 0) * 0.6),
-        'ackdat': float(flow.get('rtt', 0) * 0.4),
+        'tcprtt': rtt,
+        'synack': syn_rtt,              # Use syn_rtt from Suricata if available
+        'ackdat': ackdat,               # Remaining RTT after SYN-ACK
         'sinpkt': fwd_iat_mean,
         'dinpkt': bwd_iat_mean,
-        'sjit': fwd_iat_mean * 0.05,
-        'djit': bwd_iat_mean * 0.05,
-        'ct_state_ttl': float(ct_stats['ct_src_ltm'] * 0.5), # Heuristic
+        'sjit': 0.0,                    # Cannot compute without per-packet timestamps
+        'djit': 0.0,                    # Cannot compute without per-packet timestamps
+        'ct_state_ttl': float(ct_stats['ct_src_ltm'] * 0.5),
         'ct_flw_http_mthd': 1.0 if event.get('http', {}).get('http_method') in ['GET', 'POST'] else 0.0,
         'ct_srv_src': ct_stats['ct_srv_src'],
         'ct_srv_dst': ct_stats['ct_srv_dst'],

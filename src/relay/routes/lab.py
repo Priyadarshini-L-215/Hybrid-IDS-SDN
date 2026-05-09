@@ -1,18 +1,36 @@
 import asyncio
+import ipaddress
 import time
 from typing import Dict, Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Depends
 import structlog
+
+from relay.middleware.auth import require_api_key
 
 logger = structlog.get_logger("relay.routes.lab")
 
 router = APIRouter(prefix="/api", tags=["Lab"])
 
-@router.post("/nmap/scan")
+
+def _validate_ip(target: str) -> str:
+    """Raises HTTP 422 if target is not a valid IP address."""
+    try:
+        return str(ipaddress.ip_address(target))
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid target: '{target}' is not a valid IP address."
+        )
+
+@router.post("/nmap/scan", dependencies=[Depends(require_api_key)])
 async def run_nmap_scan(request: Dict[str, Any]):
-    target = request.get("target", "127.0.0.1")
+    target = _validate_ip(request.get("target", ""))
     profile = request.get("profile", "quick")
+
+    allowed_profiles = {"ping", "quick", "service", "os_detect", "aggressive", "vuln"}
+    if profile not in allowed_profiles:
+        raise HTTPException(status_code=400, detail=f"Unknown profile '{profile}'.")
     
     # Map profiles to nmap flags
     flags = {
@@ -74,9 +92,9 @@ async def run_nmap_scan(request: Dict[str, Any]):
         logger.error("Nmap scan failed", error=str(e))
         return {"success": False, "error": str(e)}
 
-@router.post("/attack/ddos")
+@router.post("/attack/ddos", dependencies=[Depends(require_api_key)])
 async def run_ddos_simulation(request: Dict[str, Any]):
-    target = request.get("target", "127.0.0.1")
+    target = _validate_ip(request.get("target", ""))
     logger.info("Simulating DDoS attack", target=target)
     
     def _send_packets():
@@ -103,9 +121,16 @@ async def run_ddos_simulation(request: Dict[str, Any]):
         logger.error("DDoS simulation failed", error=str(e))
         return {"success": False, "error": str(e)}
 
-@router.post("/attack/payload")
+@router.post("/attack/payload", dependencies=[Depends(require_api_key)])
 async def run_payload_simulation(request: Dict[str, Any]):
-    target = request.get("target", "127.0.0.1")
+    target = _validate_ip(request.get("target", "127.0.0.1"))
+    # SSRF guard — only allow loopback/private targets for payload injection
+    addr = ipaddress.ip_address(target)
+    if not addr.is_loopback and not addr.is_private:
+        raise HTTPException(
+            status_code=422,
+            detail="Payload simulation only permitted against loopback or private network addresses."
+        )
     logger.info("Simulating Payload Injection", target=target)
     
     try:

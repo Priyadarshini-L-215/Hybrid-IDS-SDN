@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { apiClient } from '../utils/apiClient';
 
 /**
  * Custom hook for managing WebSocket alert stream
@@ -60,6 +61,35 @@ export const useAlertStream = () => {
 
   // Initialize WebSocket connection
   useEffect(() => {
+    const fetchInitialAlerts = async () => {
+      try {
+        const data = await apiClient.get('/api/alerts');
+        if (data && data.alerts) {
+          console.log(`[Alert Stream] Seeding ${data.alerts.length} historical alerts`);
+          setAlerts(prev => {
+            const seenIds = new Set(prev.map(alert => alert.event_id || alert.id).filter(Boolean));
+            const historicalAlerts = data.alerts.filter(alert => {
+              const alertId = alert.event_id || alert.id;
+              if (!alertId) return true;
+              if (seenIds.has(alertId)) return false;
+              seenIds.add(alertId);
+              return true;
+            });
+
+            const merged = [...historicalAlerts, ...prev].slice(0, 100);
+            knownEventIds.current.clear();
+            merged.forEach(alert => {
+              const alertId = alert.event_id || alert.id;
+              if (alertId) knownEventIds.current.add(alertId);
+            });
+            return merged;
+          });
+        }
+      } catch (err) {
+        console.error('[Alert Stream] Failed to seed historical alerts:', err);
+      }
+    };
+
     const connect = () => {
       try {
         const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/alerts`;
@@ -158,6 +188,7 @@ export const useAlertStream = () => {
       }
     };
 
+    fetchInitialAlerts();
     connect();
 
     // Smart buffer flush at 20fps (50ms interval) instead of requestAnimationFrame

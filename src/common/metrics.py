@@ -15,6 +15,7 @@ PROM_LATENCY = Histogram('sentinel_detection_latency_seconds', 'End-to-end detec
 PROM_REPUTATION = Gauge('sentinel_reputation_ips', 'Number of IPs tracked in reputation system')
 PROM_BLOCKED = Gauge('sentinel_blocked_ips', 'Current number of permanent blocks')
 PROM_TEMP_BLOCKED = Gauge('sentinel_temp_blocked_ips', 'Current number of temporary blocks')
+PROM_MITIGATIONS_TOTAL = Counter('sentinel_mitigations_total', 'Total IPS actions taken', ['action'])
 
 # Resource Usage (Optional, basic)
 PROM_WORKER_TASKS = Gauge('sentinel_worker_tasks_active', 'Number of active worker tasks')

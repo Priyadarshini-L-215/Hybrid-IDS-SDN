@@ -145,7 +145,11 @@ class MLEngine:
             order_path = MODELS_DIR / "feature_order.json"
             if order_path.exists():
                 with open(order_path, "r") as f:
-                    self.feature_order = json.load(f)["feature_order"]
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.feature_order = data.get("feature_order", data.get("features", []))
+                    else:
+                        self.feature_order = data
                 logger.info("Feature order locked", count=len(self.feature_order))
             else:
                 self.feature_order = load_feature_names()
@@ -165,9 +169,26 @@ class MLEngine:
             model_path = MODELS_DIR / ACTIVE_MODEL_FILE
             if ONNX_AVAILABLE and model_path.suffix == ".onnx" and model_path.exists():
                 self.rf_session = ort.InferenceSession(str(model_path))
-                self.rf_model = None
                 self.stage_status["rf"] = "loaded_onnx"
                 logger.info("ONNX RF Pipeline loaded", path=str(model_path))
+                
+                # Try to load a companion pkl for SHAP (Explainability)
+                pkl_path = model_path.with_suffix(".pkl")
+                if not pkl_path.exists():
+                    # Common naming pattern: multi_pipeline.onnx -> multi_model.pkl
+                    stem = model_path.stem
+                    if "pipeline" in stem:
+                        pkl_path = MODELS_DIR / (stem.replace("pipeline", "model") + ".pkl")
+                
+                if pkl_path.exists():
+                    try:
+                        self.rf_model = joblib.load(pkl_path)
+                        logger.info("Loaded companion pkl for SHAP", path=str(pkl_path))
+                    except Exception as e:
+                        logger.warning("Failed to load companion pkl", error=str(e))
+                        self.rf_model = None
+                else:
+                    self.rf_model = None
             elif model_path.exists():
                 self.rf_model = joblib.load(model_path)
                 self.rf_session = None
@@ -225,10 +246,14 @@ class MLEngine:
                     logger.warning("Failed to init SHAP explainer", error=str(e))
 
             if (self.rf_model or self.rf_session) and self.scaler:
-                self.is_ready = True
+                self.is_ready = self._validate_schema()
                 if self.stage_status.get("vae") in {"missing", "disabled"}:
                     self.fallback_mode = False
-                logger.info("ML Engine is fully READY")
+                if self.is_ready:
+                    logger.info("ML Engine is fully READY")
+                else:
+                    logger.error("ML Engine schema validation FAILED")
+                    self.fallback_mode = True
             else:
                 logger.warning("ML Engine incomplete, entering FALLBACK (Signature-only)")
                 self.fallback_mode = True
@@ -236,6 +261,38 @@ class MLEngine:
         except Exception as e:
             logger.error("Failed to load models", error=str(e))
             self.fallback_mode = True
+
+    def _validate_schema(self) -> bool:
+        """Validates that the loaded models and scaler match the feature_order dimension."""
+        expected_dim = len(self.feature_order)
+        
+        # Validate Scaler
+        if hasattr(self.scaler, "n_features_in_"):
+            if self.scaler.n_features_in_ != expected_dim:
+                logger.error("Scaler dimension mismatch", 
+                             expected=expected_dim, 
+                             actual=self.scaler.n_features_in_)
+                return False
+        
+        # Validate RF Model
+        if self.rf_model and hasattr(self.rf_model, "n_features_in_"):
+            if self.rf_model.n_features_in_ != expected_dim:
+                logger.error("RF Model dimension mismatch", 
+                             expected=expected_dim, 
+                             actual=self.rf_model.n_features_in_)
+                return False
+        
+        # Validate VAE
+        if self.vae_detector and hasattr(self.vae_detector, "input_dim"):
+            if self.vae_detector.input_dim != expected_dim:
+                logger.warning("VAE dimension mismatch", 
+                               expected=expected_dim, 
+                               actual=self.vae_detector.input_dim)
+                # We don't fail the whole engine for VAE mismatch, just disable VAE
+                self.stage_status["vae"] = "dim_mismatch"
+                self.vae_detector = None
+
+        return True
 
     def get_status(self) -> Dict[str, Any]:
         """Returns runtime status for dashboard and diagnostics."""
@@ -340,6 +397,9 @@ class MLEngine:
                 # Only fires for samples where the RF is uncertain (ml_score < threshold).
                 # This avoids wasting compute on high-confidence RF detections.
                 batch_anomaly_scores = [0.0] * len(valid_features)
+                # Pre-initialize so valid_anomaly_scores is always defined,
+                # even if the VAE block is skipped or raises an exception.
+                valid_anomaly_scores = batch_anomaly_scores
                 if self.vae_detector and self.vae_detector.is_ready:
                     # Trigger VAE for samples where RF is uncertain (e.g. score < 0.5)
                     # This provides a second behavioral opinion on doubtful traffic.
@@ -368,7 +428,7 @@ class MLEngine:
                         if n_anomalies:
                             logger.info("VAE flagged potential anomalies",
                                         count=n_anomalies)
-                valid_anomaly_scores = batch_anomaly_scores
+                    valid_anomaly_scores = batch_anomaly_scores
                     
                 # 2c. Batch SHAP (Performance optimization)
                 batch_shap_results = {} # Index -> Top 3 features
@@ -453,7 +513,9 @@ class MLEngine:
                     "extract_ms": round(extract_ms / batch_count, 2),
                     "infer_ms": round(infer_ms / batch_count, 2),
                     "total_ms": round((time.time() - start_time) * 1000 / batch_count, 2)
-                }
+                },
+                # Feature vector for baseline retraining — only set for valid events
+                "_feature_vector": valid_features[v_idx] if v_idx is not None and v_idx < len(valid_features) else None,
             })
             results.append(res)
             

@@ -18,19 +18,21 @@ class CTIClient:
     def __init__(self, api_key: str = ALIENTVAULT_KEY):
         self.api_key = api_key
         self.cache: Dict[str, tuple] = {}  # {ip: (data, timestamp)}
+        self._cache_lock = asyncio.Lock()
 
     async def get_ip_reputation(self, ip: str) -> Dict[str, Any]:
         """Fetches reputation data for an IP from AlienVault OTX."""
         if not self.api_key or self.api_key == "PASTE_YOUR_OTX_KEY_HERE":
             return {"status": "unconfigured"}
 
-        # 1. Check Cache with TTL
-        if ip in self.cache:
-            data, timestamp = self.cache[ip]
-            if time.time() - timestamp < CACHE_TTL:
-                return data
-            else:
-                del self.cache[ip]
+        # 1. Check Cache with TTL (under lock to prevent race conditions)
+        async with self._cache_lock:
+            if ip in self.cache:
+                data, timestamp = self.cache[ip]
+                if time.time() - timestamp < CACHE_TTL:
+                    return data
+                else:
+                    del self.cache[ip]
 
         def fetch():
             url = f"{self.BASE_URL}/indicators/IPv4/{ip}/general"
@@ -62,13 +64,13 @@ class CTIClient:
                     "last_updated": time.time()
                 }
                 
-                # 3. Update Cache (with size limit)
-                if len(self.cache) >= MAX_CACHE_SIZE:
-                    # Remove oldest entry
-                    oldest_ip = min(self.cache, key=lambda k: self.cache[k][1])
-                    del self.cache[oldest_ip]
-
-                self.cache[ip] = (reputation, time.time())
+                # 3. Update Cache (with size limit, under lock)
+                async with self._cache_lock:
+                    if len(self.cache) >= MAX_CACHE_SIZE:
+                        # Remove oldest entry
+                        oldest_ip = min(self.cache, key=lambda k: self.cache[k][1])
+                        del self.cache[oldest_ip]
+                    self.cache[ip] = (reputation, time.time())
                 return reputation
             
             elif response.status_code == 403:

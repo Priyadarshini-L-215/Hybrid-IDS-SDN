@@ -74,6 +74,15 @@ class WorkerPool:
 
     async def _get_fallback_geoip(self, ip: str) -> Optional[dict]:
         """Fetch GeoIP data from a public API as a fallback."""
+        # SSRF Guard: only query public, globally-routable IPs
+        try:
+            import ipaddress as _ip
+            addr = _ip.ip_address(ip)
+            if not addr.is_global:
+                return None  # Skip private/loopback/link-local/multicast
+        except ValueError:
+            return None
+
         if ip in self.geoip_fallback_cache:
             return self.geoip_fallback_cache[ip]
             
@@ -143,15 +152,18 @@ class WorkerPool:
         except Exception:
             pass # Already exists
 
+        last_heartbeat = 0
         while self.running:
             try:
                 # 0. Write Heartbeat for Health Check (Redis-based)
-                if self.processed_count % 10 == 0:
+                now = time.time()
+                if now - last_heartbeat > 5.0:
                     try:
                         await rc.async_redis_client.setex(
                             f"sentinel_heartbeat:{worker_id}", 30, 
-                            json.dumps({"ts": time.time(), "status": "active"})
+                            json.dumps({"ts": now, "status": "active", "processed": self.processed_count})
                         )
+                        last_heartbeat = now
                     except Exception as e:
                         logger.debug("Failed to write worker heartbeat", worker=worker_id, error=str(e))
 
@@ -200,11 +212,11 @@ class WorkerPool:
                             # Drift detected!
                             await self._on_drift_detected({"type": "vae_drift", "mse": mse})
                         
-                        # Buffer raw features for retraining (mocking the feature extraction)
-                        # In a real system, we'd store the actual feature vector
-                        if len(self.normal_mse_buffer) < 1000:
-                            # Just storing the event for now as a proxy for the feature vector
-                            self.normal_mse_buffer.append(batch_msgs[i])
+                        # Buffer ACTUAL feature vectors for retraining
+                        # predict_batch returns _feature_vector in each result (added to fix flaw #12)
+                        feat_vec = res.get("_feature_vector")
+                        if feat_vec is not None and len(self.normal_mse_buffer) < 1000:
+                            self.normal_mse_buffer.append(feat_vec)
                 
                 # 3. Finalize Alerts and Mitigation in PARALLEL
                 async def prepare_alert(raw_event, res):
@@ -287,13 +299,17 @@ class WorkerPool:
         
         # 1. Trigger Auto-Refresh if VAE drifted and we have enough samples
         if drift_info.get("type") == "vae_drift" and len(self.normal_mse_buffer) > 500:
-            # Prepare feature matrix for retraining
             try:
-                # Mocking feature extraction from the buffer
-                # In production, we'd use the stored feature vectors
-                X_normal = np.random.rand(len(self.normal_mse_buffer), 49) # placeholder
-                asyncio.create_task(self.baseline_updater.run_update(X_normal))
-                self.normal_mse_buffer = [] # clear buffer
+                # Use the real feature vectors buffered from normal traffic
+                X_normal = np.array(self.normal_mse_buffer, dtype=np.float32)
+                if X_normal.ndim == 2 and X_normal.shape[1] > 0:
+                    asyncio.create_task(self.baseline_updater.run_update(X_normal))
+                    logger.info("Triggered baseline auto-refresh with real feature vectors",
+                                n_samples=len(X_normal))
+                else:
+                    logger.warning("Skipping baseline refresh: feature buffer has unexpected shape",
+                                   shape=X_normal.shape)
+                self.normal_mse_buffer = []  # clear buffer after use
             except Exception as e:
                 logger.error("Auto-refresh trigger failed", error=str(e))
 

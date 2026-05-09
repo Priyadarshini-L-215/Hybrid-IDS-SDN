@@ -118,12 +118,39 @@ app = FastAPI(
 )
 
 # Middleware
+# Restrict CORS to localhost origins only — prevents CSRF from third-party sites.
+# For production deployments, set SENTINEL_CORS_ORIGIN env var to the actual dashboard URL.
+import os as _os
+_cors_origins = _os.environ.get(
+    "SENTINEL_CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=[o.strip() for o in _cors_origins],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Request ID Middleware
+import uuid
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        # Add to structlog context for this request
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+app.add_middleware(RequestIDMiddleware)
 
 # Include Routers
 app.include_router(system.router)
@@ -149,8 +176,15 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            # Keep connection alive and wait for client to close
-            await websocket.receive_text()
+            # Keep connection alive and handle ping/pong
+            msg = await websocket.receive_text()
+            try:
+                import json
+                data = json.loads(msg)
+                if data.get('type') == 'ping':
+                    await websocket.send_text(json.dumps({'type': 'pong'}))
+            except Exception:
+                pass
     except WebSocketDisconnect:
         logger.debug("WebSocket client disconnected")
         try:

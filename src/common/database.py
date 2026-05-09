@@ -1,16 +1,27 @@
 import sqlite3
 import json
-import logging
+import structlog
 import threading
 import zlib
 import time
+import functools
 from common.config import DB_PATH
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class DatabaseHandler:
     """Manages thread-safe database connections for high-performance logging."""
     _local = threading.local()
+
+    @staticmethod
+    @functools.lru_cache(maxsize=100)
+    def _decompress_event(raw_data: bytes) -> dict:
+        """Cached decompression and JSON parsing of forensic events."""
+        try:
+            decompressed = zlib.decompress(raw_data).decode('utf-8')
+            return json.loads(decompressed)
+        except Exception:
+            return {}
 
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
@@ -37,7 +48,7 @@ class DatabaseHandler:
                 self._local.conn.execute("PRAGMA busy_timeout=60000")
                 self._local.conn.row_factory = sqlite3.Row
             except sqlite3.Error as e:
-                logger.error(f"Database connection failed in thread {threading.current_thread().name}: {e}")
+                logger.error("Database connection failed", thread=threading.current_thread().name, error=str(e))
                 raise
         return self._local.conn
 
@@ -47,7 +58,9 @@ class DatabaseHandler:
         while not self._stop_event.is_set():
             try:
                 conn = self._get_conn()
-                conn.execute("BEGIN IMMEDIATE")
+                # Use DEFERRED to avoid deadlocking with concurrent write transactions.
+                # An exclusive lock is only acquired when the DELETE statement runs.
+                conn.execute("BEGIN DEFERRED")
                 cursor = conn.cursor()
                 cursor.execute(
                     "DELETE FROM alerts WHERE created_at < datetime('now', ?)",
@@ -56,9 +69,13 @@ class DatabaseHandler:
                 deleted = cursor.rowcount
                 conn.commit()
                 if deleted > 0:
-                    logger.info(f"[DB] Pruned {deleted} alerts older than {RETENTION_DAYS} days.")
+                    logger.info("Pruned old alerts", count=deleted, retention_days=RETENTION_DAYS)
             except Exception as e:
-                logger.error(f"[DB] Pruner error: {e}")
+                logger.error("Pruner error", error=str(e))
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             
             self._stop_event.wait(3600)
 
@@ -97,6 +114,13 @@ class DatabaseHandler:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
+            
+            # Optimized Indexes for UI and Forensics
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_src_ts ON alerts (src_ip, created_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_pred_ts ON alerts (prediction, created_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (created_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts (event_id)")
+
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS false_positives (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,6 +172,10 @@ class DatabaseHandler:
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Failed to initialize database: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
     def add_alert(self, alert_data):
         """Insert a new alert into the database."""
@@ -159,7 +187,7 @@ class DatabaseHandler:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
             cursor.execute('''
-            INSERT INTO alerts (
+            INSERT OR IGNORE INTO alerts (
                 event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
                 protocol, alert_sig, prediction, confidence, severity, category, 
                 mitigation, is_mitigated, ja3_hash, ja3_string, 
@@ -193,6 +221,10 @@ class DatabaseHandler:
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Failed to add alert: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
     def batch_add_alerts(self, alerts_data_list):
         """Insert a batch of alerts in a single transaction."""
@@ -232,7 +264,7 @@ class DatabaseHandler:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
             cursor.executemany('''
-            INSERT INTO alerts (
+            INSERT OR IGNORE INTO alerts (
                 event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
                 protocol, alert_sig, prediction, confidence, severity, category, 
                 mitigation, is_mitigated, ja3_hash, ja3_string, 
@@ -242,7 +274,11 @@ class DatabaseHandler:
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Batch insert failed: {e}")
-            # Fallback
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # Fallback — individual inserts allow partial success
             for alert_data in alerts_data_list:
                 self.add_alert(alert_data)
 
@@ -280,12 +316,16 @@ class DatabaseHandler:
             for row in rows:
                 alert = dict(row)
                 try:
-                    raw_data = alert['raw_event']
-                    if raw_data:
-                        decompressed = zlib.decompress(raw_data).decode('utf-8')
-                        alert['raw_event'] = json.loads(decompressed)
+                    for field in ['shap_top3', 'enrichment']:
+                        if alert.get(field):
+                            try:
+                                alert[field] = json.loads(alert[field])
+                            except Exception:
+                                alert[field] = {} if field == 'enrichment' else []
                 except Exception:
-                    alert['raw_event'] = {}
+                    pass
+
+                alert.pop('raw_event', None)
                 alerts.append(alert)
             return alerts
         except sqlite3.Error as e:
@@ -349,8 +389,7 @@ class DatabaseHandler:
                 try:
                     raw_data = h['raw_event']
                     if raw_data:
-                        decompressed = zlib.decompress(raw_data).decode('utf-8')
-                        evt = json.loads(decompressed)
+                        evt = self._decompress_event(raw_data)
                         # Extract latency
                         lat = evt.get("latency", {}).get("total_ms")
                         if lat: latencies.append(lat)
@@ -457,6 +496,10 @@ class DatabaseHandler:
             return True
         except sqlite3.Error as e:
             logger.error(f"Failed to log false positive: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return False
 
     def get_stats(self):
