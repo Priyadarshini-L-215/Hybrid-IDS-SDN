@@ -205,6 +205,10 @@ class WorkerPool:
                     ml_score = res.get("ml_score", 0.0)
                     await self.drift_detector.update(ml_score)
                     
+                    # Unconditionally extract and remove _feature_vector to prevent memory leaks
+                    # and pollution of downstream alert payloads.
+                    feat_vec = res.pop("_feature_vector", None)
+
                     # Track VAE drift if prediction is normal (using raw MSE proxy)
                     if res.get("prediction") == "normal":
                         mse = res.get("anomaly_score", 0.0)
@@ -213,8 +217,6 @@ class WorkerPool:
                             await self._on_drift_detected({"type": "vae_drift", "mse": mse})
                         
                         # Buffer ACTUAL feature vectors for retraining
-                        # predict_batch returns _feature_vector in each result (added to fix flaw #12)
-                        feat_vec = res.get("_feature_vector")
                         if feat_vec is not None and len(self.normal_mse_buffer) < 1000:
                             self.normal_mse_buffer.append(feat_vec)
                 
