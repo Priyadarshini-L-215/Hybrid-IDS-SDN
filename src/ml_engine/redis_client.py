@@ -65,7 +65,7 @@ async def init_async_redis():
             return True
         except Exception as e:
             logger.error(f"[Redis] Failed to create async client: {e}")
-            _async_initialized = True  # Mark as attempted to prevent retries
+            # Do NOT set _async_initialized = True here, to allow retries on next call
             return False
 
 

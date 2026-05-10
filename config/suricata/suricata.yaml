@@ -40,18 +40,25 @@ outputs:
   - eve-log:
       enabled: yes
       filetype: regular
+      community-id: yes
       filename: __REPO_ROOT__/data/logs/eve.json
       types:
         - alert:
             metadata: yes
-        - flow
-        - tcp:
-            extended: yes
+            ip: yes
+            ipv6: yes
+            community-id: yes
+            ethernet: yes
+            packet: yes
+        - flow:
+            ip: yes
+            ipv6: yes
+            community-id: yes
+            ethernet: yes
+            packet: yes
         - http
         - dns
-        - tls:
-            extended: yes
-            ja3-fingerprints: yes
+        - tls
         - ssh
         - stats
   - eve-log:
@@ -61,14 +68,18 @@ outputs:
       types:
         - alert:
             metadata: yes
-        - flow
-        - tcp:
-            extended: yes
+            ip: yes
+            ipv6: yes
+            ethernet: yes
+            packet: yes
+        - flow:
+            ip: yes
+            ipv6: yes
+            ethernet: yes
+            packet: yes
         - http
         - dns
-        - tls:
-            extended: yes
-            ja3-fingerprints: yes
+        - tls
         - ssh
         - stats
   - pcap-log:

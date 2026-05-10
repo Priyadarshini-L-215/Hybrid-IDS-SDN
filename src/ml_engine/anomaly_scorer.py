@@ -104,15 +104,24 @@ class AnomalyScorer:
             threshold = self._dynamic_threshold(protocol)
 
         maha = self.mahalanobis_score(latent_vector)
-        # Normalize (10.0 = heuristic cap, adjust based on latent dim)
-        maha_norm = min(maha / 10.0, 1.0) 
+        # Handle NaN from Mahalanobis (e.g. if latent vector has NaNs)
+        if np.isnan(maha):
+            maha_norm = 0.0
+        else:
+            # Normalize (10.0 = heuristic cap, adjust based on latent dim)
+            maha_norm = min(maha / 10.0, 1.0) 
 
-        if threshold == float("inf"):
-            mse_norm = 0.0
+        if threshold == float("inf") or threshold <= 0:
+            # If threshold is 0, any MSE > 0 is anomalous, but 0/0 is 0
+            mse_norm = 1.0 if mse > 0 else 0.0
         else:
             # How far past the threshold? (e.g. 2x threshold = 1.0)
             mse_norm = min(mse / threshold, 1.0) 
 
+        # Final safety check for NaN
+        if np.isnan(mse_norm): mse_norm = 0.0
+        if np.isnan(maha_norm): maha_norm = 0.0
+
         # Weighted combination: 60% Mahalanobis, 40% percentile-MSE
         combined = 0.6 * maha_norm + 0.4 * mse_norm
-        return round(combined, 4)
+        return round(float(combined), 4)

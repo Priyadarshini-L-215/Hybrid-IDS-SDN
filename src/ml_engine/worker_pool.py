@@ -321,11 +321,21 @@ class WorkerPool:
                     "event_type": "system_alert",
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "prediction": "drift_detected",
-                    "confidence": 100.0,
+                    "confidence": 98.0,
                     "alert_sig": "Model Drift Detected" if drift_info.get("type") != "vae_drift" else "VAE Baseline Drift",
                     "category": "System health",
-                    "details": drift_info
+                    "details": drift_info,
+                    "forensics": {
+                        "packet_hash": "system-event",
+                        "stage_scores": {
+                            "signature": 0.0,
+                            "ml": 0.98,
+                            "anomaly": 0.0
+                        }
+                    }
+
                 }
+
                 await self.broadcast_func([drift_alert])
             except Exception as e:
                 logger.error("Failed to broadcast drift alert", error=str(e))
@@ -402,7 +412,9 @@ class WorkerPool:
                         "location": f"{city}, {country}".strip(", "),
                         "country": country,
                         "country_code": country_code,
-                        "asn": f"AS{asn} ({org})" if asn != "Unknown" else "Unknown",
+                        "asn": f"AS{asn}" if asn != "Unknown" else "Unknown",
+                        "isp": org or "Unknown",
+                        "city": city or "Unknown",
                         "lat": location.get("latitude"),
                         "lon": location.get("longitude")
                     }
@@ -415,11 +427,13 @@ class WorkerPool:
                             "country": fallback.get("country", "Unknown"),
                             "country_code": fallback.get("countryCode", "Unknown"),
                             "asn": fallback.get("as", "Unknown"),
+                            "isp": fallback.get("isp", "Unknown"),
+                            "city": fallback.get("city", "Unknown"),
                             "lat": fallback.get("lat"),
                             "lon": fallback.get("lon")
                         }
                     else:
-                        alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
+                        alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown", "isp": "Unknown"}
             except Exception:
                 alert["enrichment"] = {"location": "Remote IP", "country": "Unknown", "asn": "Unknown"}
 

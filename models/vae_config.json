@@ -1,5 +1,5 @@
 {
-    "threshold": 0.24773797392845154,
+    "threshold": 0.18122412264347076,
     "latent_dim": 16,
     "input_dim": 49,
     "model_type": "vae_keras",

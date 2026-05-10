@@ -226,17 +226,34 @@ function App() {
   
   // 1. SHAP Feature Importance aggregation from last 50 alerts
   const shapAggregated = useMemo(() => {
-    const counts = {};
-    alerts.slice(0, 50).forEach(a => {
-      const tops = a.shap_top3 || [];
-      tops.forEach(t => {
-        const name = t.feature || (Array.isArray(t) ? t[0] : null);
-        if (name) counts[name] = (counts[name] || 0) + 1;
-      });
+    const stats = {};
+    const attackAlerts = alerts.filter(a => {
+      const pred = (a.prediction || "").toLowerCase();
+      return pred.includes("attack") || pred.includes("anomaly") || pred.includes("suspicious");
     });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
+
+    attackAlerts.slice(0, 50).forEach(a => {
+      let tops = a.shap_top3 || [];
+      if (typeof tops === 'string') {
+        try { tops = JSON.parse(tops); } catch (e) { tops = []; }
+      }
+      
+      if (Array.isArray(tops)) {
+        tops.forEach(t => {
+          const name = t.feature || (Array.isArray(t) ? t[0] : null);
+          const impact = typeof t.impact === 'number' ? t.impact : (typeof t.value === 'number' ? t.value : (Array.isArray(t) ? t[1] : 0));
+          if (name) {
+            if (!stats[name]) stats[name] = { sum: 0, count: 0 };
+            stats[name].sum += Math.abs(impact);
+            stats[name].count += 1;
+          }
+        });
+      }
+    });
+    
+    return Object.entries(stats)
+      .map(([name, s]) => ({ name, hits: s.count, impact: s.sum / s.count }))
+      .sort((a, b) => b.impact - a.impact)
       .slice(0, 8);
   }, [alerts]);
 
@@ -660,7 +677,7 @@ function App() {
                                           <h4 style={{ fontSize: '0.6rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Enrichment</h4>
                                           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.7rem' }}>
                                             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Globe size={12} className="text-muted" /> {alert.enrichment?.location || 'Unknown'}</div>
-                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'}</div>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'} {alert.enrichment?.isp && alert.enrichment.isp !== 'Unknown' ? `(${alert.enrichment.isp})` : ''}</div>
                                             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><FileText size={12} className="text-muted" /> {alert.protocol?.toUpperCase()} / {alert.dst_port || '0'}</div>
                                           </div>
                                         </div>
@@ -687,7 +704,7 @@ function App() {
 
                 <div className="content-stack">
                   <GlassCard title="Real-time Traffic Velocity" icon={Activity} subtitle="Events per second (Ingress vs Threats)">
-                    <div style={{ height: '180px', width: '100%' }}>
+                    <div style={{ height: '240px', width: '100%', position: 'relative' }}>
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart data={chartData}>
                           <defs>
@@ -707,7 +724,7 @@ function App() {
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                     <GlassCard title="Classification" icon={PieChartIcon} subtitle="Attack vs Normal">
-                       <div style={{ height: '140px', width: '100%' }}>
+                       <div style={{ height: '200px', width: '100%', position: 'relative' }}>
                           <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                               <Pie 
@@ -746,12 +763,12 @@ function App() {
                   <GlassCard title="SHAP Feature Importance" icon={Zap} subtitle="Global key drivers for recent detections">
                      <div className="shap-bar-container">
                         {shapAggregated.map(item => {
-                          const percentage = (item.value / shapAggregated[0].value) * 100;
+                          const percentage = (item.impact / shapAggregated[0].impact) * 100;
                           return (
                             <div key={item.name} className="shap-bar-row">
                                <div className="shap-bar-header">
                                   <span>{item.name}</span>
-                                  <span className="text-muted">{item.value} hits</span>
+                                  <span className="text-muted">{item.hits} hits</span>
                                </div>
                                <div className="shap-bar-bg">
                                   <div 

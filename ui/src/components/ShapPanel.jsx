@@ -22,12 +22,20 @@ const ShapPanel = ({ alert }) => {
         <span style={{ fontSize: '0.9rem', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Feature Contribution (XAI)</span>
       </div>
 
-      {shapTop3.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2rem' }}>
-          {shapTop3.map((item, idx) => {
-            const [feature, value] = Array.isArray(item) ? item : [item.feature, item.value];
-            const absValue = Math.abs(value);
-            const percentage = Math.min(Math.max(absValue * 100, 5), 100);
+      {(() => {
+        let tops = alert.shap_top3 || [];
+        if (typeof tops === 'string') {
+          try { tops = JSON.parse(tops); } catch (e) { tops = []; }
+        }
+        
+        if (tops.length > 0) {
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2rem' }}>
+              {tops.map((item, idx) => {
+                const [feature, value] = Array.isArray(item) ? item : [item.feature, item.impact ?? item.value ?? 0];
+                const displayValue = typeof value === 'number' ? value : 0;
+                const absValue = Math.abs(displayValue);
+                const percentage = Math.min(Math.max(absValue * 100, 5), 100);
             
             return (
               <div key={idx} className="shap-row">
@@ -52,15 +60,16 @@ const ShapPanel = ({ alert }) => {
               </div>
             );
           })}
-          <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>
-            * Positive values indicate features pushing towards an "Attack" classification.
-          </p>
-        </div>
-      ) : (
-        <div className="empty-state-small" style={{ marginBottom: '2rem' }}>
-          No SHAP data available for this event.
-        </div>
-      )}
+            </div>
+          );
+        } else {
+          return (
+            <div className="empty-state-small" style={{ marginBottom: '2rem' }}>
+              No SHAP data available for this event.
+            </div>
+          );
+        }
+      })()}
 
       {/* Stage Scores Section */}
       <div className="detail-section-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>

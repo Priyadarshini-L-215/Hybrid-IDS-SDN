@@ -97,7 +97,12 @@ def evaluate_dataset(csv_source: Union[str, Path, io.BytesIO], ml_engine, label_
                 ml_score=float(score),
                 anomaly_score=0.0
             )
-            predictions.append(classification)
+            
+            # Map to binary labels for comparison with dataset
+            if classification in ["attack", "suspicious", "anomaly"]:
+                predictions.append("attack")
+            else:
+                predictions.append("normal")
             
         # 4. Metrics Generation
         # Map labels if necessary (e.g. if dataset uses 0/1 but model uses normal/attack)

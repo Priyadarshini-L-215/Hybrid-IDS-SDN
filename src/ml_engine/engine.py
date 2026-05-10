@@ -359,7 +359,9 @@ class MLEngine:
         # 2. Inference
         t_infer_start = time.time()
         
-        ml_scores = [0.0] * len(events)
+        # Initialize scores as None (meaning "no opinion/skipped")
+        ml_scores = [None] * len(events)
+        valid_anomaly_scores = [None] * len(events) # Default to None for everyone
         
         if valid_features and not self.fallback_mode and self.is_ready:
             try:
@@ -394,16 +396,14 @@ class MLEngine:
                     ml_scores[idx] = float(ml_scores_valid[i])
                 
                 # 2b. VAE Anomaly Detection (Stage 3)
-                # Only fires for samples where the RF is uncertain (ml_score < threshold).
+                # Only fires for samples where the RF is uncertain (ml_score < suspicious threshold).
                 # This avoids wasting compute on high-confidence RF detections.
-                batch_anomaly_scores = [0.0] * len(valid_features)
-                # Pre-initialize so valid_anomaly_scores is always defined,
-                # even if the VAE block is skipped or raises an exception.
-                valid_anomaly_scores = batch_anomaly_scores
+                batch_anomaly_scores = [None] * len(valid_features)
+                
                 if self.vae_detector and self.vae_detector.is_ready:
-                    # Trigger VAE for samples where RF is uncertain (e.g. score < 0.5)
-                    # This provides a second behavioral opinion on doubtful traffic.
-                    uncertain_mask = np.array(ml_scores_valid, dtype=np.float32) < 0.5
+                    # Trigger VAE for samples where RF is uncertain
+                    # We use the suspicious threshold from config instead of a hardcoded value.
+                    uncertain_mask = np.array(ml_scores_valid, dtype=np.float32) < ML_THRESHOLD_SUSPICIOUS
                     if uncertain_mask.any():
                         X_uncertain = X[uncertain_mask]
                         
@@ -429,6 +429,9 @@ class MLEngine:
                             logger.info("VAE flagged potential anomalies",
                                         count=n_anomalies)
                     valid_anomaly_scores = batch_anomaly_scores
+                else:
+                    # VAE not ready, leave as None
+                    valid_anomaly_scores = [None] * len(valid_features)
                     
                 # 2c. Batch SHAP (Performance optimization)
                 batch_shap_results = {} # Index -> Top 3 features
@@ -472,9 +475,9 @@ class MLEngine:
 
             except Exception as e:
                 logger.error("Batch inference failed", error=str(e))
-                valid_anomaly_scores = [0.0] * len(valid_features)
+                valid_anomaly_scores = [None] * len(valid_features)
         else:
-            valid_anomaly_scores = []
+            valid_anomaly_scores = [None] * len(events)
         
         infer_ms = (time.time() - t_infer_start) * 1000
         
@@ -485,23 +488,33 @@ class MLEngine:
             sig_present = (event.get("event_type") == "alert")
             
             # Layer 3: Anomaly (Real)
-            anomaly_score = 0.0
+            anomaly_score = None
             v_idx = valid_index_map.get(i)
             if v_idx is not None and v_idx < len(valid_anomaly_scores):
                 anomaly_score = valid_anomaly_scores[v_idx]
             
             shap_top3 = batch_shap_results.get(i, [])
+            # Use None as default for CTI if not provided (Decision Engine handles None)
+            cti_score = None
             
+            def safe_score(v):
+                try:
+                    f = float(v)
+                    return round(f, 4) if np.isfinite(f) else 0.0
+                except (ValueError, TypeError, NameError):
+                    return 0.0
+
             res = {
-                "prediction": "unknown", # placeholder
-                "ml_score": round(float(ml_scores[i]), 4),
-                "anomaly_score": round(float(anomaly_score), 4),
+                "prediction": "unknown",
+                "ml_score": safe_score(ml_scores[i]),
+                "anomaly_score": safe_score(anomaly_score),
                 "sig_present": sig_present,
                 "shap_top3": shap_top3
             }
 
+
             classification, normalized_score = self.decision_engine.decide(
-                sig_present, ml_scores[i], anomaly_score, 0.0, res
+                sig_present, ml_scores[i], anomaly_score, cti_score, res
             )
             
             res.update({

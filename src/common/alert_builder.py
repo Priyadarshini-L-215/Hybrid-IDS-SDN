@@ -73,11 +73,8 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
     if final_confidence > 1.0:
         final_confidence = final_confidence / 100.0
 
-    # Override ML verdict when Suricata itself flagged the event
+    # Note: Signature integration is now handled by DecisionEngine to allow for nuanced confidence.
     sig_present = event.get("event_type") == "alert"
-    if sig_present:
-        final_classification = "attack"
-        final_confidence = max(final_confidence, 0.9)
 
     # Dynamic Signature Enrichment
     sig = alert_info.get("signature") or event.get("alert_signature")

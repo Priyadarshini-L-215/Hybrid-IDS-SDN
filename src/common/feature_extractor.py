@@ -13,6 +13,26 @@ import hashlib
 import functools
 from pathlib import Path
 from collections import deque
+import base64
+
+def extract_ttl_from_packet(packet_b64: str) -> float:
+    """Extracts TTL or Hop Limit from raw base64 packet."""
+    try:
+        packet_bytes = base64.b64decode(packet_b64)
+        eth_type = packet_bytes[12:14].hex()
+        sll_type = packet_bytes[14:16].hex()
+        
+        if eth_type == '0800': # IPv4 Ethernet
+            return float(packet_bytes[14 + 8])
+        elif eth_type == '86dd': # IPv6 Ethernet
+            return float(packet_bytes[14 + 7])
+        elif sll_type == '0800': # IPv4 SLL
+            return float(packet_bytes[16 + 8])
+        elif sll_type == '86dd': # IPv6 SLL
+            return float(packet_bytes[16 + 7])
+    except Exception:
+        pass
+    return 0.0
 
 logger = logging.getLogger(__name__)
 
@@ -155,12 +175,20 @@ def load_feature_names(features_path: str | Path = None) -> list:
 def get_proto_encoder():
     global _LE_PROTO
     if _LE_PROTO is None:
-        le_path = Path(__file__).resolve().parents[2] / "models" / "le_proto.pkl"
-        if le_path.exists():
-            try:
-                _LE_PROTO = joblib.load(le_path)
-            except Exception as e:
-                logger.error(f"Failed to load le_proto.pkl: {e}")
+        # Check multiple possible paths
+        search_paths = [
+            Path(__file__).resolve().parents[2] / "models" / "le_proto_multi.pkl",
+            Path(__file__).resolve().parents[2] / "models" / "le_proto.pkl",
+            Path(__file__).resolve().parents[2] / "new model" / "le_proto.pkl"
+        ]
+        for le_path in search_paths:
+            if le_path.exists():
+                try:
+                    _LE_PROTO = joblib.load(le_path)
+                    logger.info(f"Loaded protocol encoder from {le_path}")
+                    break
+                except Exception as e:
+                    logger.error(f"Failed to load {le_path}: {e}")
     return _LE_PROTO
 
 @event_cache(maxsize=256)
@@ -225,61 +253,66 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     # - synack/ackdat: use Suricata's syn_rtt field if present, otherwise split rtt 60/40
     # - dwin: TCP receive window size (not ACK number)
     # - sloss/dloss: approximate from retransmission counts if available; else 0.0
-    rtt = float(flow.get('rtt', 0))
-    syn_rtt = float(flow.get('syn_rtt', rtt * 0.6))
+    rtt = float(flow.get('rtt', 0) or 0)
+    syn_rtt = float(flow.get('syn_rtt', 0) or (rtt * 0.6))
     ackdat = max(rtt - syn_rtt, 0.0)
 
     feature_dict = {
-        'flow_duration': age_ms,
-        'total_fwd_packets': fwd_pkts,
-        'total_bwd_packets': bwd_pkts,
-        'total_fwd_bytes': fwd_bytes,
-        'total_bwd_bytes': bwd_bytes,
-        'flow_iat_mean': flow_iat_mean,
-        'flow_iat_std': 0.0,            # Cannot compute without per-packet timestamps
-        'fwd_iat_mean': fwd_iat_mean,
-        'bwd_iat_mean': bwd_iat_mean,
-        'pkt_len_mean': total_bytes / max(total_pkts, 1),
-        'pkt_len_std': 0.0,             # Cannot compute without per-packet lengths
-        'spkts': fwd_pkts,
-        'dpkts': bwd_pkts,
-        'sbytes': fwd_bytes,
-        'dbytes': bwd_bytes,
-        'sload': (fwd_bytes * 8) / safe_age,
-        'dload': (bwd_bytes * 8) / safe_age,
-        # sloss/dloss: use retransmission counts if Suricata exposes them, else 0.0
-        'sloss': float(flow.get('pkts_toserver_retrans', 0)),
-        'dloss': float(flow.get('pkts_toclient_retrans', 0)),
-        'sttl': float(event.get('ip', {}).get('ttl', 64)),
-        'dttl': float(flow.get('dttl', 0)),
-        'swin': float(tcp.get('window', 0)),
-        'dwin': float(tcp.get('window', 0)),  # TCP receive window, not ACK number
-        'stcpb': float(tcp.get('seq', 0)),
-        'dtcpb': float(tcp.get('ack', 0)),
-        'tcprtt': rtt,
-        'synack': syn_rtt,              # Use syn_rtt from Suricata if available
-        'ackdat': ackdat,               # Remaining RTT after SYN-ACK
-        'sinpkt': fwd_iat_mean,
-        'dinpkt': bwd_iat_mean,
-        'sjit': 0.0,                    # Cannot compute without per-packet timestamps
-        'djit': 0.0,                    # Cannot compute without per-packet timestamps
-        'ct_state_ttl': float(ct_stats['ct_src_ltm'] * 0.5),
-        'ct_flw_http_mthd': 1.0 if event.get('http', {}).get('http_method') in ['GET', 'POST'] else 0.0,
-        'ct_srv_src': ct_stats['ct_srv_src'],
-        'ct_srv_dst': ct_stats['ct_srv_dst'],
-        'ct_dst_ltm': ct_stats['ct_dst_ltm'],
-        'ct_src_ltm': ct_stats['ct_src_ltm'],
-        'ct_src_dport_ltm': ct_stats['ct_src_dport_ltm'],
-        'ct_dst_sport_ltm': ct_stats['ct_dst_sport_ltm'],
-        'ct_dst_src_ltm': ct_stats['ct_dst_src_ltm'],
-        'smeansz': fwd_bytes / max(fwd_pkts, 1),
-        'dmeansz': bwd_bytes / max(bwd_pkts, 1),
-        'trans_depth': float(event.get('http', {}).get('depth', 0)),
-        'res_bdy_len': float(event.get('http', {}).get('length', 0)),
+        'flow_duration': float(age_ms),
+        'total_fwd_packets': float(fwd_pkts),
+        'total_bwd_packets': float(bwd_pkts),
+        'total_fwd_bytes': float(fwd_bytes),
+        'total_bwd_bytes': float(bwd_bytes),
+        'flow_iat_mean': float(flow_iat_mean),
+        'flow_iat_std': 0.0,
+        'fwd_iat_mean': float(fwd_iat_mean),
+        'bwd_iat_mean': float(bwd_iat_mean),
+        'pkt_len_mean': float(total_bytes / max(total_pkts, 1)),
+        'pkt_len_std': 0.0,
+        'spkts': float(fwd_pkts),
+        'dpkts': float(bwd_pkts),
+        'sbytes': float(fwd_bytes),
+        'dbytes': float(bwd_bytes),
+        'sload': float((fwd_bytes * 8) / safe_age),
+        'dload': float((bwd_bytes * 8) / safe_age),
+        'sloss': float(flow.get('pkts_toserver_retrans', 0) or 0),
+        'dloss': float(flow.get('pkts_toclient_retrans', 0) or 0),
+        'sttl': float(
+            (event.get('ip', {}) if isinstance(event.get('ip'), dict) else {}).get('ttl') or 
+            (event.get('ipv6', {}) if isinstance(event.get('ipv6'), dict) else {}).get('hop_limit') or
+            (extract_ttl_from_packet(event.get('raw', {}).get('packet', '')) if 'raw' in event and event['raw'].get('packet') else 0.0) or
+            (extract_ttl_from_packet(event.get('packet', '')) if event.get('packet') else 0.0) or
+            64.0
+        ),
+        'dttl': float(flow.get('dttl') or 0.0),
+        'swin': float(tcp.get('window', 0) or 0),
+        'dwin': float(tcp.get('window', 0) or 0),
+        'stcpb': float(tcp.get('seq', 0) or 0),
+        'dtcpb': float(tcp.get('ack', 0) or 0),
+        'tcprtt': float(rtt),
+        'synack': float(syn_rtt),
+        'ackdat': float(ackdat),
+        'sinpkt': float(fwd_iat_mean),
+        'dinpkt': float(bwd_iat_mean),
+        'sjit': 0.0,
+        'djit': 0.0,
+        'ct_state_ttl': float(ct_stats.get('ct_src_ltm', 0) * 0.5),
+        'ct_flw_http_mthd': 1.0 if (event.get('http', {}) or {}).get('http_method') in ['GET', 'POST'] else 0.0,
+        'ct_srv_src': float(ct_stats.get('ct_srv_src', 0)),
+        'ct_srv_dst': float(ct_stats.get('ct_srv_dst', 0)),
+        'ct_dst_ltm': float(ct_stats.get('ct_dst_ltm', 0)),
+        'ct_src_ltm': float(ct_stats.get('ct_src_ltm', 0)),
+        'ct_src_dport_ltm': float(ct_stats.get('ct_src_dport_ltm', 0)),
+        'ct_dst_sport_ltm': float(ct_stats.get('ct_dst_sport_ltm', 0)),
+        'ct_dst_src_ltm': float(ct_stats.get('ct_dst_src_ltm', 0)),
+        'smeansz': float(fwd_bytes / max(fwd_pkts, 1)),
+        'dmeansz': float(bwd_bytes / max(bwd_pkts, 1)),
+        'trans_depth': float((event.get('http', {}) or {}).get('depth', 0) or 0),
+        'res_bdy_len': float((event.get('http', {}) or {}).get('length', 0) or 0),
         'is_sm_ips_ports': 1.0 if src_ip == dst_ip and src_port == dst_port else 0.0,
-        'is_ftp_login': 1.0 if service == 'ftp' and event.get('ftp', {}).get('command') == 'USER' else 0.0,
-        'ct_ftp_cmd': float(event.get('ftp', {}).get('command_count', 0)),
-        'app_proto': proto_val
+        'is_ftp_login': 1.0 if service == 'ftp' and (event.get('ftp', {}) or {}).get('command') == 'USER' else 0.0,
+        'ct_ftp_cmd': float((event.get('ftp', {}) or {}).get('command_count', 0) or 0),
+        'app_proto': float(proto_val)
     }
     
     feature_vector = []
