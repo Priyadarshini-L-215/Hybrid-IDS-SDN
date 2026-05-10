@@ -80,6 +80,10 @@ class WorkerPool:
             addr = _ip.ip_address(ip)
             if not addr.is_global:
                 return None  # Skip private/loopback/link-local/multicast
+            # Reassign ip to the validated and normalized string representation
+            # This prevents SSRF via malformed strings that bypass initial checks
+            # but behave maliciously in urllib
+            ip = str(addr)
         except ValueError:
             return None
 
