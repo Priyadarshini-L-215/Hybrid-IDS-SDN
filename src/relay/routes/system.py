@@ -112,17 +112,12 @@ _model_info_cache = {"accuracy": 0.0, "last_trained": "Never", "model_version": 
 async def get_baseline_status():
     """Returns the current status of the VAE baseline, drift monitor, and model metadata."""
     from ml_engine.baseline_updater import baseline_monitor
-    import time
     import json
     from pathlib import Path
     
-    # Path to model artifacts
-    BASE_DIR = Path(__file__).resolve().parents[3]
-    MODELS_DIR = BASE_DIR / "models"
+    global _cached_metrics_data, _cached_metrics_time
     
-    accuracy = 0.0
-    last_trained = "Never"
-    model_version = "v3.1-stable"
+    now = time.time()
     
     # Check cache (60s TTL)
     now = time.time()
