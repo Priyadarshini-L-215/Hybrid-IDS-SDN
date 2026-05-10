@@ -11,7 +11,6 @@ import sqlite3
 import json
 import csv
 import zlib
-import numpy as np
 from pathlib import Path
 
 # Add src directory to path to import feature_extractor
