@@ -1,10 +1,7 @@
-import os
 import sys
-import json
 import sqlite3
 import redis
 import requests
-import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

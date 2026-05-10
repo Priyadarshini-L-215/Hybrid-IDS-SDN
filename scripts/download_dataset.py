@@ -1,5 +1,3 @@
-import os
-import zipfile
 from pathlib import Path
 
 def download_dataset(dataset_name="mrwellog/unsw-nb15", target_dir="data"):

@@ -16,15 +16,15 @@ class TestStabilization(unittest.TestCase):
         """Test zero-padding for short feature vectors."""
         short_vec = np.ones(10)
         safe_vec = validate_features_dim(short_vec, source="test")
-        self.assertEqual(len(safe_vec), 57)
+        self.assertEqual(len(safe_vec), 49)
         self.assertEqual(safe_vec[0], 1.0)
-        self.assertEqual(safe_vec[56], 0.0)
+        self.assertEqual(safe_vec[48], 0.0)
 
     def test_dimension_safety_long(self):
         """Test truncation for long feature vectors."""
         long_vec = np.ones(100)
         safe_vec = validate_features_dim(long_vec, source="test")
-        self.assertEqual(len(safe_vec), 57)
+        self.assertEqual(len(safe_vec), 49)
         self.assertEqual(safe_vec[0], 1.0)
 
     def test_corroboration_gate_logic(self):

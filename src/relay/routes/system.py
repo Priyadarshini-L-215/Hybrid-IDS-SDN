@@ -105,12 +105,8 @@ async def get_alert_detail(alert_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-import time
-
-# Global cache for model metrics to avoid excessive I/O
-_cached_metrics_data = None
-_cached_metrics_time = 0
-CACHE_TTL = 60 # seconds
+# Caching for model meta and metrics
+_model_info_cache = {"accuracy": 0.0, "last_trained": "Never", "model_version": "v3.1-stable", "timestamp": 0}
 
 @router.get("/baseline/status")
 async def get_baseline_status():
@@ -123,15 +119,13 @@ async def get_baseline_status():
     
     now = time.time()
     
-    if _cached_metrics_data is None or now - _cached_metrics_time > CACHE_TTL:
-        # Path to model artifacts
-        BASE_DIR = Path(__file__).resolve().parents[3]
-        MODELS_DIR = BASE_DIR / "models"
-
-        accuracy = 0.0
-        last_trained = "Never"
-        model_version = "v3.1-stable"
-
+    # Check cache (60s TTL)
+    now = time.time()
+    if now - _model_info_cache["timestamp"] < 60:
+        accuracy = _model_info_cache["accuracy"]
+        last_trained = _model_info_cache["last_trained"]
+        model_version = _model_info_cache["model_version"]
+    else:
         # Try to load latest metrics
         try:
             metrics_p = MODELS_DIR / "metrics.json"
@@ -156,10 +150,11 @@ async def get_baseline_status():
                         accuracy = meta.get('accuracy', 0.0)
         except: pass
 
-        _cached_metrics_data = (accuracy, last_trained, model_version)
-        _cached_metrics_time = now
-    else:
-        accuracy, last_trained, model_version = _cached_metrics_data
+        # Update cache
+        _model_info_cache["accuracy"] = accuracy
+        _model_info_cache["last_trained"] = last_trained
+        _model_info_cache["model_version"] = model_version
+        _model_info_cache["timestamp"] = now
 
     return {
         "is_calibrated": baseline_monitor.baseline_mean is not None,
@@ -179,17 +174,21 @@ async def get_baseline_status():
 async def get_config(request: Request):
     """Returns the current sentinel_config.yaml content with ETag caching."""
     import hashlib
+    import aiofiles
     try:
         if CONFIG_PATH.exists():
-            with open(CONFIG_PATH, "r") as f:
-                content = f.read()
+            async with aiofiles.open(CONFIG_PATH, "r") as f:
+                content = await f.read()
                 etag = f'W/"{hashlib.md5(content.encode()).hexdigest()}"'
                 
                 # Check client cache
                 if request.headers.get("if-none-match") == etag:
                     return Response(status_code=304)
                 
-                data = yaml.safe_load(content) or {}
+                # Run yaml safe_load in executor as it can be blocking
+                loop = asyncio.get_running_loop()
+                data = await loop.run_in_executor(None, yaml.safe_load, content) or {}
+
                 return Response(
                     content=json.dumps(data),
                     media_type="application/json",
@@ -205,8 +204,11 @@ async def update_config(req: ConfigUpdate):
     """Updates and saves the sentinel_config.yaml file and reloads in all services."""
     new_config = req.config
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(new_config, f, default_flow_style=False)
+        def dump_yaml():
+            with open(CONFIG_PATH, "w") as f:
+                yaml.dump(new_config, f, default_flow_style=False)
+
+        await asyncio.to_thread(dump_yaml)
         
         logger.info("Configuration updated successfully")
         

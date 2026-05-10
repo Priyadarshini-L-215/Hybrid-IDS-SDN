@@ -3,7 +3,6 @@ import json
 import structlog
 import threading
 import zlib
-import time
 import functools
 from common.config import DB_PATH
 
@@ -278,9 +277,36 @@ class DatabaseHandler:
                 conn.rollback()
             except Exception:
                 pass
-            # Fallback — individual inserts allow partial success
-            for alert_data in alerts_data_list:
-                self.add_alert(alert_data)
+
+            # Fallback — individual inserts allow partial success,
+            # but we use SAVEPOINTs within a single transaction to avoid N+1 query overhead.
+            try:
+                conn = self._get_conn()
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.cursor()
+                for param in params:
+                    try:
+                        conn.execute("SAVEPOINT fallback")
+                        cursor.execute('''
+                        INSERT OR IGNORE INTO alerts (
+                            event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
+                            protocol, alert_sig, prediction, confidence, severity, category,
+                            mitigation, is_mitigated, ja3_hash, ja3_string,
+                            shap_top3, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', param)
+                        conn.execute("RELEASE SAVEPOINT fallback")
+                    except sqlite3.Error as item_err:
+                        # Log or swallow the error for the single item that failed
+                        logger.debug(f"Fallback item insert failed: {item_err}")
+                        conn.execute("ROLLBACK TO SAVEPOINT fallback")
+                conn.commit()
+            except sqlite3.Error as fallback_err:
+                logger.error(f"Fallback batch transaction failed: {fallback_err}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
     def query_alerts(self, limit=100, filter_type=None, offset=0):
         try:
