@@ -5,7 +5,6 @@ Auto-generates models/feature_order.json from the feature_extractor.py source of
 Ensures the ML Engine always uses the correct 49-feature schema.
 """
 
-import os
 import sys
 import json
 import datetime
