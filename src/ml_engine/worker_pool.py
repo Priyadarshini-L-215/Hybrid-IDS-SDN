@@ -145,8 +145,6 @@ class WorkerPool:
     async def _worker_loop(self, worker_id: str):
         """Main loop: XREADGROUP -> Batch Process -> ACK."""
         group_name = "sentinel_workers"
-        from common.config import LOG_DIR
-        heartbeat_path = LOG_DIR / "heartbeat.jsonl"
         
         # Ensure group exists (Read from latest '$' to avoid backlog flood)
         try:
