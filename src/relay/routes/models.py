@@ -5,12 +5,13 @@ import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from pydantic import BaseModel, Field
 import structlog
 import yaml
 
 from common.config import CONFIG_PATH, MODELS_DIR
+from relay.middleware.auth import require_api_key
 from ml_engine.evaluator import validate_dataset, evaluate_dataset
 
 logger = structlog.get_logger("relay.routes.models")
@@ -69,7 +70,7 @@ async def list_models():
         logger.error("Failed to list models", error=str(e))
         return {"models": [], "scalers": [], "error": str(e)}
 
-@router.post("/models/active")
+@router.post("/models/active", dependencies=[Depends(require_api_key)])
 async def set_active_model(req: ModelActivationRequest):
     """Updates the active model in config and reloads the engine."""
     model_file = req.model_file
@@ -118,7 +119,7 @@ async def set_active_model(req: ModelActivationRequest):
         logger.error("Failed to swap model", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/evaluate/dataset")
+@router.post("/evaluate/dataset", dependencies=[Depends(require_api_key)])
 async def run_evaluation(
     file: Optional[UploadFile] = File(None),
     dataset_path: Optional[str] = Form(None),
@@ -162,7 +163,7 @@ async def run_evaluation(
         logger.error("Evaluation endpoint error", error=str(e))
         return {"success": False, "error": str(e)}
 
-@router.post("/models/train")
+@router.post("/models/train", dependencies=[Depends(require_api_key)])
 async def run_training(
     pcap_path: Optional[str] = Form(None),
     label: Optional[str] = Form("Attack")
@@ -216,7 +217,7 @@ async def run_training(
         logger.error("Training endpoint error", error=str(e))
         return {"success": False, "error": str(e)}
 
-@router.post("/evaluate/pcap")
+@router.post("/evaluate/pcap", dependencies=[Depends(require_api_key)])
 async def run_pcap_evaluation(
     file: Optional[UploadFile] = File(None),
     pcap_path: Optional[str] = Form(None)
