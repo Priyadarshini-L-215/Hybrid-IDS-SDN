@@ -163,17 +163,21 @@ async def get_baseline_status():
 async def get_config(request: Request):
     """Returns the current sentinel_config.yaml content with ETag caching."""
     import hashlib
+    import aiofiles
     try:
         if CONFIG_PATH.exists():
-            with open(CONFIG_PATH, "r") as f:
-                content = f.read()
+            async with aiofiles.open(CONFIG_PATH, "r") as f:
+                content = await f.read()
                 etag = f'W/"{hashlib.md5(content.encode()).hexdigest()}"'
                 
                 # Check client cache
                 if request.headers.get("if-none-match") == etag:
                     return Response(status_code=304)
                 
-                data = yaml.safe_load(content) or {}
+                # Run yaml safe_load in executor as it can be blocking
+                loop = asyncio.get_running_loop()
+                data = await loop.run_in_executor(None, yaml.safe_load, content) or {}
+
                 return Response(
                     content=json.dumps(data),
                     media_type="application/json",
