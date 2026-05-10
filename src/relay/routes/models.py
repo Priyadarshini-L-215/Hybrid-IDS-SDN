@@ -160,7 +160,10 @@ async def run_evaluation(
             source = io.BytesIO(content)
             logger.info("Evaluating uploaded file", filename=file.filename)
         elif dataset_path:
-            path = Path(dataset_path)
+            path = Path(dataset_path).resolve()
+            allowed_dir = (BASE_DIR / "data").resolve()
+            if not path.is_relative_to(allowed_dir):
+                return {"success": False, "error": "Invalid dataset path: must be within the data directory"}
             if not path.exists():
                 return {"success": False, "error": f"Path not found: {dataset_path}"}
             source = path
