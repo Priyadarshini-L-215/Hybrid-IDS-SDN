@@ -43,6 +43,28 @@ async def validate_file(file: UploadFile, allowed_exts: list, max_size: int):
 
 router = APIRouter(prefix="/api", tags=["Models"])
 
+def safe_pcap_path(project_root: Path, pcap_path: str) -> str:
+    """Validates that a pcap_path is within the allowed data/pcaps directory."""
+    if not pcap_path:
+        return None
+
+    pcap_dir = (project_root / "data" / "pcaps").resolve()
+
+    # Strip leading slashes to prevent absolute paths from overriding the base directory
+    clean_path = str(pcap_path).lstrip("\\/")
+
+    resolved_path = (pcap_dir / clean_path).resolve()
+
+    # Verify it's within the allowed directory
+    if not resolved_path.is_relative_to(pcap_dir):
+        raise ValueError("Invalid PCAP path: Path traversal detected")
+
+    # Verify file actually exists
+    if not resolved_path.exists() or not resolved_path.is_file():
+        raise ValueError(f"PCAP file not found: {clean_path}")
+
+    return str(resolved_path)
+
 # We need to access the globally initialized ML Engine from app.py
 # We'll use a getter function dependency or just import it dynamically to avoid circular imports.
 def get_engine():
@@ -176,9 +198,14 @@ async def run_training(
         
         # 1. If PCAP provided, convert and append to dataset first
         if pcap_path:
+            try:
+                safe_path = safe_pcap_path(project_root, pcap_path)
+            except ValueError as ve:
+                return {"success": False, "error": str(ve)}
+
             conv_script = project_root / "scripts" / "pcap_to_csv.py"
             conv_process = await asyncio.create_subprocess_exec(
-                str(python_path), str(conv_script), pcap_path, label,
+                str(python_path), str(conv_script), safe_path, label,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(project_root)
@@ -240,6 +267,11 @@ async def run_pcap_evaluation(
             with open(temp_pcap, "wb") as f:
                 f.write(await file.read())
             target_path = str(temp_pcap)
+        elif target_path:
+            try:
+                target_path = safe_pcap_path(project_root, target_path)
+            except ValueError as ve:
+                return {"success": False, "error": str(ve)}
             
         if not target_path:
             return {"success": False, "error": "No PCAP source provided"}
