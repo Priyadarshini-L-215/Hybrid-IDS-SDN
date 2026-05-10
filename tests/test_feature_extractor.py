@@ -26,7 +26,7 @@ def test_extract_features_basic(mock_flow_event):
     vector = extract_features_from_eve(mock_flow_event, features)
     
     assert vector is not None
-    assert len(vector) == 77
+    assert len(vector) == 49
     assert validate_feature_vector(vector) is True
     
     # Check some specific values

@@ -3,7 +3,6 @@ import json
 import pandas as pd
 import numpy as np
 import joblib
-from pathlib import Path
 from sklearn.metrics import classification_report, confusion_matrix
 
 def evaluate():

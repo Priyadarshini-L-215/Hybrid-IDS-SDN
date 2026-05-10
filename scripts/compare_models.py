@@ -1,9 +1,7 @@
-import os
 import joblib
 import pandas as pd
-import numpy as np
 from pathlib import Path
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import accuracy_score
 import json
 import logging
 
