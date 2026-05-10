@@ -1,0 +1,19 @@
+[Unit]
+Description=Sentinel IDS
+After=network.target redis.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/preet/FYP
+ExecStart=/home/preet/FYP/start.sh
+ExecStop=/home/preet/FYP/stop.sh
+PIDFile=/home/preet/FYP/.sentinel.lock
+Restart=on-failure
+RestartSec=10
+User=preet
+Group=preet
+Environment=NODE_ENV=production
+Environment=PYTHONPATH=/home/preet/FYP/src
+
+[Install]
+WantedBy=multi-user.target

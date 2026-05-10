@@ -1,0 +1,20 @@
+{
+  "v3.1": {
+    "Model": "v3.1 (RF+AE)",
+    "Accuracy": "0.9998",
+    "Precision": "1.0000",
+    "Recall": "0.9997",
+    "F1-Score": "0.9998",
+    "FPR": "0.0000",
+    "Latency (ms/sample)": "0.0003"
+  },
+  "v4.0.0": {
+    "Model": "v4.0.0 (Calibrated RF)",
+    "Accuracy": "0.4479",
+    "Precision": "0.3731",
+    "Recall": "0.0005",
+    "F1-Score": "0.0009",
+    "FPR": "0.0009",
+    "Latency (ms/sample)": "0.0018"
+  }
+}

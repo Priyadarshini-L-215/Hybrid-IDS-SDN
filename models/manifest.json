@@ -1,0 +1,40 @@
+{
+    "active": {
+        "feature_schema": {
+            "feature_count": 49,
+            "name": "UNSW-NB15"
+        },
+        "metadata": "model_meta.json",
+        "model_family": "vae_anomaly_detector",
+        "name": "v4.0.0-vae",
+        "rf": {
+            "model": "rf_multi_pipeline.onnx",
+            "onnx": "rf_multi_pipeline.onnx",
+            "scaler": "scaler_multi.pkl"
+        },
+        "vae": {
+            "config": "vae_config.json",
+            "decoder": "vae_decoder.keras",
+            "encoder": "vae_encoder.keras",
+            "scaler": "vae_scaler.pkl",
+            "threshold": 0.3
+        }
+    },
+    "backups": [
+        {
+            "name": "v3.1",
+            "path": "backup_v3.1"
+        },
+        {
+            "name": "vae_v3",
+            "path": "backup_vae_v3"
+        }
+    ],
+    "notes": [
+        "Use this manifest as the authoritative record for runtime model selection.",
+        "Update it after retraining or swapping artifacts.",
+        "Keep backup paths in sync with rollback-ready snapshots."
+    ],
+    "project": "Sentinel Core V4",
+    "schema_version": "1.0"
+}
