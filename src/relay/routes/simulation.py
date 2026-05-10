@@ -217,17 +217,21 @@ async def run_payload_simulation(request: Dict[str, Any]):
         "<script>alert('xss')</script>",
     ]
 
-    def _send_payloads():
-        import requests
+    async def _send_payloads():
+        import httpx
         from common.config import API_PORT
-        for p in payloads:
+
+        async def fetch(client, p):
             try:
-                requests.get(f"http://{target}:{API_PORT}/api/health?id={p}", timeout=1.0)
+                await client.get(f"http://{target}:{API_PORT}/api/health?id={p}", timeout=1.0)
             except Exception as e:
                 logger.debug("Failed to send HTTP payload in simulation", error=str(e))
 
+        async with httpx.AsyncClient() as client:
+            await asyncio.gather(*(fetch(client, p) for p in payloads))
+
     try:
-        await asyncio.to_thread(_send_payloads)
+        await _send_payloads()
         return {"success": True, "message": f"Malicious payloads ({len(payloads)}) injected towards {target}"}
     except Exception as e:
         logger.error("Payload simulation failed", error=str(e))
