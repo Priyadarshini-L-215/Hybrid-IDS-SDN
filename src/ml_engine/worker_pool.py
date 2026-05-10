@@ -371,7 +371,6 @@ class WorkerPool:
 
     async def _send_external_alert(self, alert: dict):
         """Mocks sending an alert to an external Slack webhook."""
-        webhook_url = "https://hooks.slack.com/services/MOCK/WEBHOOK/URL"
         payload = {
             "text": f"🚨 *CRITICAL THREAT DETECTED*\n"
                     f"*Type:* {alert['prediction']}\n"
@@ -382,7 +381,7 @@ class WorkerPool:
         }
         # Mocking the HTTP call
         logger.info("EXTERNAL ALERT SENT (MOCK)", target="Slack", payload=payload)
-        # In production: await httpx.post(webhook_url, json=payload)
+        # In production: await httpx.post("https://hooks.slack.com/services/MOCK/WEBHOOK/URL", json=payload)
 
     async def _enrich_event(self, alert: dict):
         """Adds GeoIP and ASN metadata to the alert (V2 Enrichment Layer)."""
