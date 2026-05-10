@@ -35,6 +35,14 @@ async def download_pcap(event_id: str):
         logger.error("Database query failed for PCAP extraction", error=str(e))
         raise HTTPException(status_code=500, detail="Internal database error.")
 
+    import ipaddress
+    try:
+        # Validate that the extracted IP is a legitimate IP address to prevent injection or invalid queries
+        ipaddress.ip_address(ip)
+    except ValueError:
+        logger.error("Invalid IP address retrieved from database", ip=ip)
+        raise HTTPException(status_code=400, detail="Invalid IP address format.")
+
     # 2. Path to master capture (assuming Suricata or system capture)
     # Search for any .pcap in the PCAP_DIR that could be the source
     pcaps = [f for f in os.listdir(PCAP_DIR) if f.endswith(".pcap") and not f.startswith("snippet_")]
