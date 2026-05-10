@@ -16,31 +16,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 try:
-    from common.feature_extractor import extract_features_from_eve
+    import common.feature_extractor as fe
 except ImportError as e:
     print(f"Error: Could not import feature_extractor: {e}")
     sys.exit(1)
 
 def main():
     print("Generating feature schema from source of truth...")
-    
-    # Create a minimal dummy Suricata event
-    dummy_event = {
-        "timestamp": datetime.datetime.now().isoformat(),
-        "event_type": "flow",
-        "src_ip": "1.1.1.1",
-        "dest_ip": "2.2.2.2",
-        "src_port": 1234,
-        "dest_port": 80,
-        "protocol": "TCP",
-        "flow": {
-            "pkts_toserver": 1,
-            "pkts_toclient": 1,
-            "bytes_toserver": 64,
-            "bytes_toclient": 64,
-            "age": 1
-        }
-    }
     
     # Extract features using the logic in feature_extractor.py
     # We pass an empty features list to get the raw dictionary keys
@@ -59,7 +41,6 @@ def main():
         
         # Since I can't easily peek internal dict without modifying source,
         # I'll use the DEFAULT_FEATURES list from feature_extractor.py
-        import common.feature_extractor as fe
         feature_names = fe.DEFAULT_FEATURES
         
         if len(feature_names) != 49:
@@ -70,7 +51,7 @@ def main():
         schema_data = {
             "_meta": {
                 "generated_by": "scripts/export_feature_schema.py",
-                "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
                 "version": "4.0.0",
                 "feature_count": len(feature_names)
             },

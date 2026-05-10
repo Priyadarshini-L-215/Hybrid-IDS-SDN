@@ -20,12 +20,11 @@ try:
     print("  Loading config...")
     from common.config import (
         REDIS_HOST, REDIS_PORT, REDIS_QUEUE_NAME, 
-        USE_REDIS_QUEUE, WORKER_COUNT, BATCH_SIZE
+        WORKER_COUNT, BATCH_SIZE
     )
     print(f"    ✓ config (Redis: {REDIS_HOST}:{REDIS_PORT}, Workers: {WORKER_COUNT})")
     
     print("\n[Test] Redis Feature Flag Status...")
-    print(f"  USE_REDIS_QUEUE: {USE_REDIS_QUEUE}")
     print(f"  WORKER_COUNT: {WORKER_COUNT}")
     print(f"  BATCH_SIZE: {BATCH_SIZE}")
     
