@@ -1,10 +1,10 @@
-# sdn_client.py - SDN Client using requests as fallback for httpx
-# Interfaces with the SentinelRestController REST API via executor for async.
+# sdn_client.py - SDN Client
+# Interfaces with the SentinelRestController REST API.
 
+import httpx
 import requests
-import asyncio
 import structlog
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 logger = structlog.get_logger(__name__)
 
@@ -17,6 +17,14 @@ class SDNClient:
             controller_url = f"http://{SDN_CONTROLLER_HOST}:{SDN_CONTROLLER_PORT}"
         self.base_url = controller_url.rstrip('/')
         self.api_url = f"{self.base_url}/sdn"
+        self._async_client: Optional[httpx.AsyncClient] = None
+
+    @property
+    def async_client(self) -> httpx.AsyncClient:
+        if self._async_client is None:
+            limits = httpx.Limits(max_keepalive_connections=100, max_connections=500)
+            self._async_client = httpx.AsyncClient(timeout=5.0, limits=limits)
+        return self._async_client
 
     async def __aenter__(self):
         return self
@@ -26,63 +34,42 @@ class SDNClient:
 
     async def block(self, ip: str, ttl: int = 0) -> bool:
         """Install DROP flow rule for source IP."""
-        def fetch():
-            try:
-                return requests.post(f"{self.api_url}/block", json={"ip": ip, "ttl": ttl}, timeout=5.0)
-            except Exception:
-                return None
-
         try:
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, fetch)
-            if resp and resp.status_code == 200:
+            resp = await self.async_client.post(f"{self.api_url}/block", json={"ip": ip, "ttl": ttl})
+            if resp.status_code == 200:
                 logger.info("SDN: Blocked IP", ip=ip, ttl=ttl)
                 return True
-            if resp:
-                logger.error("SDN: Block failed", status=resp.status_code, body=resp.text)
+            logger.error("SDN: Block failed", status=resp.status_code, body=resp.text)
         except Exception as e:
             logger.error("SDN: Block connection error", error=str(e))
         return False
 
     async def unblock(self, ip: str) -> bool:
         """Remove DROP flow rule."""
-        def fetch():
-            try:
-                return requests.post(f"{self.api_url}/unblock", json={"ip": ip}, timeout=5.0)
-            except Exception:
-                return None
-
         try:
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, fetch)
-            if resp and resp.status_code == 200:
+            resp = await self.async_client.post(f"{self.api_url}/unblock", json={"ip": ip})
+            if resp.status_code == 200:
                 logger.info("SDN: Unblocked IP", ip=ip)
                 return True
-            if resp:
-                logger.error("SDN: Unblock failed", status=resp.status_code, body=resp.text)
+            logger.error("SDN: Unblock failed", status=resp.status_code, body=resp.text)
         except Exception as e:
             logger.error("SDN: Unblock connection error", error=str(e))
         return False
 
     async def get_flows(self) -> Dict[str, Any]:
         """Fetch current flow rules and stats from controller."""
-        def fetch():
-            try:
-                return requests.get(f"{self.api_url}/flows", timeout=5.0)
-            except Exception:
-                return None
-
         try:
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, fetch)
-            if resp and resp.status_code == 200:
+            resp = await self.async_client.get(f"{self.api_url}/flows")
+            if resp.status_code == 200:
                 return resp.json()
         except Exception as e:
             logger.error("SDN: Get flows failed", error=str(e))
         return {"blocked_ips": [], "status": "offline"}
 
     async def close(self):
-        pass
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
 
     # Synchronous Variants
     
