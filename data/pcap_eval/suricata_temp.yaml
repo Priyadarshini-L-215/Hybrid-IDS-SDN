@@ -40,11 +40,22 @@ outputs:
   - eve-log:
       enabled: yes
       filetype: regular
-      filename: /home/preet/FYP/data/pcap_eval/eve.json
+      community-id: yes
+      filename: /app/data/pcap_eval/eve.json
       types:
         - alert:
             metadata: yes
-        - flow
+            ip: yes
+            ipv6: yes
+            community-id: yes
+            ethernet: yes
+            packet: yes
+        - flow:
+            ip: yes
+            ipv6: yes
+            community-id: yes
+            ethernet: yes
+            packet: yes
         - http
         - dns
         - tls
@@ -57,12 +68,27 @@ outputs:
       types:
         - alert:
             metadata: yes
-        - flow
+            ip: yes
+            ipv6: yes
+            ethernet: yes
+            packet: yes
+        - flow:
+            ip: yes
+            ipv6: yes
+            ethernet: yes
+            packet: yes
         - http
         - dns
         - tls
         - ssh
         - stats
+  - pcap-log:
+      enabled: no
+      filename: sentinel.pcap
+      limit: 1000mb
+      max-files: 2000
+      mode: multi
+      dir: /app/data/pcaps
 
 af-packet:
   - interface: eth0
@@ -74,6 +100,7 @@ app-layer:
   protocols:
     tls:
       enabled: yes
+      ja3-fingerprints: yes
       detection-ports:
         dp: 443
     http:
@@ -94,4 +121,4 @@ logging:
       enabled: yes
   - file:
       enabled: yes
-      filename: /home/preet/FYP/data/logs/suricata.log
+      filename: /app/data/logs/suricata.log
