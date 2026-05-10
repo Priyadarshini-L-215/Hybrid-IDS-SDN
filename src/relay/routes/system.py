@@ -105,45 +105,61 @@ async def get_alert_detail(alert_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+import time
+
+# Global cache for model metrics to avoid excessive I/O
+_cached_metrics_data = None
+_cached_metrics_time = 0
+CACHE_TTL = 60 # seconds
+
 @router.get("/baseline/status")
 async def get_baseline_status():
     """Returns the current status of the VAE baseline, drift monitor, and model metadata."""
     from ml_engine.baseline_updater import baseline_monitor
-    import time
     import json
     from pathlib import Path
     
-    # Path to model artifacts
-    BASE_DIR = Path(__file__).resolve().parents[3]
-    MODELS_DIR = BASE_DIR / "models"
+    global _cached_metrics_data, _cached_metrics_time
     
-    accuracy = 0.0
-    last_trained = "Never"
-    model_version = "v3.1-stable"
+    now = time.time()
     
-    # Try to load latest metrics
-    try:
-        metrics_p = MODELS_DIR / "metrics.json"
-        if metrics_p.exists():
-            with open(metrics_p, 'r') as f:
-                metrics = json.load(f)
-                # If it's a classification report style, find overall accuracy
-                accuracy = metrics.get('accuracy', 0.0)
-                if not accuracy and 'macro avg' in metrics:
-                    accuracy = metrics['macro avg'].get('precision', 0.0) # Fallback
-    except: pass
+    if _cached_metrics_data is None or now - _cached_metrics_time > CACHE_TTL:
+        # Path to model artifacts
+        BASE_DIR = Path(__file__).resolve().parents[3]
+        MODELS_DIR = BASE_DIR / "models"
 
-    # Try to load model meta
-    try:
-        meta_p = MODELS_DIR / "model_meta.json"
-        if meta_p.exists():
-            with open(meta_p, 'r') as f:
-                meta = json.load(f)
-                last_trained = meta.get('last_trained') or meta.get('created_at') or "2026-05-09"
-                model_version = meta.get('model_version') or meta.get('version', model_version)
-                if not accuracy:
-                    accuracy = meta.get('accuracy', 0.0)
-    except: pass
+        accuracy = 0.0
+        last_trained = "Never"
+        model_version = "v3.1-stable"
+
+        # Try to load latest metrics
+        try:
+            metrics_p = MODELS_DIR / "metrics.json"
+            if metrics_p.exists():
+                with open(metrics_p, 'r') as f:
+                    metrics = json.load(f)
+                    # If it's a classification report style, find overall accuracy
+                    accuracy = metrics.get('accuracy', 0.0)
+                    if not accuracy and 'macro avg' in metrics:
+                        accuracy = metrics['macro avg'].get('precision', 0.0) # Fallback
+        except: pass
+
+        # Try to load model meta
+        try:
+            meta_p = MODELS_DIR / "model_meta.json"
+            if meta_p.exists():
+                with open(meta_p, 'r') as f:
+                    meta = json.load(f)
+                    last_trained = meta.get('last_trained') or meta.get('created_at') or "2026-05-09"
+                    model_version = meta.get('model_version') or meta.get('version', model_version)
+                    if not accuracy:
+                        accuracy = meta.get('accuracy', 0.0)
+        except: pass
+
+        _cached_metrics_data = (accuracy, last_trained, model_version)
+        _cached_metrics_time = now
+    else:
+        accuracy, last_trained, model_version = _cached_metrics_data
 
     return {
         "is_calibrated": baseline_monitor.baseline_mean is not None,
