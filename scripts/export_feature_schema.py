@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 try:
-    from common.feature_extractor import extract_features_from_eve
+    import common.feature_extractor as fe
 except ImportError as e:
     print(f"Error: Could not import feature_extractor: {e}")
     sys.exit(1)
@@ -59,7 +59,6 @@ def main():
         
         # Since I can't easily peek internal dict without modifying source,
         # I'll use the DEFAULT_FEATURES list from feature_extractor.py
-        import common.feature_extractor as fe
         feature_names = fe.DEFAULT_FEATURES
         
         if len(feature_names) != 49:
