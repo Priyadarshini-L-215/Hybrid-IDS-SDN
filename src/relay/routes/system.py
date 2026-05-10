@@ -205,8 +205,11 @@ async def update_config(req: ConfigUpdate):
     """Updates and saves the sentinel_config.yaml file and reloads in all services."""
     new_config = req.config
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(new_config, f, default_flow_style=False)
+        def dump_yaml():
+            with open(CONFIG_PATH, "w") as f:
+                yaml.dump(new_config, f, default_flow_style=False)
+
+        await asyncio.to_thread(dump_yaml)
         
         logger.info("Configuration updated successfully")
         
