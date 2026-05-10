@@ -236,9 +236,15 @@ async def run_pcap_evaluation(
         if file:
             await validate_file(file, [".pcap", ".pcapng"], MAX_PCAP_SIZE)
             temp_pcap = project_root / "data" / "pcap_eval" / f"upload_{int(time.time())}.pcap"
-            temp_pcap.parent.mkdir(parents=True, exist_ok=True)
-            with open(temp_pcap, "wb") as f:
-                f.write(await file.read())
+
+            # Read file content asynchronously, then write to disk in a separate thread to avoid blocking the event loop
+            file_content = await file.read()
+            def write_file():
+                temp_pcap.parent.mkdir(parents=True, exist_ok=True)
+                with open(temp_pcap, "wb") as f:
+                    f.write(file_content)
+            await asyncio.to_thread(write_file)
+
             target_path = str(temp_pcap)
             
         if not target_path:
