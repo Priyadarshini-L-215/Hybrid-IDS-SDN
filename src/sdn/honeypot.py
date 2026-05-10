@@ -4,7 +4,7 @@
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 LOG_FILE = Path("data/logs/honeypot.jsonl")
@@ -31,7 +31,7 @@ class HoneypotServer:
         self.stats["unique_ips"].add(ip)
 
         log_entry = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": "connection",
             "src_ip": ip,
             "src_port": addr[1],
