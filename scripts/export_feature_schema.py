@@ -24,24 +24,6 @@ except ImportError as e:
 def main():
     print("Generating feature schema from source of truth...")
     
-    # Create a minimal dummy Suricata event
-    dummy_event = {
-        "timestamp": datetime.datetime.now().isoformat(),
-        "event_type": "flow",
-        "src_ip": "1.1.1.1",
-        "dest_ip": "2.2.2.2",
-        "src_port": 1234,
-        "dest_port": 80,
-        "protocol": "TCP",
-        "flow": {
-            "pkts_toserver": 1,
-            "pkts_toclient": 1,
-            "bytes_toserver": 64,
-            "bytes_toclient": 64,
-            "age": 1
-        }
-    }
-    
     # Extract features using the logic in feature_extractor.py
     # We pass an empty features list to get the raw dictionary keys
     # Wait, extract_features takes (event, features)
@@ -69,7 +51,7 @@ def main():
         schema_data = {
             "_meta": {
                 "generated_by": "scripts/export_feature_schema.py",
-                "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
                 "version": "4.0.0",
                 "feature_count": len(feature_names)
             },
