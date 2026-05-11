@@ -433,15 +433,17 @@ class MLEngine:
                     # VAE not ready, leave as None
                     valid_anomaly_scores = [None] * len(valid_features)
                     
-                # 2c. Batch SHAP (Performance optimization)
-                batch_shap_results = {} # Index -> Top 3 features
-                if self.shap_explainer:
+                # 2c. Batch SHAP (Selective explainability)
+                batch_shap_results = {}
+                from common.config import SHAP_ENABLED
+                if SHAP_ENABLED and self.shap_explainer:
                     try:
-                        t_shap_start = time.time()
-                        # Use scaled features for SHAP if available
-                        X_shap = X_scaled if 'X_scaled' in locals() else X
-                        
-                        shap_vals = self.shap_explainer.shap_values(X_shap)
+                        # Only explain suspicious/attack events
+                        shap_mask = (np.array(ml_scores_valid, dtype=np.float32) > ML_THRESHOLD_SUSPICIOUS)
+                        if shap_mask.any():
+                            t_shap_start = time.time()
+                            X_shap = X_scaled[shap_mask] if 'X_scaled' in locals() else X[shap_mask]
+                            shap_vals = self.shap_explainer.shap_values(X_shap)
                         
                         # Standardize to 2D (N, M)
                         if isinstance(shap_vals, list):
@@ -454,7 +456,9 @@ class MLEngine:
                             pos_class_vals = pos_class_vals[:, :, 1]
 
                         # Map back to original indices
-                        for i, v_idx in enumerate(valid_indices):
+                        indices = np.where(shap_mask)[0]
+                        for i, pos in enumerate(indices):
+                            v_idx = valid_indices[pos]
                             vals = pos_class_vals[i]
                             indexed_features = []
                             for f_idx, v in enumerate(vals):
@@ -467,9 +471,9 @@ class MLEngine:
                             batch_shap_results[v_idx] = indexed_features[:3]
 
                         shap_ms = (time.time() - t_shap_start) * 1000
-                        logger.debug("Batch SHAP calculated", 
+                        logger.debug("Batch SHAP calculated (Selective)", 
                                      total_ms=round(shap_ms, 2), 
-                                     per_event_ms=round(shap_ms/len(valid_features), 2))
+                                     count=len(indices))
                     except Exception as e:
                         logger.warning("Batch SHAP failed", error=str(e))
 

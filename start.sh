@@ -151,10 +151,12 @@ verify_models() {
     log_info "Verifying critical model files..."
     local missing=0
     local critical_files=(
-        "models/rf_model.pkl"
-        "models/scaler.pkl"
+        "models/rf_multi_pipeline.onnx"
+        "models/scaler_multi.pkl"
         "models/vae_encoder.keras"
         "models/vae_decoder.keras"
+        "models/vae_scaler.pkl"
+        "models/feature_order.json"
     )
     
     for f in "${critical_files[@]}"; do
@@ -242,6 +244,7 @@ cleanup_stale_processes() {
 cleanup_on_interrupt() {
     log_warn "Interrupt received, stopping Sentinel Core..."
     "$PROJECT_ROOT/stop.sh" >/dev/null 2>&1 || true
+    rm -f "$STATE_LOCK_FILE"
 }
 
 start_redis() {
@@ -371,17 +374,24 @@ start_consumer() {
     local pid=$!
     echo "consumer_pid=$pid" >> "$STATE_FILE"
     
-    # Wait for consumer heartbeat or at least confirm it stayed alive
-    log_info "Waiting for ML Engine to initialize models..."
-    sleep 5
-    
-    if is_process_running "consumer.py"; then
-        log_success "ML Consumer active (PID: $pid)"
-        return 0
-    else
-        log_error "ML Consumer failed to start. Check data/logs/consumer.log"
-        return 1
-    fi
+    # Wait for consumer heartbeat in Redis
+    log_info "Waiting for ML Engine to initialize and pulse heartbeat..."
+    local deadline=$((SECONDS + 45))
+    while [ $SECONDS -lt "$deadline" ]; do
+        if redis-cli get "sentinel_heartbeat:consumer" 2>/dev/null | grep -q "alive"; then
+            log_success "ML Consumer heartbeat detected (PID: $pid)"
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log_error "ML Consumer process died during startup"
+            tail -n 20 "$PROJECT_ROOT/data/logs/consumer.log" >> "$STARTUP_LOG_FILE" 2>/dev/null || true
+            return 1
+        fi
+        sleep 2
+    done
+
+    log_error "ML Consumer failed to pulse heartbeat within 45s"
+    return 1
 }
 
 start_relay() {
@@ -389,7 +399,18 @@ start_relay() {
     "$APP_PYTHON" -m uvicorn relay.app:app --host 0.0.0.0 --port "$API_PORT" >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
     local pid=$!
     echo "relay_pid=$pid" >> "$STATE_FILE"
-    wait_for_port "$API_PORT" "Relay API"
+    
+    if wait_for_port "$API_PORT" "Relay API" 30; then
+        # Verify HTTP health
+        log_info "Verifying Relay HTTP health..."
+        if curl -sf "http://127.0.0.1:${API_PORT}/api/health" >/dev/null 2>&1; then
+            log_success "Relay API /api/health is responsive"
+            return 0
+        fi
+        log_warn "Relay TCP port is open but /api/health did not respond immediately"
+        return 0 # Treat as success for now since port is open
+    fi
+    return 1
 }
 
 start_ui() {
@@ -408,6 +429,7 @@ start_ui() {
 # ============================================================================
 
 main() {
+    mkdir -p "$PROJECT_ROOT/data/logs"
     setup_logging
     source_env_file
     check_lock

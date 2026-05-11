@@ -189,10 +189,7 @@ function App() {
     }
   }, [simOutput]);
 
-  // Evaluation
-  const [evaluating, setEvaluating] = useState(false);
-  const [evalResult, setEvalResult] = useState(null);
-  const [evalLoading, setEvalLoading] = useState(false);
+
 
   // Model Control (Settings)
   const [models, setModels] = useState([]);
@@ -339,22 +336,7 @@ function App() {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setEvaluating(true);
-    setEvalResult(null);
-    try {
-      const result = await apiClient.uploadFile('/api/evaluate/dataset', file, {
-        formFields: { label_column: 'Label' }
-      });
-      setEvalResult(result);
-    } catch (e) { 
-      apiClient.handleError(e, 'Evaluation failed');
-    } finally { 
-      setEvaluating(false); 
-    }
-  };
+
 
   const blockAction = async (ip, action) => {
     try {
@@ -489,7 +471,6 @@ function App() {
             { id: 'overview', label: 'Command Hub', icon: Activity },
             { id: 'mitigation', label: 'Policies', icon: ShieldCheck },
             { id: 'lab', label: 'Simulation', icon: Target },
-            { id: 'eval', label: 'Evaluation', icon: Fingerprint },
             { id: 'settings', label: 'Engine Config', icon: Settings }
           ].map(tab => (
             <div 
@@ -521,7 +502,7 @@ function App() {
             <div style={{ display: 'flex', flexDirection: 'column' }}>
               <span style={{ color: 'var(--text-muted)', fontWeight: 800, fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase' }}>Current Operations</span>
               <h2 style={{ fontSize: '1.25rem', fontWeight: 900 }}>
-                {{ overview: 'Command Hub', mitigation: 'Policies', lab: 'Simulation', eval: 'Evaluation', settings: 'Engine Config' }[activeTab] || 'Dashboard'}
+                {{ overview: 'Command Hub', mitigation: 'Policies', lab: 'Simulation', settings: 'Engine Config' }[activeTab] || 'Dashboard'}
               </h2>
             </div>
           </div>
@@ -955,88 +936,7 @@ function App() {
             </ErrorBoundary>
           )}
 
-          {activeTab === 'eval' && (
-            <ErrorBoundary>
-            <motion.div key="eval" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
-                <GlassCard title="Model Evaluation" icon={Fingerprint} subtitle="Offline dataset validation">
-                   <div className="content-stack">
-                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Upload forensic CSV data to validate model performance against historical labels.</p>
-                      <div style={{ border: '2px dashed var(--border)', borderRadius: '20px', padding: '3rem', textAlign: 'center', background: 'rgba(255,255,255,0.01)' }}>
-                        <Upload size={32} className="text-muted" style={{ margin: '0 auto 1.5rem' }} />
-                        <label className="btn btn-primary" style={{ display: 'inline-flex', margin: '0 auto' }}>
-                          CHOOSE CSV DATASET
-                          <input type="file" hidden onChange={handleFileUpload} accept=".csv" />
-                        </label>
-                        {evaluating && <p style={{ marginTop: '1rem', fontSize: '0.7rem', color: 'var(--primary)' }} className="pulse-fast">ANALYZING FEATURES...</p>}
-                      </div>
-                   </div>
-                </GlassCard>
-                <GlassCard title="Validation Metrics" icon={BarChart3} subtitle="F1-Score, Accuracy, and Confusion Matrix">
-                   {evalResult ? (
-                     <div className="content-stack">
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
-                            <div className="stat-label">Engine Accuracy</div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 900, color: 'var(--primary)', fontFamily: 'var(--font-mono)' }}>{(evalResult.summary?.accuracy * 100).toFixed(1)}%</div>
-                          </div>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
-                            <div className="stat-label">Samples</div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 900, fontFamily: 'var(--font-mono)' }}>{evalResult.summary?.total_samples}</div>
-                          </div>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
-                            <div className="stat-label">Model Hash</div>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 800, marginTop: '8px', opacity: 0.5 }}>{evalResult.summary?.model_version || 'SHA-256-V4'}</div>
-                          </div>
-                        </div>
 
-                        <div className="confusion-matrix">
-                           <div className="cm-label-row" style={{ gridColumn: '2' }}>Pred. Normal</div>
-                           <div className="cm-label-row" style={{ gridColumn: '3' }}>Pred. Attack</div>
-                           
-                           <div className="cm-label-col">Actual Normal</div>
-                           <div className="cm-cell cm-cell-success">
-                              <span className="cm-value">{evalResult.metrics?.normal?.tn || 0}</span>
-                              <span className="cm-sublabel">True Negative</span>
-                           </div>
-                           <div className="cm-cell cm-cell-danger">
-                              <span className="cm-value">{evalResult.metrics?.normal?.fp || 0}</span>
-                              <span className="cm-sublabel">False Positive</span>
-                           </div>
-
-                           <div className="cm-label-col">Actual Attack</div>
-                           <div className="cm-cell cm-cell-danger">
-                              <span className="cm-value">{evalResult.metrics?.attack?.fn || 0}</span>
-                              <span className="cm-sublabel">False Negative</span>
-                           </div>
-                           <div className="cm-cell cm-cell-success">
-                              <span className="cm-value">{evalResult.metrics?.attack?.tp || 0}</span>
-                              <span className="cm-sublabel">True Positive</span>
-                           </div>
-                        </div>
-
-                        <div style={{ height: '200px', marginTop: '1rem' }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={Object.entries(evalResult.metrics || {}).filter(([k]) => ['attack', 'normal', 'suspicious'].includes(k)).map(([name, m]) => ({ name, f1: m.f1_score || m['f1-score'] }))}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                              <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={10} />
-                              <YAxis stroke="var(--text-muted)" fontSize={10} />
-                              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '8px' }} />
-                              <Bar dataKey="f1" fill="var(--primary)" radius={[6, 6, 0, 0]} />
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
-                     </div>
-                   ) : (
-                     <div style={{ height: '350px', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.1 }}>
-                        <BarChart3 size={64} />
-                     </div>
-                   )}
-                </GlassCard>
-              </div>
-            </motion.div>
-            </ErrorBoundary>
-          )}
 
           {activeTab === 'settings' && (
             <ErrorBoundary>

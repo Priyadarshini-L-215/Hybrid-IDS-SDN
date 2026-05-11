@@ -14,7 +14,19 @@ stop_pid() {
 	local label=$2
 	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 		echo "[+] Stopping $label (PID: $pid)..."
-		kill "$pid" 2>/dev/null || true
+		kill -TERM "$pid" 2>/dev/null || true
+		
+		# Escalating kill: Wait up to 10 seconds for graceful exit, then SIGKILL
+		local waited=0
+		while kill -0 "$pid" 2>/dev/null && [ $waited -lt 10 ]; do
+			sleep 1
+			waited=$((waited + 1))
+		done
+		
+		if kill -0 "$pid" 2>/dev/null; then
+			echo "[!] $label (PID: $pid) stubborn, sending SIGKILL..."
+			kill -9 "$pid" 2>/dev/null || true
+		fi
 	fi
 }
 

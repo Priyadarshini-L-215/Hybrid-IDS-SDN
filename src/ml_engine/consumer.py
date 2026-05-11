@@ -125,9 +125,14 @@ async def main():
     logger.info("ML Engine is ACTIVE and monitoring Redis Stream", broadcast="Redis Stream (sentinel_alerts_stream)")
 
     
-    # Keep main alive
+    # Keep main alive with heartbeat
     while _RUNNING:
-        await asyncio.sleep(1)
+        if rc.async_redis_client:
+            try:
+                await rc.async_redis_client.setex("sentinel_heartbeat:consumer", 15, "alive")
+            except Exception:
+                pass
+        await asyncio.sleep(5)
 
 async def shutdown(pool):
     global _RUNNING

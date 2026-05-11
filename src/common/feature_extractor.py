@@ -16,20 +16,28 @@ from collections import deque
 import base64
 
 def extract_ttl_from_packet(packet_b64: str) -> float:
-    """Extracts TTL or Hop Limit from raw base64 packet."""
+    """Extracts TTL or Hop Limit from raw base64 packet (Legacy Fallback)."""
+    if not packet_b64: return 0.0
     try:
         packet_bytes = base64.b64decode(packet_b64)
-        eth_type = packet_bytes[12:14].hex()
-        sll_type = packet_bytes[14:16].hex()
+        if len(packet_bytes) < 34: return 0.0 # Too small for IP header
         
-        if eth_type == '0800': # IPv4 Ethernet
+        eth_type = packet_bytes[12:14].hex()
+        
+        # Ethernet IPv4 (0x0800)
+        if eth_type == '0800':
             return float(packet_bytes[14 + 8])
-        elif eth_type == '86dd': # IPv6 Ethernet
+        # Ethernet IPv6 (0x86dd)
+        elif eth_type == '86dd':
             return float(packet_bytes[14 + 7])
-        elif sll_type == '0800': # IPv4 SLL
+        
+        # Check for Linux SLL (Cooked) encapsulation
+        sll_type = packet_bytes[14:16].hex()
+        if sll_type == '0800': # SLL IPv4
             return float(packet_bytes[16 + 8])
-        elif sll_type == '86dd': # IPv6 SLL
+        elif sll_type == '86dd': # SLL IPv6
             return float(packet_bytes[16 + 7])
+            
     except Exception:
         pass
     return 0.0
@@ -71,7 +79,7 @@ def event_cache(maxsize=128):
 
 # --- STATEFUL TRACKING ---
 class StatefulFeatureTracker:
-    def __init__(self, window_size=100):
+    def __init__(self, window_size=1000):
         self.window = deque(maxlen=window_size)
         self._lock = threading.Lock()
 

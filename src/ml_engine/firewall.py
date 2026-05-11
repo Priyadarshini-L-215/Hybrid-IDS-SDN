@@ -41,6 +41,8 @@ class ActiveFirewall:
     # ipset set names (legacy mode)
     SET_BLOCKS = "sentinel_blocks"
     SET_LIMITED = "sentinel_limited"
+    SET_BLOCKS_V6 = "sentinel_blocks_v6"
+    SET_LIMITED_V6 = "sentinel_limited_v6"
 
     @classmethod
     async def _initialize(cls):
@@ -111,17 +113,16 @@ class ActiveFirewall:
         try:
             # 1. Create ipset sets with timeout support
             def create_set_safe(name, params):
-                res = subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], capture_output=True)
-                if res.returncode != 0:
-                    logger.warning(f"ipset {name} creation failed. Flushing iptables and recreating...", error=res.stderr.decode())
-                    subprocess.run(["sudo", "iptables", "-F", "SENTINEL_IPS"], check=False)
-                    subprocess.run(["sudo", "ipset", "destroy", name], check=False)
-                    subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], check=True)
+                subprocess.run(["sudo", "ipset", "create", name] + params + ["-!"], check=False)
 
+            # IPv4 Sets
             create_set_safe(cls.SET_BLOCKS, ["hash:ip", "timeout", "0"])
             create_set_safe(cls.SET_LIMITED, ["hash:ip", "timeout", "3600"])
+            # IPv6 Sets
+            create_set_safe(cls.SET_BLOCKS_V6, ["hash:ip", "family", "inet6", "timeout", "0"])
+            create_set_safe(cls.SET_LIMITED_V6, ["hash:ip", "family", "inet6", "timeout", "3600"])
 
-            # 2. Ensure iptables chain exists and rules are present
+            # 2. Setup IPv4 iptables
             CHAIN_NAME = "SENTINEL_IPS"
             subprocess.run(["sudo", "iptables", "-N", CHAIN_NAME], check=False)
             subprocess.run(["sudo", "iptables", "-F", CHAIN_NAME], check=True)
@@ -136,13 +137,24 @@ class ActiveFirewall:
             ], check=True)
             subprocess.run(["sudo", "iptables", "-A", CHAIN_NAME, "-m", "set", "--match-set", cls.SET_LIMITED, "src", "-j", "DROP"], check=True)
 
-            # 3. Hook into INPUT/FORWARD
+            # Hook into IPv4 INPUT/FORWARD
             for target in ["INPUT", "FORWARD"]:
                 hook_check = subprocess.run(["sudo", "iptables", "-C", target, "-j", CHAIN_NAME], capture_output=True)
                 if hook_check.returncode != 0:
                     subprocess.run(["sudo", "iptables", "-I", target, "1", "-j", CHAIN_NAME], check=True)
+
+            # 3. Setup IPv6 ip6tables
+            subprocess.run(["sudo", "ip6tables", "-N", CHAIN_NAME], check=False)
+            subprocess.run(["sudo", "ip6tables", "-F", CHAIN_NAME], check=True)
+            subprocess.run(["sudo", "ip6tables", "-A", CHAIN_NAME, "-m", "set", "--match-set", cls.SET_BLOCKS_V6, "src", "-j", "DROP"], check=True)
+            
+            # Hook into IPv6 INPUT/FORWARD
+            for target in ["INPUT", "FORWARD"]:
+                hook_check = subprocess.run(["sudo", "ip6tables", "-C", target, "-j", CHAIN_NAME], capture_output=True)
+                if hook_check.returncode != 0:
+                    subprocess.run(["sudo", "ip6tables", "-I", target, "1", "-j", CHAIN_NAME], check=True)
                 
-            logger.info("Kernel firewall rules synchronized", chain=CHAIN_NAME)
+            logger.info("Kernel firewall rules synchronized (IPv4 + IPv6)", chain=CHAIN_NAME)
         except Exception as e:
             logger.error("Failed to setup kernel firewall", error=str(e))
 
@@ -278,13 +290,12 @@ class ActiveFirewall:
     @classmethod
     async def _legacy_block(cls, ip: str, ttl: int = 0):
         try:
-            if ipaddress.ip_address(ip).version == 6:
-                logger.warning("Skipping IPv6 block (not yet supported by legacy backend)", ip=ip)
-                return
-
+            ip_obj = ipaddress.ip_address(ip)
+            target_set = cls.SET_BLOCKS if ip_obj.version == 4 else cls.SET_BLOCKS_V6
+            
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "add", cls.SET_BLOCKS, ip, "timeout", str(ttl), "-!"], True)
-            logger.warning("Legacy Block (ipset)", ip=ip, ttl=ttl)
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "add", target_set, ip, "timeout", str(ttl), "-!"], True)
+            logger.warning("Legacy Block (ipset)", ip=ip, ttl=ttl, family=f"v{ip_obj.version}")
         except Exception as e:
             logger.error("Legacy block failed", ip=ip, error=str(e))
 
@@ -292,16 +303,17 @@ class ActiveFirewall:
     async def rate_limit(cls, ip: str):
         """Adds IP to rate-limited set."""
         try:
-            ipaddress.ip_address(ip)
+            ip_obj = ipaddress.ip_address(ip)
         except ValueError:
             logger.error("Invalid IP address format", ip=ip)
             return False
         
         if not cls._initialized: await cls._initialize()
         try:
+            target_set = cls.SET_LIMITED if ip_obj.version == 4 else cls.SET_LIMITED_V6
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "add", cls.SET_LIMITED, ip, "-!"], True)
-            logger.warning("IP Rate Limited", ip=ip)
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "add", target_set, ip, "-!"], True)
+            logger.warning("IP Rate Limited", ip=ip, family=f"v{ip_obj.version}")
         except Exception as e:
             logger.error("Rate limit operation failed", ip=ip, error=str(e))
 
@@ -317,22 +329,17 @@ class ActiveFirewall:
                 logger.error("SDN unblock failed", error=str(e))
         
         try:
-            try:
-                if ipaddress.ip_address(ip).version == 6:
-                    if cls._redis_client:
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, cls._redis_client.hdel, cls.REDIS_REPUTATION_KEY, ip)
-                    return
-            except ValueError:
-                pass
+            ip_obj = ipaddress.ip_address(ip)
+            target_blocks = cls.SET_BLOCKS if ip_obj.version == 4 else cls.SET_BLOCKS_V6
+            target_limited = cls.SET_LIMITED if ip_obj.version == 4 else cls.SET_LIMITED_V6
 
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", cls.SET_BLOCKS, ip, "-!"], False)
-            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", cls.SET_LIMITED, ip, "-!"], False)
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", target_blocks, ip, "-!"], False)
+            await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", target_limited, ip, "-!"], False)
             
             if cls._redis_client:
                 await loop.run_in_executor(None, cls._redis_client.hdel, cls.REDIS_REPUTATION_KEY, ip)
-            logger.info("IP Unblocked manually", ip=ip)
+            logger.info("IP Unblocked manually", ip=ip, family=f"v{ip_obj.version}")
         except Exception as e:
             logger.error("Unblock operation failed", ip=ip, error=str(e))
 

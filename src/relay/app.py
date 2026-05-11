@@ -166,6 +166,26 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time alert streaming."""
     try:
         await manager.connect(websocket)
+        
+        # --- ALERT REPLAY ---
+        # Seed the dashboard with recent alerts from DB
+        try:
+            from common.database import Database
+            db = Database()
+            recent_alerts = db.get_alerts(limit=50)
+            if recent_alerts:
+                import json
+                # Send history in reverse order (oldest to newest)
+                for alert in reversed(recent_alerts):
+                    # Ensure it's JSON string
+                    if isinstance(alert, dict):
+                        await websocket.send_text(json.dumps(alert))
+                    else:
+                        await websocket.send_text(str(alert))
+                logger.info("Alert history replayed", count=len(recent_alerts))
+        except Exception as e:
+            logger.warning("Alert replay failed", error=str(e))
+            
     except Exception as e:
         logger.error("Failed to establish WebSocket connection", error=str(e))
         try:

@@ -44,9 +44,10 @@ class WorkerPool:
         self.ml_engine = ml_engine or MLEngine()
         self.broadcast_func = broadcast_func
         
-        # De-duplication Engine (Sliding Window)
-        import threading
-        self.dedup_cache = {} # Key: (src, dst, pred), Value: {last_emit, count}
+        # De-duplication Engine (LRU-capped)
+        from collections import OrderedDict
+        self.dedup_cache = OrderedDict() # Key: (src, dst, pred), Value: {last_emit, count}
+        self.max_dedup_size = 10000
         self.dedup_lock = None
         
         self.running = False
@@ -236,13 +237,26 @@ class WorkerPool:
                     async with self.dedup_lock:
                         entry = self.dedup_cache.get(dedup_key)
                         dedup_window = 5.0 if alert.get("prediction") != "normal" else 0.5
-                        if entry and (now - entry['last_emit'] < dedup_window):
-                            entry['count'] += 1
-                            should_broadcast = False
+                        
+                        if entry:
+                            # Move to end (most recently used)
+                            self.dedup_cache.move_to_end(dedup_key)
+                            
+                            if (now - entry['last_emit'] < dedup_window):
+                                entry['count'] += 1
+                                should_broadcast = False
+                            else:
+                                prev_count = entry['count']
+                                self.dedup_cache[dedup_key] = {'last_emit': now, 'count': 0}
+                                alert["duplicate_count"] = prev_count + 1
                         else:
-                            prev_count = entry['count'] if entry else 0
+                            # New entry
                             self.dedup_cache[dedup_key] = {'last_emit': now, 'count': 0}
-                            alert["duplicate_count"] = prev_count + 1
+                            alert["duplicate_count"] = 1
+                            
+                            # Enforce CAP
+                            if len(self.dedup_cache) > self.max_dedup_size:
+                                self.dedup_cache.popitem(last=False) # Pop oldest (least recently used)
                     
                     if not should_broadcast:
                         return None

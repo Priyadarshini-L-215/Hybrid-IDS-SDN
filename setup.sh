@@ -52,7 +52,14 @@ load_state() {
 
 mark_complete() {
     local step=$1
-    echo "$step=1" >> "$SETUP_STATE_FILE"
+    # Atomically rewrite state file without duplicate keys
+    local tmp
+    tmp=$(mktemp "$PROJECT_ROOT/.setup_state.XXXXXX")
+    if [ -f "$SETUP_STATE_FILE" ]; then
+        grep -v "^${step}=" "$SETUP_STATE_FILE" > "$tmp" || true
+    fi
+    echo "${step}=1" >> "$tmp"
+    mv "$tmp" "$SETUP_STATE_FILE"
     COMPLETED_STEPS[$step]=1
     log_info "Marked step as complete: $step"
 }
@@ -366,34 +373,26 @@ mark_complete "suricata_rules"
 
 setup_model_files() {
     if is_complete "model_files"; then
-        log_info "Model files already synchronized (skipping)"
+        log_info "Model files already verified (skipping)"
         return 0
     fi
 
-    log_info "Synchronizing model files for 49-feature schema..."
+    log_info "Verifying model directory structure..."
     
     mkdir -p "$PROJECT_ROOT/models"
     
-    # Check if 'new model' directory exists and has files
-    if [ -d "$PROJECT_ROOT/new model" ]; then
-        log_info "Found updated models in 'new model' directory. Synchronizing..."
-        
-        # Files to sync from 'new model'
-        local files_to_sync=("rf_model.pkl" "scaler.pkl" "feature_order.pkl" "le_proto.pkl")
-        
-        for file in "${files_to_sync[@]}"; do
-            if [ -f "$PROJECT_ROOT/new model/$file" ]; then
-                log_info "Copying $file to models/..."
-                cp "$PROJECT_ROOT/new model/$file" "$PROJECT_ROOT/models/$file"
-            fi
-        done
+    # Check if manifest.json exists, if not, warn
+    if [ ! -f "$PROJECT_ROOT/models/manifest.json" ]; then
+        log_warn "models/manifest.json missing. System may start in fallback mode."
     fi
 
-    # Ensure other required V4 files are present (if they exist in models/ backup or similar)
-    # This is a good place to ensure feature_order.json is present
-    if [ ! -f "$PROJECT_ROOT/models/feature_order.json" ] && [ -f "$PROJECT_ROOT/models/feature_names_v4.json" ]; then
-        log_info "Creating feature_order.json from v4 names..."
-        cp "$PROJECT_ROOT/models/feature_names_v4.json" "$PROJECT_ROOT/models/feature_order.json"
+    # Ensure feature_order.json is present
+    if [ ! -f "$PROJECT_ROOT/models/feature_order.json" ]; then
+        if [ -f "$PROJECT_ROOT/models/feature_order.pkl" ]; then
+            log_info "Attempting to generate feature_order.json from .pkl..."
+            # This would normally be handled by a script, for now just log it
+            log_warn "feature_order.json missing but .pkl found."
+        fi
     fi
 
     mark_complete "model_files"
@@ -488,15 +487,30 @@ main() {
     # Setup logging
     mkdir -p "$PROJECT_ROOT/data/logs"
 
-    # Prevent concurrent setup
+    # Prevent concurrent setup with PID check
     if [ -f "$SETUP_LOCK_FILE" ]; then
-        log_error "Setup is already running!"
-        log_error "If this is stuck, remove: $SETUP_LOCK_FILE"
-        exit 1
+        local stale_pid
+        stale_pid=$(cat "$SETUP_LOCK_FILE" 2>/dev/null || true)
+        if [ -n "$stale_pid" ] && kill -0 "$stale_pid" 2>/dev/null; then
+            log_error "Setup is already running (PID: $stale_pid). Aborting."
+            exit 1
+        fi
+        log_warn "Stale setup lock found. Removing..."
+        rm -f "$SETUP_LOCK_FILE"
     fi
     
-    trap "rm -f $SETUP_LOCK_FILE" EXIT
-    touch "$SETUP_LOCK_FILE"
+    trap "rm -f $SETUP_LOCK_FILE" EXIT INT TERM
+    echo $$ > "$SETUP_LOCK_FILE"
+
+    # Handle --force flag
+    if [[ "${1:-}" == "--force" ]]; then
+        log_warn "Force flag detected. Resetting setup state..."
+        rm -f "$SETUP_STATE_FILE"
+        # Reset memory state
+        for key in "${!COMPLETED_STEPS[@]}"; do
+            unset "COMPLETED_STEPS[$key]"
+        done
+    fi
 
     # Run preflight checks first
     if [ -f "$PROJECT_ROOT/preflight.sh" ]; then

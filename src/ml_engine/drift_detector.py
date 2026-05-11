@@ -32,17 +32,18 @@ class DriftDetector:
         self._last_drift_time = 0.0
         self._cooldown_sec = 900  # Minimum 15 min between drift alerts
         self._sample_count = 0
+        self._sampling_rate = 10 # Only process 1 in 10 scores
         self._lock = asyncio.Lock()
 
         if RIVER_AVAILABLE:
             # ADWIN (Adaptive Windowing) detects change in mean/variance
             self._detector = river_drift.ADWIN(delta=0.01)
 
-            logger.info("ADWIN drift detector initialized", delta=0.002)
+            logger.info("ADWIN drift detector initialized", delta=0.01, sampling_rate=self._sampling_rate)
 
     async def update(self, score: float) -> bool:
         """
-        Feed one ML confidence score into ADWIN.
+        Feed one ML confidence score into ADWIN (with sampling).
         Returns True if drift was detected this update.
         """
         if self._detector is None:
@@ -50,7 +51,10 @@ class DriftDetector:
 
         async with self._lock:
             self._sample_count += 1
-            # Normalize score if needed, but ADWIN handles most distributions
+            if self._sample_count % self._sampling_rate != 0:
+                return False
+                
+            # Feed score into ADWIN
             self._detector.update(score)
             drift_detected = self._detector.drift_detected
 

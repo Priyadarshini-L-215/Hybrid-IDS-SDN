@@ -121,8 +121,8 @@ check_disk_space() {
 check_model_files() {
     local missing=0
     local models=(
-        "models/rf_model.pkl"
-        "models/scaler.pkl"
+        "models/rf_multi_pipeline.onnx"
+        "models/scaler_multi.pkl"
         "models/vae_encoder.keras"
         "models/vae_decoder.keras"
         "models/vae_scaler.pkl"
@@ -141,6 +141,34 @@ check_model_files() {
     if [ $missing -gt 0 ]; then
         echo -e "${YELLOW}  (Models can be trained, but inference will fail without them)${NC}"
         WARNINGS=$((WARNINGS + 1))
+    fi
+}
+
+check_ram() {
+    local free_mb
+    free_mb=$(free -m | awk '/^Mem:/{print $7}')
+    if [ "$free_mb" -lt 1500 ]; then
+        echo -e "${RED}✗${NC} Available RAM: ${free_mb}MB (1500MB+ recommended)"
+        WARNINGS=$((WARNINGS + 1))
+    else
+        echo -e "${GREEN}✓${NC} Available RAM: ${free_mb}MB"
+    fi
+}
+
+check_python_imports() {
+    if [ -f "requirements.txt" ]; then
+        # Check if venv python can import core libs
+        local python_bin="./.venv/bin/python"
+        if [ ! -f "$python_bin" ]; then
+            python_bin="python3"
+        fi
+        
+        if "$python_bin" -c "import structlog, yaml, fastapi, redis" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} Core Python packages importable"
+        else
+            echo -e "${YELLOW}⚠${NC} Core Python packages missing (run setup.sh)"
+            WARNINGS=$((WARNINGS + 1))
+        fi
     fi
 }
 
@@ -165,7 +193,7 @@ check_sudo_privilege() {
 }
 
 check_internet() {
-    if ping -c 1 8.8.8.8 &>/dev/null; then
+    if curl -fsSL --connect-timeout 5 https://google.com >/dev/null 2>&1; then
         echo -e "${GREEN}✓${NC} Internet connectivity"
     else
         echo -e "${RED}✗${NC} No internet connectivity (required for package downloads)"
@@ -210,12 +238,14 @@ main() {
 
     echo "[+] Checking Resources..."
     check_disk_space
+    check_ram
     check_internet
     echo ""
 
     echo "[+] Checking Data Files..."
     check_model_files
     check_config_files
+    check_python_imports
     echo ""
 
     echo "[+] Checking System Configuration..."

@@ -120,6 +120,7 @@ class DatabaseHandler:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_pred_ts ON alerts (prediction, created_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (created_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts (event_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_pred_ts_combined ON alerts (prediction, timestamp DESC)")
 
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS false_positives (

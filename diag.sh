@@ -66,11 +66,12 @@ check_model() {
         echo -e "[${YELLOW}WARN${RESET}] Model asset missing: $1"
     fi
 }
-check_model "rf_model.pkl"
-check_model "scaler.pkl"
-check_model "vae_model.pth"
+check_model "rf_multi_pipeline.onnx"
+check_model "scaler_multi.pkl"
+check_model "vae_encoder.keras"
+check_model "vae_decoder.keras"
 check_model "vae_scaler.pkl"
-check_model "features.json"
+check_model "feature_order.json"
 
 echo ""
 echo "[+] Checking Ports..."
@@ -92,7 +93,7 @@ LAG=$(redis-cli xinfo groups sentinel_alerts_queue 2>/dev/null | grep -A 1 "lag"
 echo -e "[${GREEN}INFO${RESET}] Consumer Group Lag: $LAG"
 
 echo ""
-echo "[+] Checking Firewall & Mitigation..."
+echo "[+] Checking Firewall & Mitigation (IPv4)..."
 if sudo ipset list sentinel_blocks > /dev/null 2>&1; then
     BLOCK_COUNT=$(sudo ipset list sentinel_blocks | grep "Number of entries:" | awk '{print $4}')
     echo -e "[${GREEN}OK${RESET}] Ipset 'sentinel_blocks' active ($BLOCK_COUNT entries)"
@@ -104,6 +105,21 @@ if sudo iptables -L SENTINEL_IPS -n > /dev/null 2>&1; then
     echo -e "[${GREEN}OK${RESET}] Iptables chain 'SENTINEL_IPS' is active"
 else
     echo -e "[${RED}FAIL${RESET}] Iptables chain 'SENTINEL_IPS' NOT found"
+fi
+
+echo ""
+echo "[+] Checking Firewall & Mitigation (IPv6)..."
+if sudo ipset list sentinel_blocks_v6 > /dev/null 2>&1; then
+    BLOCK_COUNT_V6=$(sudo ipset list sentinel_blocks_v6 | grep "Number of entries:" | awk '{print $4}')
+    echo -e "[${GREEN}OK${RESET}] Ipset 'sentinel_blocks_v6' active ($BLOCK_COUNT_V6 entries)"
+else
+    echo -e "[${YELLOW}WARN${RESET}] Ipset 'sentinel_blocks_v6' NOT found"
+fi
+
+if sudo ip6tables -L SENTINEL_IPS -n > /dev/null 2>&1; then
+    echo -e "[${GREEN}OK${RESET}] Ip6tables chain 'SENTINEL_IPS' is active"
+else
+    echo -e "[${YELLOW}WARN${RESET}] Ip6tables chain 'SENTINEL_IPS' NOT found"
 fi
 
 echo ""

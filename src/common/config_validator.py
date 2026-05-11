@@ -98,6 +98,12 @@ class ConfigValidator:
 
     def check_vae_loadability(self):
         """Verify the VAE detector can deserialize the saved artifacts."""
+        # Skip full instantiation if manifest already confirms artifact integrity
+        manifest = load_model_manifest()
+        active = (manifest or {}).get("active", {})
+        if active.get("vae", {}).get("verified"):
+            return  # Manifest-verified; skip cold-load
+
         encoder_path = MODELS_DIR / "vae_encoder.keras"
         decoder_path = MODELS_DIR / "vae_decoder.keras"
         scaler_path = MODELS_DIR / "vae_scaler.pkl"
