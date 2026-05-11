@@ -11,7 +11,6 @@ import sqlite3
 import json
 import csv
 import zlib
-import numpy as np
 from pathlib import Path
 
 # Add src directory to path to import feature_extractor
@@ -24,7 +23,7 @@ from common.feature_extractor import extract_features_from_eve, load_feature_nam
 def parse_args():
     parser = argparse.ArgumentParser(description="Export confirmed-normal events to local_normal.csv")
     parser.add_argument("--min-confidence", type=float, default=0.0,
-                        help="Minimum confidence % that it is normal")
+                        help="Minimum confidence %% that it is normal")
     parser.add_argument("--limit", type=int, default=20000,
                         help="Max rows to export")
     parser.add_argument("--output", type=str, default=str(BASE_DIR / "data" / "local_normal.csv"),
@@ -105,7 +104,7 @@ def main():
                 writer.writerow(row_data)
                 written += 1
                 
-            except Exception as e:
+            except Exception:
                 skipped += 1
                 continue
 

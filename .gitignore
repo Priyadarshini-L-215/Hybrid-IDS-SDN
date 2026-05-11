@@ -79,7 +79,7 @@ calibrate*.py
 simulate*.py
 analyze*.py
 debug*.py
-test_*.py
+/test_*.py
 !tests/ # Keep the tests directory structure if needed, but ignore root test scripts
 export_local_data.py
 

@@ -4,6 +4,7 @@
 import httpx
 import requests
 import structlog
+import httpx
 from typing import Optional, Dict, Any
 
 logger = structlog.get_logger(__name__)
@@ -17,16 +18,10 @@ class SDNClient:
             controller_url = f"http://{SDN_CONTROLLER_HOST}:{SDN_CONTROLLER_PORT}"
         self.base_url = controller_url.rstrip('/')
         self.api_url = f"{self.base_url}/sdn"
-        self._async_client: Optional[httpx.AsyncClient] = None
-
-    @property
-    def async_client(self) -> httpx.AsyncClient:
-        if self._async_client is None:
-            limits = httpx.Limits(max_keepalive_connections=100, max_connections=500)
-            self._async_client = httpx.AsyncClient(timeout=5.0, limits=limits)
-        return self._async_client
+        self._async_client = None
 
     async def __aenter__(self):
+        self._async_client = httpx.AsyncClient(timeout=5.0)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -47,11 +42,19 @@ class SDNClient:
     async def unblock(self, ip: str) -> bool:
         """Remove DROP flow rule."""
         try:
-            resp = await self.async_client.post(f"{self.api_url}/unblock", json={"ip": ip})
-            if resp.status_code == 200:
-                logger.info("SDN: Unblocked IP", ip=ip)
-                return True
-            logger.error("SDN: Unblock failed", status=resp.status_code, body=resp.text)
+            if self._async_client:
+                resp = await self._async_client.post(f"{self.api_url}/unblock", json={"ip": ip})
+                if resp.status_code == 200:
+                    logger.info("SDN: Unblocked IP", ip=ip)
+                    return True
+                logger.error("SDN: Unblock failed", status=resp.status_code, body=resp.text)
+            else:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.post(f"{self.api_url}/unblock", json={"ip": ip})
+                    if resp.status_code == 200:
+                        logger.info("SDN: Unblocked IP", ip=ip)
+                        return True
+                    logger.error("SDN: Unblock failed", status=resp.status_code, body=resp.text)
         except Exception as e:
             logger.error("SDN: Unblock connection error", error=str(e))
         return False
@@ -67,7 +70,7 @@ class SDNClient:
         return {"blocked_ips": [], "status": "offline"}
 
     async def close(self):
-        if self._async_client is not None:
+        if self._async_client:
             await self._async_client.aclose()
             self._async_client = None
 
