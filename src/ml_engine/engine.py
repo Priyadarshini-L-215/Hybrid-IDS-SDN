@@ -361,33 +361,36 @@ class MLEngine:
         
         # Initialize scores as None (meaning "no opinion/skipped")
         ml_scores = [None] * len(events)
-        valid_anomaly_scores = [None] * len(events) # Default to None for everyone
+        valid_anomaly_scores = [None] * len(events) 
         
         if valid_features and not self.fallback_mode and self.is_ready:
             try:
+                # REUSE: Create numpy array once
                 X = np.array(valid_features, dtype=np.float32)
+                X_scaled = None
                 
                 if self.rf_session:
                     # ONNX path
                     inputs = {self.rf_session.get_inputs()[0].name: X}
                     outputs = self.rf_session.run(None, inputs)
-                    # outputs[1] can be a list of dicts or a numpy array depending on the converter
                     if isinstance(outputs[1], list):
                         ml_scores_valid = [d[1] for d in outputs[1]]
                     else:
                         ml_scores_valid = outputs[1][:, 1]
                 elif self.rf_model and self.scaler:
-                    # Pkl path — handle dimensionality mismatch between extraction and model
+                    # Pkl path
                     expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
                     if X.shape[1] != expected_dim:
                         logger.warning("Feature dimension mismatch, attempting to align", 
                                        extracted=X.shape[1], expected=expected_dim)
                         if X.shape[1] > expected_dim:
-                            X = X[:, :expected_dim]
+                            X_aligned = X[:, :expected_dim]
                         else:
-                            X = np.pad(X, ((0, 0), (0, expected_dim - X.shape[1])), mode='constant')
-                            
-                    X_scaled = self.scaler.transform(X)
+                            X_aligned = np.pad(X, ((0, 0), (0, expected_dim - X.shape[1])), mode='constant')
+                    else:
+                        X_aligned = X
+                        
+                    X_scaled = self.scaler.transform(X_aligned)
                     ml_scores_valid = self.rf_model.predict_proba(X_scaled)[:, 1]
                 else:
                     ml_scores_valid = [0.0] * len(valid_features)
@@ -396,22 +399,13 @@ class MLEngine:
                     ml_scores[idx] = float(ml_scores_valid[i])
                 
                 # 2b. VAE Anomaly Detection (Stage 3)
-                # Only fires for samples where the RF is uncertain (ml_score < suspicious threshold).
-                # This avoids wasting compute on high-confidence RF detections.
                 batch_anomaly_scores = [None] * len(valid_features)
                 
                 if self.vae_detector and self.vae_detector.is_ready:
-                    # Trigger VAE for samples where RF is uncertain
-                    # We use the suspicious threshold from config instead of a hardcoded value.
                     uncertain_mask = np.array(ml_scores_valid, dtype=np.float32) < ML_THRESHOLD_SUSPICIOUS
                     if uncertain_mask.any():
                         X_uncertain = X[uncertain_mask]
-                        
-                        # 1. Get raw MSE and latent vectors
                         latents, mse_raw = self.vae_detector.get_latent_and_mse(X_uncertain)
-                        
-                        # 2. Update and get score from anomaly_scorer
-                        # We also update global latent stats periodically
                         self.anomaly_scorer.update_latent_stats(latents)
                         
                         uncertain_positions = np.where(uncertain_mask)[0]
@@ -423,55 +417,50 @@ class MLEngine:
                                 protocol=proto
                             )
                             batch_anomaly_scores[pos] = score
-                        
-                        n_anomalies = int((np.array(batch_anomaly_scores)[uncertain_positions] > 0.5).sum())
-                        if n_anomalies:
-                            logger.info("VAE flagged potential anomalies",
-                                        count=n_anomalies)
                     valid_anomaly_scores = batch_anomaly_scores
-                else:
-                    # VAE not ready, leave as None
-                    valid_anomaly_scores = [None] * len(valid_features)
-                    
+
                 # 2c. Batch SHAP (Performance optimization)
-                batch_shap_results = {} # Index -> Top 3 features
+                batch_shap_results = {} 
                 if self.shap_explainer:
                     try:
-                        t_shap_start = time.time()
-                        # Use scaled features for SHAP if available
-                        X_shap = X_scaled if 'X_scaled' in locals() else X
+                        # OPTIMIZATION: Only run SHAP for uncertain or suspicious samples
+                        suspicious_mask = (np.array(ml_scores_valid) > 0.1) & (np.array(ml_scores_valid) < 0.95)
                         
-                        shap_vals = self.shap_explainer.shap_values(X_shap)
-                        
-                        # Standardize to 2D (N, M)
-                        if isinstance(shap_vals, list):
-                            pos_class_vals = shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
-                        else:
-                            pos_class_vals = shap_vals
+                        if suspicious_mask.any():
+                            t_shap_start = time.time()
+                            susp_indices = np.where(suspicious_mask)[0]
+                            X_shap_input = (X_scaled if X_scaled is not None else X)[suspicious_mask]
                             
-                        if hasattr(pos_class_vals, "ndim") and pos_class_vals.ndim == 3:
-                            # Handle (N, M, 2) output from some shap versions
-                            pos_class_vals = pos_class_vals[:, :, 1]
+                            shap_vals = self.shap_explainer.shap_values(X_shap_input)
+                            
+                            if shap_vals is not None:
+                                if isinstance(shap_vals, list):
+                                    pos_class_vals = shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
+                                else:
+                                    pos_class_vals = shap_vals
+                                    
+                                if hasattr(pos_class_vals, "ndim") and pos_class_vals.ndim == 3:
+                                    pos_class_vals = pos_class_vals[:, :, 1]
 
-                        # Map back to original indices
-                        for i, v_idx in enumerate(valid_indices):
-                            vals = pos_class_vals[i]
-                            indexed_features = []
-                            for f_idx, v in enumerate(vals):
-                                if f_idx < len(self.feature_order):
-                                    indexed_features.append({
-                                        "feature": self.feature_order[f_idx],
-                                        "impact": float(abs(v))
-                                    })
-                            indexed_features.sort(key=lambda x: x["impact"], reverse=True)
-                            batch_shap_results[v_idx] = indexed_features[:3]
+                                for i, susp_pos in enumerate(susp_indices):
+                                    orig_idx = valid_indices[susp_pos]
+                                    vals = pos_class_vals[i]
+                                    indexed_features = []
+                                    for f_idx, v in enumerate(vals):
+                                        if f_idx < len(self.feature_order):
+                                            indexed_features.append({
+                                                "feature": self.feature_order[f_idx],
+                                                "impact": float(abs(v))
+                                            })
+                                    indexed_features.sort(key=lambda x: x["impact"], reverse=True)
+                                    batch_shap_results[orig_idx] = indexed_features[:3]
 
-                        shap_ms = (time.time() - t_shap_start) * 1000
-                        logger.debug("Batch SHAP calculated", 
-                                     total_ms=round(shap_ms, 2), 
-                                     per_event_ms=round(shap_ms/len(valid_features), 2))
+                                shap_ms = (time.time() - t_shap_start) * 1000
+                                logger.debug("Selective SHAP calculated", 
+                                             count=len(susp_indices),
+                                             total_ms=round(shap_ms, 2))
                     except Exception as e:
-                        logger.warning("Batch SHAP failed", error=str(e))
+                        logger.warning("Selective SHAP failed", error=str(e))
 
             except Exception as e:
                 logger.error("Batch inference failed", error=str(e))

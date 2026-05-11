@@ -27,12 +27,13 @@ class ConnectionManager:
             self.active_connections.discard(websocket)
         logger.info("WebSocket client disconnected", total=len(self.active_connections))
 
-    async def broadcast(self, message: str):
+    async def broadcast_batch(self, messages: list[str]):
         """
-        Broadcast a message to all connected clients.
-        Stale connections (those that fail to receive) are collected and removed
-        after the broadcast round completes to avoid mutating the set mid-iteration.
+        Broadcast a batch of messages to all connected clients.
         """
+        if not messages:
+            return
+
         async with self._lock:
             if not self.active_connections:
                 return
@@ -40,26 +41,22 @@ class ConnectionManager:
 
         stale: set[WebSocket] = set()
 
-        # Send to all connections concurrently; track failures without throwing
-        async def _send_safe(ws: WebSocket):
+        async def _send_batch_safe(ws: WebSocket):
             try:
-                await ws.send_text(message)
+                for msg in messages:
+                    await ws.send_text(msg)
             except Exception:
                 stale.add(ws)
 
-        tasks = [asyncio.create_task(_send_safe(c)) for c in connections]
-
-        # Wait up to 2 seconds for all sends; cancel stragglers
-        done, pending = await asyncio.wait(tasks, timeout=2.0)
+        tasks = [asyncio.create_task(_send_batch_safe(c)) for c in connections]
+        done, pending = await asyncio.wait(tasks, timeout=3.0)
         for t in pending:
             t.cancel()
 
-        # Remove stale connections discovered during this broadcast
         if stale:
             async with self._lock:
                 self.active_connections -= stale
-            logger.warning(
-                "Removed stale WebSocket connections",
-                removed=len(stale),
-                remaining=len(self.active_connections),
-            )
+            logger.warning("Removed stale WebSocket connections", removed=len(stale))
+
+    async def broadcast(self, message: str):
+        await self.broadcast_batch([message])

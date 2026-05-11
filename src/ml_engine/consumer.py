@@ -45,20 +45,25 @@ async def broadcast_and_persist(alerts: list):
     if rc.async_redis_client:
         try:
             pipe = rc.async_redis_client.pipeline()
+            # BATCH ENCODE: Minimize per-item serialization overhead
+            broadcast_payloads = []
             for alert in alerts:
-                # Create a shallow copy and remove large raw_event for real-time broadcast
-                # It will still be persisted to DB via alert_writer (which has the original list)
-                broadcast_payload = alert.copy()
-                broadcast_payload.pop('raw_event', None)
-                
-                alert_json = json.dumps(broadcast_payload, cls=NPEncoder)
-                pipe.xadd(
-                    REDIS_ALERT_STREAM,
-                    {"alert": alert_json},
-                    maxlen=1000
-                )
+                payload = alert.copy()
+                payload.pop('raw_event', None)
+                broadcast_payloads.append(payload)
+            
+            # Use single-pass serialization for the whole batch if possible, 
+            # but xadd needs individual entries. Still, we use list comprehension for speed.
+            alert_jsons = [json.dumps(p, cls=NPEncoder) for p in broadcast_payloads]
+            
+            for alert_json in alert_jsons:
+                pipe.xadd(REDIS_ALERT_STREAM, {"alert": alert_json})
+            
+            # ATOMIC TRIM: Trim once at the end of the batch instead of per-add
+            pipe.xtrim(REDIS_ALERT_STREAM, maxlen=1000)
+            
             await pipe.execute()
-            logger.debug("Broadcasted batch to Redis", count=len(alerts))
+            logger.debug("Batch broadcasted to Redis", count=len(alerts))
         except Exception as e:
             logger.error("Failed to broadcast to Redis", error=str(e))
 

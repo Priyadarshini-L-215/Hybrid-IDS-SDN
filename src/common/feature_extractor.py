@@ -51,8 +51,10 @@ def event_cache(maxsize=128):
             # Create stable fingerprint
             try:
                 # Only hash fields that matter for extraction
-                relevant_data = {k: v for k, v in event_dict.items() if k not in {'timestamp', 'flow_id', 'pcap_cnt'}}
-                fingerprint = hashlib.sha256(json.dumps(relevant_data, sort_keys=True).encode()).hexdigest()
+                # Instead of expensive JSON + SHA256, use a fast tuple fingerprint
+                # We sort the keys once and reuse the order for speed
+                cache_keys = sorted([k for k in event_dict.keys() if k not in {'timestamp', 'flow_id', 'pcap_cnt'}])
+                fingerprint = tuple(event_dict.get(k) for k in cache_keys)
                 
                 if fingerprint in cache:
                     return cache[fingerprint]
@@ -70,57 +72,59 @@ def event_cache(maxsize=128):
     return decorator
 
 # --- STATEFUL TRACKING ---
+from collections import deque, Counter
+
+# --- STATEFUL TRACKING ---
 class StatefulFeatureTracker:
-    def __init__(self, window_size=100):
+    def __init__(self, window_size=10000): # Increased default window size as per plan
         self.window = deque(maxlen=window_size)
         self._lock = threading.Lock()
+        
+        # Multi-level indices for O(1) lookups
+        self.idx_src = Counter()
+        self.idx_dst = Counter()
+        self.idx_src_srv = Counter()
+        self.idx_dst_srv = Counter()
+        self.idx_dst_dport = Counter()
+        self.idx_dst_sport = Counter()
+        self.idx_src_dst = Counter()
 
     def update(self, event_meta):
         with self._lock:
+            # If we're at max capacity, we need to decrement indices for the element being evicted
+            if len(self.window) == self.window.maxlen:
+                old = self.window[0] # peek oldest
+                self._update_indices(old, -1)
+            
             self.window.append(event_meta)
+            self._update_indices(event_meta, 1)
+
+    def _update_indices(self, entry, delta):
+        """Helper to increment/decrement all related indices."""
+        s, d = entry['src_ip'], entry['dst_ip']
+        srv = entry['service']
+        dp, sp = entry['dst_port'], entry['src_port']
+        
+        self.idx_src[s] += delta
+        self.idx_dst[d] += delta
+        self.idx_src_srv[(s, srv)] += delta
+        self.idx_dst_srv[(d, srv)] += delta
+        self.idx_dst_dport[(d, dp)] += delta
+        self.idx_dst_sport[(d, sp)] += delta
+        self.idx_src_dst[(s, d)] += delta
 
     def get_ct_stats(self, src_ip, dst_ip, service, dst_port, src_port):
-        ct_srv_src = 0
-        ct_srv_dst = 0
-        ct_dst_ltm = 0
-        ct_src_ltm = 0
-        ct_src_dport_ltm = 0
-        ct_dst_sport_ltm = 0
-        ct_dst_src_ltm = 0
-
-        # Copy the deque under lock (O(1) hold), then iterate the snapshot without blocking
-        with self._lock:
-            snapshot = list(self.window)
-
-        for entry in snapshot:
-            # Matches Source IP
-            if entry['src_ip'] == src_ip:
-                ct_src_ltm += 1
-                if entry['service'] == service:
-                    ct_srv_src += 1
-                if entry['dst_ip'] == dst_ip:
-                    ct_dst_src_ltm += 1
-
-            # Matches Destination IP
-            if entry['dst_ip'] == dst_ip:
-                ct_dst_ltm += 1
-                if entry['service'] == service:
-                    ct_srv_dst += 1
-                if entry['dst_port'] == dst_port:
-                    ct_src_dport_ltm += 1
-
-            # Matches Source Port for destination sport check
-            if entry['src_port'] == src_port and entry['dst_ip'] == dst_ip:
-                ct_dst_sport_ltm += 1
-
+        """O(1) lookups instead of O(n) linear scan."""
+        # Note: We don't hold the lock during read for maximum performance.
+        # Minimal risk of slightly stale counts during concurrent update/read.
         return {
-            'ct_srv_src': float(ct_srv_src),
-            'ct_srv_dst': float(ct_srv_dst),
-            'ct_dst_ltm': float(ct_dst_ltm),
-            'ct_src_ltm': float(ct_src_ltm),
-            'ct_src_dport_ltm': float(ct_src_dport_ltm),
-            'ct_dst_sport_ltm': float(ct_dst_sport_ltm),
-            'ct_dst_src_ltm': float(ct_dst_src_ltm)
+            'ct_srv_src': float(self.idx_src_srv.get((src_ip, service), 0)),
+            'ct_srv_dst': float(self.idx_dst_srv.get((dst_ip, service), 0)),
+            'ct_dst_ltm': float(self.idx_dst.get(dst_ip, 0)),
+            'ct_src_ltm': float(self.idx_src.get(src_ip, 0)),
+            'ct_src_dport_ltm': float(self.idx_dst_dport.get((dst_ip, dst_port), 0)),
+            'ct_dst_sport_ltm': float(self.idx_dst_sport.get((dst_ip, src_port), 0)),
+            'ct_dst_src_ltm': float(self.idx_src_dst.get((src_ip, dst_ip), 0))
         }
 
 # Singleton instance for the process
@@ -330,4 +334,11 @@ def validate_feature_vector(vector: list, expected_dim: int = None) -> bool:
 
 def extract_features_batch(events: list[dict], features: list = None) -> list[list | None]:
     if features is None: features = load_feature_names()
-    return [extract_features_from_eve(event, features) for event in events]
+    expected_dim = len(features)
+    vectors = []
+    for event in events:
+        vec = extract_features_from_eve(event, features)
+        if vec and len(vec) < expected_dim:
+            vec.extend([0.0] * (expected_dim - len(vec)))
+        vectors.append(vec)
+    return vectors

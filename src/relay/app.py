@@ -71,13 +71,18 @@ async def redis_stream_listener():
             
             if streams:
                 for stream_name, messages in streams:
-                    if messages:
-                        logger.debug("Received stream messages", count=len(messages))
-                    for msg_id, data in messages:
-                        alert_json = data.get("alert")
-                        if alert_json:
-                            await manager.broadcast(alert_json)
-                        last_id = msg_id
+                    if not messages:
+                        continue
+                    
+                    logger.debug("Received stream messages", count=len(messages))
+                    
+                    # BATCH BROADCAST: Send all messages in the batch at once
+                    alert_jsons = [m[1].get("alert") for m in messages if m[1].get("alert")]
+                    if alert_jsons:
+                        await manager.broadcast_batch(alert_jsons)
+                    
+                    # Update last_id to the last message in the batch
+                    last_id = messages[-1][0]
             
         except Exception as e:
             logger.error("Stream listener error", error=str(e), exc_info=True)

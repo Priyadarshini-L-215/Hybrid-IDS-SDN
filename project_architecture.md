@@ -1,87 +1,121 @@
-# Sentinel Core: Project Architecture
+# Sentinel Core: V4 Hybrid Project Architecture
 
-This document provides a detailed visual and technical breakdown of the Sentinel Core V4 data pipeline and ML inference architecture.
+This document provides a comprehensive technical overview of the Sentinel Core V4 architecture. Sentinel is a hybrid Intrusion Detection and Prevention System (IDS/IPS) that combines signature-based detection with advanced machine learning and Software Defined Networking (SDN) capabilities.
 
-## 🏗️ System Data Flow
+## 🏗️ System Architecture Map
 
-The following diagram illustrates the end-to-end journey of a network packet from ingestion to visualization and active mitigation.
+The following diagram illustrates the multi-layered data pipeline, from raw packet ingestion to machine learning inference, real-time visualization, and automated mitigation.
 
 ```mermaid
 graph TD
-    subgraph Ingestion_Layer [Ingestion Layer]
-        NT[Network Traffic] --> PI[Packet Inspection]
-        PI --> SIDS[Suricata IDS/IPS]
-        SIDS -- "EVE JSON (Unix Socket)" --> IB[Ingestion Bridge]
-        IB -- "Queueing" --> RM[Redis Message Bus]
+    subgraph External_Sources [External Intelligence & Traffic]
+        NT[Network Traffic]
+        CTI[AlienVault OTX / CTI]
+        GEO[GeoIP Database]
     end
 
-    subgraph ML_Inference_Engine [ML Inference Engine]
+    subgraph Ingestion_Layer [Data Acquisition Layer]
+        NT --> SIDS[Suricata IDS/IPS Mode]
+        SIDS -- "EVE JSON (Unix Socket)" --> ING[Ingestion Bridge]
+        ING -- "Stream Buffer" --> REDIS_BUF[(Redis Streams)]
+    end
+
+    subgraph ML_Inference_Core [Sentinel ML Engine V4]
         direction TB
-        RM -- "Fetch Event" --> FE[Feature Extractor]
-        FE -- "49 Features" --> MLP{ML Pipeline}
+        REDIS_BUF -- "Fetch Event" --> CNS[Worker Pool / Consumers]
+        CNS --> FLOW[Flow Aggregator]
+        FLOW --> FE[Feature Extractor - 49 Features]
         
-        MLP -- "Stage 1" --> RF[Random Forest - Known Attacks]
-        MLP -- "Stage 2" --> VAE[VAE - Anomaly Detection]
+        subgraph Pipeline [Inference Pipeline]
+            FE --> RF[RF Model - Known Attacks]
+            FE --> VAE[VAE - Anomaly Detection]
+            RF --> SCO[Fusion & Scoring]
+            VAE --> SCO
+        end
         
-        RF --> DE[Decision Engine]
-        VAE --> DE
+        SCO --> DE[Decision Engine]
+        CTI -. "Reputation" .-> DE
+        GEO -. "Location" .-> DE
         
-        DE -- "Classification" --> SHAP[SHAP Explainer - XAI]
-        DE -- "High Confidence" --> IPS[Active IPS Module - Firewall Block]
+        DE --> MITRE[MITRE ATT&CK Mapper]
+        DE --> SHAP[SHAP Explainer - XAI]
     end
 
-    subgraph Telemetry_Visualization [Telemetry & Visualization]
-        DE -- "Telemetry" --> RAS[Redis Alert Stream]
-        RAS -- "WebSocket Bridge" --> FR[FastAPI Relay]
-        FR -- "Real-time Feed" --> RD[React Dashboard UI]
+    subgraph Response_Mitigation [Defense & Response]
+        DE -- "Block List" --> FW[Firewall Module - IPSet/IPv6]
+        DE -- "OpenFlow" --> SDN[SDN Connector - Traffic Steering]
+    end
+
+    subgraph Persistence_Monitoring [Storage & Observability]
+        DE -- "Store" --> DB[(Forensics Database - SQLite/PG)]
+        CNS -- "Heartbeat" --> REDIS_HB[(Redis Health Registry)]
+        
+        subgraph Monitoring [System Health]
+            MET[Prometheus Metrics]
+            LOG[Structlog Centralized Logging]
+            DRIFT[Drift Detection & Baseline]
+        end
+    end
+
+    subgraph Delivery_Visualization [Real-time UI & API]
+        DB -.-> RELAY[FastAPI Relay API]
+        REDIS_BUF -- "Alert Stream" --> RELAY
+        RELAY -- "WebSocket" --> UI[React Dashboard UI]
     end
 
     %% Styling
     classDef ingestion fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#fff
-    classDef engine fill:#0f172a,stroke:#1e293b,stroke-width:2px,color:#fff
+    classDef engine fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#fff
     classDef visual fill:#1e293b,stroke:#10b981,stroke-width:2px,color:#fff
     classDef decision fill:#312e81,stroke:#4f46e5,stroke-width:2px,color:#fff
     classDef critical fill:#450a0a,stroke:#dc2626,stroke-width:2px,color:#fff
+    classDef storage fill:#334155,stroke:#94a3b8,stroke-width:2px,color:#fff
 
-    class NT,PI,SIDS,IB,RM ingestion
-    class FE,MLP,RF,VAE engine
-    class SHAP visual
+    class NT,CTI,GEO,SIDS,ING ingestion
+    class CNS,FLOW,FE,RF,VAE,SCO,MITRE,SHAP,MET,LOG,DRIFT engine
     class DE decision
-    class IPS critical
-    class RAS,FR,RD visual
+    class FW,SDN critical
+    class DB,REDIS_BUF,REDIS_HB storage
+    class RELAY,UI visual
 ```
 
-## 🛠️ Component Breakdown
+## 🛠️ Detailed Component Breakdown
 
-### 1. Ingestion Layer
-*   **Suricata IDS**: Operates in IPS mode, performing deep packet inspection against 30,000+ signatures.
-*   **Ingestion Bridge**: A custom Rust/Python high-performance bridge that normalizes Suricata's EVE JSON and pushes to Redis Streams.
+### 1. Data Acquisition Layer
+*   **Suricata (IPS Mode)**: Performs deep packet inspection (DPI) and signature matching. It runs in inline mode to allow active traffic blocking.
+*   **Ingestion Bridge**: A high-performance component that monitors Suricata's Unix socket, normalizes EVE JSON events, and buffers them into Redis Streams to prevent data loss during traffic spikes.
 
-### 2. ML Inference Engine
-*   **Feature Extractor**: Performs stateful flow tracking to generate 49 complex features (e.g., `ct_srv_src`, `sload`, `dload`).
-*   **ML Pipeline**:
-    *   **Random Forest (ONNX)**: Trained on the UNSW-NB15 dataset for high-accuracy classification of known attack vectors (DDoS, Recon, Exploits).
-    *   **VAE (Variational Autoencoder)**: A PyTorch-based anomaly detector that identifies "Zero-Day" threats by measuring reconstruction error (MSE).
-*   **Decision Engine**: Corroborates ML scores, signature hits, and CTI reputation to make the final verdict.
-*   **SHAP Explainer**: Provides local interpretability for every ML decision, highlighting which features (e.g., source load, packet count) triggered the alert.
+### 2. ML Inference Engine V4
+*   **Flow Aggregator & Feature Extractor**: Converts raw packet events into stateful network flows, extracting 49 complex features (e.g., protocol ratios, load metrics, flow duration).
+*   **Dual-Model Pipeline**:
+    *   **Random Forest (ONNX)**: Optimized for classifying known attack vectors (DDoS, Recon, Exploits) with high precision.
+    *   **Variational Autoencoder (VAE)**: Detects "Zero-Day" anomalies by measuring reconstruction error (MSE) against a learned baseline of "normal" traffic.
+*   **Decision Engine**: A multi-criteria controller that fuses ML scores, signature hits, CTI reputation (AlienVault), and GeoIP context to produce a final security verdict.
+*   **SHAP Explainer**: Provides eXplainable AI (XAI) by identifying the specific features that contributed most to a "malicious" classification.
 
-### 3. Active Mitigation (IPS)
-*   **Firewall Module**: Interfaces with `ipset` and `iptables` to drop traffic from malicious IPs at the kernel level.
-*   **SDN Connector**: (Optional) Interfaces with Ryu/OpenFlow controllers to steer malicious traffic to honeypots.
+### 3. Automated Mitigation
+*   **Firewall Backend**: Interfaces with `iptables` and `ipset` for kernel-level blocking. Supports both IPv4 and IPv6 protocols.
+*   **SDN Connector**: Communicates with SDN controllers (e.g., Ryu via OpenFlow) to dynamically steer malicious traffic to honeypots or isolate compromised network segments.
 
-### 4. Telemetry & UI
-*   **FastAPI Relay**: Serves as the central hub, providing a REST API for forensics and a high-speed WebSocket stream for the dashboard.
-*   **React Dashboard**: A modern, Framer-Motion-powered UI for real-time SOC operations.
+### 4. Storage & Observability
+*   **Forensics Database**: Stores detailed alert metadata, MITRE ATT&CK mappings, and SHAP values for long-term audit and analysis.
+*   **Redis Registry**: Manages service heartbeats, real-time alert streams, and worker state.
+*   **Observability Stack**:
+    *   **Prometheus**: Tracks system performance metrics (inference latency, PPS, block counts).
+    *   **Structlog**: Provides structured, searchable logs for debugging and system auditing.
+    *   **Drift Detector**: Periodically monitors model performance to trigger automated retraining when network patterns shift.
 
----
-
-## 📈 Pipeline Performance Metrics
-
-| Metric | Performance |
-| :--- | :--- |
-| **Ingestion Latency** | < 5ms (Suricata to Redis) |
-| **Inference Latency** | < 15ms (RF + VAE + SHAP) |
-| **Throughput** | ~2,500 PPS per worker |
-| **Database Sync** | Async Batch (50 events/flush) |
+### 5. Management & UI
+*   **FastAPI Relay**: A centralized hub providing a RESTful API for configuration and high-speed WebSockets for real-time telemetry.
+*   **React Dashboard**: A premium, responsive interface featuring real-time attack maps, forensic drills, and system health monitoring.
 
 ---
+
+## 📈 Performance Targets
+
+| Component | Target Latency | Scale Capacity |
+| :--- | :--- | :--- |
+| **Ingestion Pipeline** | < 2ms | 50,000 EPS |
+| **Feature Extraction** | < 8ms | 10,000 Flows/sec |
+| **ML Inference (RF+VAE)** | < 12ms | 5,000 Inf/sec |
+| **Mitigation Action** | < 50ms | 1,000 Blocks/sec |
