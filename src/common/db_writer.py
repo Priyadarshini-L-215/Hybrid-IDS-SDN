@@ -67,17 +67,21 @@ class AsyncAlertWriter:
                 
                 # 3. Perform batch write
                 if batch:
-                    start_t = time.time()
-                    # We use the sync batch_add_alerts but wrap it in an executor
-                    # to avoid blocking the event loop
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, db.batch_add_alerts, batch)
-                    
-                    for _ in range(len(batch)):
-                        self.queue.task_done()
-                    
-                    lat = (time.time() - start_t) * 1000
-                    logger.debug("Async batch write complete", count=len(batch), latency_ms=round(lat, 2))
+                    try:
+                        start_t = time.time()
+                        # We use the sync batch_add_alerts but wrap it in an executor
+                        # to avoid blocking the event loop
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, db.batch_add_alerts, batch)
+
+                        lat = (time.time() - start_t) * 1000
+                        logger.debug("Async batch write complete", count=len(batch), latency_ms=round(lat, 2))
+                    except Exception as e:
+                        logger.error("AsyncAlertWriter db write error", error=str(e))
+                    finally:
+                        # Ensure we mark the items as processed even if the DB write fails
+                        for _ in range(len(batch)):
+                            self.queue.task_done()
                     
             except asyncio.TimeoutError:
                 # No alerts arrived within the flush interval
