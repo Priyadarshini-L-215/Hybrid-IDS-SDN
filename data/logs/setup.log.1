@@ -1,0 +1,95 @@
+[2026-05-03 17:16:03] [INFO] Running pre-flight validation...
+[2026-05-03 17:16:03] [ERROR] Pre-flight validation failed. Please fix the issues above.
+[2026-05-03 17:16:28] [INFO] Running pre-flight validation...
+[2026-05-03 17:16:29] [INFO] Created log directory: /home/preetham/Hybrid-IDS-SDN/data/logs
+[2026-05-03 17:16:29] [INFO] Checking and installing system dependencies...
+[2026-05-03 17:16:29] [INFO] Missing packages: python3-dev python3-pip python3-venv build-essential curl git psmisc net-tools nmap nftables iptables redis-server suricata ipset software-properties-common openvswitch-switch hping3
+[2026-05-03 17:16:29] [INFO] Installing missing packages (may require sudo password)...
+[2026-05-03 17:17:13] [INFO] Adding Suricata stable repository...
+[2026-05-03 17:19:08] [INFO] Marked step as complete: system_packages
+[2026-05-03 17:19:08] [SUCCESS] System packages installed successfully
+[2026-05-03 17:19:08] [INFO] Checking Node.js...
+[2026-05-03 17:19:08] [INFO] Node.js 20.19.4 already installed (meets requirements)
+[2026-05-03 17:19:08] [INFO] Marked step as complete: nodejs
+[2026-05-03 17:19:08] [INFO] Creating Python virtual environment...
+[2026-05-03 17:19:09] [INFO] Virtual environment created, upgrading pip...
+[2026-05-03 17:19:11] [INFO] Installing Python dependencies from requirements.txt...
+[2026-05-03 17:19:14] [ERROR] Failed to install Python dependencies
+[2026-05-03 17:19:14] [ERROR] Python venv setup failed
+[2026-05-03 17:24:28] [INFO] Running pre-flight validation...
+[2026-05-03 17:24:28] [INFO] Loading previous setup state from /home/preetham/Hybrid-IDS-SDN/.setup_state
+[2026-05-03 17:24:28] [INFO] Created log directory: /home/preetham/Hybrid-IDS-SDN/data/logs
+[2026-05-03 17:24:28] [INFO] System packages already installed (skipping)
+[2026-05-03 17:24:28] [INFO] Node.js already set up (skipping)
+[2026-05-03 17:24:28] [INFO] Virtual environment already exists, validating...
+[2026-05-03 17:24:28] [INFO] Existing venv appears valid, reusing it
+[2026-05-03 17:24:28] [INFO] Marked step as complete: python_venv
+[2026-05-03 17:24:28] [INFO] Installing UI dependencies via npm...
+[2026-05-03 17:24:30] [ERROR] Failed to install UI dependencies
+[2026-05-03 17:24:30] [ERROR] UI dependencies setup failed
+[2026-05-03 17:25:06] [INFO] Running pre-flight validation...
+[2026-05-03 17:25:06] [INFO] Loading previous setup state from /home/preetham/Hybrid-IDS-SDN/.setup_state
+[2026-05-03 17:25:06] [INFO] Created log directory: /home/preetham/Hybrid-IDS-SDN/data/logs
+[2026-05-03 17:25:06] [INFO] System packages already installed (skipping)
+[2026-05-03 17:25:06] [INFO] Node.js already set up (skipping)
+[2026-05-03 17:25:06] [INFO] Python venv already set up (skipping)
+[2026-05-03 17:25:06] [INFO] node_modules already exists
+[2026-05-03 17:25:06] [INFO] Existing node_modules appears valid, reusing
+[2026-05-03 17:25:06] [INFO] Marked step as complete: ui_dependencies
+[2026-05-03 17:25:06] [INFO] Configuring Suricata...
+[2026-05-03 17:25:06] [INFO] Detected primary network interface: wlo1
+[2026-05-03 17:25:06] [INFO] Deploying Suricata configuration (requires sudo)...
+[2026-05-03 17:25:06] [SUCCESS] Suricata configuration deployed
+[2026-05-03 17:25:06] [INFO] Marked step as complete: suricata_config
+[2026-05-03 17:25:06] [INFO] Updating Suricata rules (this may take a minute)...
+[2026-05-03 17:25:49] [SUCCESS] Suricata rules updated
+[2026-05-03 17:25:49] [INFO] Marked step as complete: suricata_rules
+[2026-05-03 17:25:49] [INFO] Enabling services...
+[2026-05-03 17:25:50] [INFO] Starting Redis service...
+[2026-05-03 17:25:50] [SUCCESS] Redis started
+[2026-05-03 17:25:50] [INFO] Marked step as complete: services
+[2026-05-03 17:25:50] [INFO] Configuring log rotation...
+[2026-05-03 17:25:50] [SUCCESS] Logrotate configuration created at /etc/logrotate.d/sentinel_core
+[2026-05-03 17:25:50] [INFO] Marked step as complete: logrotate
+[2026-05-03 17:25:50] [INFO] Creating .env configuration file...
+[2026-05-03 17:25:50] [SUCCESS] Created .env file at /home/preetham/Hybrid-IDS-SDN/.env
+[2026-05-03 17:25:50] [SUCCESS] SENTINEL CORE SETUP IS COMPLETE!
+[2026-05-03 17:27:26] [INFO] Running pre-flight validation...
+[2026-05-03 17:27:26] [INFO] Loading previous setup state from /home/preetham/Hybrid-IDS-SDN/.setup_state
+[2026-05-03 17:27:26] [INFO] Created log directory: /home/preetham/Hybrid-IDS-SDN/data/logs
+[2026-05-03 17:27:26] [INFO] System packages already installed (skipping)
+[2026-05-03 17:27:26] [INFO] Node.js already set up (skipping)
+[2026-05-03 17:27:26] [INFO] Python venv already set up (skipping)
+[2026-05-03 17:27:26] [INFO] UI dependencies already installed (skipping)
+[2026-05-03 17:27:26] [INFO] Suricata already configured (skipping)
+[2026-05-03 17:27:26] [INFO] Suricata rules already updated (skipping)
+[2026-05-03 17:27:26] [INFO] Services already enabled (skipping)
+[2026-05-03 17:27:26] [INFO] Logrotate already configured (skipping)
+[2026-05-03 17:27:26] [INFO] .env file already exists (skipping)
+[2026-05-03 17:27:26] [SUCCESS] SENTINEL CORE SETUP IS COMPLETE!
+[2026-05-03 17:28:01] [INFO] Running pre-flight validation...
+[2026-05-03 17:28:01] [INFO] Loading previous setup state from /home/preetham/Hybrid-IDS-SDN/.setup_state
+[2026-05-03 17:28:01] [INFO] Created log directory: /home/preetham/Hybrid-IDS-SDN/data/logs
+[2026-05-03 17:28:01] [INFO] System packages already installed (skipping)
+[2026-05-03 17:28:01] [INFO] Node.js already set up (skipping)
+[2026-05-03 17:28:01] [INFO] Python venv already set up (skipping)
+[2026-05-03 17:28:01] [INFO] UI dependencies already installed (skipping)
+[2026-05-03 17:28:01] [INFO] Suricata already configured (skipping)
+[2026-05-03 17:28:01] [INFO] Suricata rules already updated (skipping)
+[2026-05-03 17:28:01] [INFO] Services already enabled (skipping)
+[2026-05-03 17:28:01] [INFO] Logrotate already configured (skipping)
+[2026-05-03 17:28:01] [INFO] .env file already exists (skipping)
+[2026-05-03 17:28:01] [SUCCESS] SENTINEL CORE SETUP IS COMPLETE!
+[2026-05-03 17:32:12] [INFO] Running pre-flight validation...
+[2026-05-03 17:32:12] [INFO] Loading previous setup state from /home/preetham/Hybrid-IDS-SDN/.setup_state
+[2026-05-03 17:32:12] [INFO] Created log directory: /home/preetham/Hybrid-IDS-SDN/data/logs
+[2026-05-03 17:32:12] [INFO] System packages already installed (skipping)
+[2026-05-03 17:32:12] [INFO] Node.js already set up (skipping)
+[2026-05-03 17:32:12] [INFO] Python venv already set up (skipping)
+[2026-05-03 17:32:12] [INFO] UI dependencies already installed (skipping)
+[2026-05-03 17:32:12] [INFO] Suricata already configured (skipping)
+[2026-05-03 17:32:12] [INFO] Suricata rules already updated (skipping)
+[2026-05-03 17:32:12] [INFO] Services already enabled (skipping)
+[2026-05-03 17:32:12] [INFO] Logrotate already configured (skipping)
+[2026-05-03 17:32:12] [INFO] .env file already exists (skipping)
+[2026-05-03 17:32:12] [SUCCESS] SENTINEL CORE SETUP IS COMPLETE!

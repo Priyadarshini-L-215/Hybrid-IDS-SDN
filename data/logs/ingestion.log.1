@@ -1,0 +1,38 @@
+Traceback (most recent call last):
+  File "/home/preetham/Hybrid-IDS-SDN/src/ml_engine/ingestion.py", line 7, in <module>
+    import structlog
+ModuleNotFoundError: No module named 'structlog'
+Traceback (most recent call last):
+  File "/home/preetham/Hybrid-IDS-SDN/src/ml_engine/ingestion.py", line 14, in <module>
+    from common.schemas import RawEvent
+  File "/home/preetham/Hybrid-IDS-SDN/src/common/schemas.py", line 1, in <module>
+    from pydantic import BaseModel, Field, ConfigDict
+ModuleNotFoundError: No module named 'pydantic'
+Traceback (most recent call last):
+  File "/home/preetham/Hybrid-IDS-SDN/src/ml_engine/ingestion.py", line 7, in <module>
+    import structlog
+ModuleNotFoundError: No module named 'structlog'
+[2m2026-05-03T12:03:09.360923Z[0m [[32m[1minfo     [0m] [1mIngestion Service Starting    [0m [36msocket[0m=[35m/tmp/sentinel_suricata.sock[0m
+{"socket": "/tmp/sentinel_suricata.sock", "event": "Ingestion Service Starting", "level": "info", "timestamp": "2026-05-03T12:03:09.360923Z"}
+[2m2026-05-03T12:03:09.363178Z[0m [[32m[1minfo     [0m] [1mServer listening              [0m [36mpath[0m=[35m/tmp/sentinel_suricata.sock[0m
+{"path": "/tmp/sentinel_suricata.sock", "event": "Server listening", "level": "info", "timestamp": "2026-05-03T12:03:09.363178Z"}
+[2m2026-05-03T12:03:10.363254Z[0m [[32m[1minfo     [0m] [1mNew connection accepted       [0m [36mpeer[0m=[35m[0m
+{"peer": "", "event": "New connection accepted", "level": "info", "timestamp": "2026-05-03T12:03:10.363254Z"}
+[2m2026-05-03T12:03:10.363464Z[0m [[32m[1minfo     [0m] [1mFlow Aggregator initialized   [0m [36midle_timeout[0m=[35m5.0[0m [36mwindow[0m=[35m10.0[0m
+{"window": 10.0, "idle_timeout": 5.0, "event": "Flow Aggregator initialized", "level": "info", "timestamp": "2026-05-03T12:03:10.363464Z"}
+/home/preetham/Hybrid-IDS-SDN/src/ml_engine/ingestion.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "ts": datetime.utcnow().isoformat() + "Z",
+[2m2026-05-03T12:05:56.087208Z[0m [[32m[1minfo     [0m] [1mIngestion Service Starting    [0m [36msocket[0m=[35m/tmp/sentinel_suricata.sock[0m
+{"socket": "/tmp/sentinel_suricata.sock", "event": "Ingestion Service Starting", "level": "info", "timestamp": "2026-05-03T12:05:56.087208Z"}
+[2m2026-05-03T12:05:56.089689Z[0m [[32m[1minfo     [0m] [1mServer listening              [0m [36mpath[0m=[35m/tmp/sentinel_suricata.sock[0m
+{"path": "/tmp/sentinel_suricata.sock", "event": "Server listening", "level": "info", "timestamp": "2026-05-03T12:05:56.089689Z"}
+[2m2026-05-03T12:05:56.108098Z[0m [[32m[1minfo     [0m] [1mNew connection accepted       [0m [36mpeer[0m=[35m[0m
+{"peer": "", "event": "New connection accepted", "level": "info", "timestamp": "2026-05-03T12:05:56.108098Z"}
+[2m2026-05-03T12:05:56.108331Z[0m [[32m[1minfo     [0m] [1mFlow Aggregator initialized   [0m [36midle_timeout[0m=[35m5.0[0m [36mwindow[0m=[35m10.0[0m
+{"window": 10.0, "idle_timeout": 5.0, "event": "Flow Aggregator initialized", "level": "info", "timestamp": "2026-05-03T12:05:56.108331Z"}
+[2m2026-05-03T12:06:00.454946Z[0m [[32m[1minfo     [0m] [1mNew connection accepted       [0m [36mpeer[0m=[35m[0m
+{"peer": "", "event": "New connection accepted", "level": "info", "timestamp": "2026-05-03T12:06:00.454946Z"}
+[2m2026-05-03T12:06:00.455151Z[0m [[32m[1minfo     [0m] [1mFlow Aggregator initialized   [0m [36midle_timeout[0m=[35m5.0[0m [36mwindow[0m=[35m10.0[0m
+{"window": 10.0, "idle_timeout": 5.0, "event": "Flow Aggregator initialized", "level": "info", "timestamp": "2026-05-03T12:06:00.455151Z"}
+/home/preetham/Hybrid-IDS-SDN/src/ml_engine/ingestion.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "ts": datetime.utcnow().isoformat() + "Z",
