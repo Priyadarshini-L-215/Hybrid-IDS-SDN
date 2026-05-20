@@ -89,13 +89,19 @@ def evaluate_dataset(csv_source: Union[str, Path, io.BytesIO], ml_engine, label_
              return {"success": False, "error": "ML Engine models are not loaded or ready."}
 
         # 3. Decision Logic (Classification)
-        # Apply the same thresholds used in real-time inference
         predictions = []
-        for score in ml_scores:
+        
+        # Pre-calculate anomaly scores if available
+        anomaly_scores = np.zeros(len(X))
+        if ml_engine.vae_detector and ml_engine.vae_detector.is_ready:
+            logger.info("Calculating VAE anomaly scores for evaluation")
+            anomaly_scores = ml_engine.vae_detector.score(X)
+
+        for i, score in enumerate(ml_scores):
             classification, _ = ml_engine.decision_engine.decide(
                 sig_present=False, 
                 ml_score=float(score),
-                anomaly_score=0.0
+                anomaly_score=float(anomaly_scores[i])
             )
             
             # Map to binary labels for comparison with dataset

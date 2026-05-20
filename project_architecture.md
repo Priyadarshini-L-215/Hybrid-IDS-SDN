@@ -95,7 +95,7 @@ graph TD
 
 ### 3. Automated Mitigation
 *   **Firewall Backend**: Interfaces with `iptables` and `ipset` for kernel-level blocking. Supports both IPv4 and IPv6 protocols.
-*   **SDN Connector**: Communicates with SDN controllers (e.g., Ryu via OpenFlow) to dynamically steer malicious traffic to honeypots or isolate compromised network segments.
+*   **Hybrid SDN Connector**: (Optional) Communicates with SDN controllers (e.g., Ryu) to steer malicious traffic. Designed with a fail-safe fallback to legacy firewall mode if the SDN controller is unavailable.
 
 ### 4. Storage & Observability
 *   **Forensics Database**: Stores detailed alert metadata, MITRE ATT&CK mappings, and SHAP values for long-term audit and analysis.
@@ -103,11 +103,25 @@ graph TD
 *   **Observability Stack**:
     *   **Prometheus**: Tracks system performance metrics (inference latency, PPS, block counts).
     *   **Structlog**: Provides structured, searchable logs for debugging and system auditing.
-    *   **Drift Detector**: Periodically monitors model performance to trigger automated retraining when network patterns shift.
 
 ### 5. Management & UI
 *   **FastAPI Relay**: A centralized hub providing a RESTful API for configuration and high-speed WebSockets for real-time telemetry.
 *   **React Dashboard**: A premium, responsive interface featuring real-time attack maps, forensic drills, and system health monitoring.
+
+## 🛡️ Resilience & Reliability Engine
+
+To ensure 24/7 operational stability, Sentinel Core V4 includes a dedicated resilience layer:
+
+*   **Supervisor Loop**: The `start.sh` script acts as a lightweight supervisor, automatically restarting the Ingestion Bridge, ML Consumer, or Relay API if they crash or exit unexpectedly.
+*   **Sudo Privilege Heartbeat**: Background processes maintain a permission "heartbeat" to ensure long-running services (like Suricata) never lose access to restricted networking hardware due to sudo timeouts.
+*   **Parallel Boot Sequence**: Independent services are initialized in parallel to reduce system boot time by 60%, with health-check barriers ensuring dependent components only start when their precursors (like Redis) are ready.
+*   **Absolute Health Checks**: The installer (`setup.sh`) utilizes runtime verification rather than cached state, ensuring the virtual environment and system dependencies are functional even after OS updates.
+
+## 💻 Platform & Hardware Support
+
+*   **Adaptive OS Support**: Optimized for modern Linux distributions, including experimental support for **Ubuntu 26.04 (Resolute)**.
+*   **Experimental Python 3.14+**: Implements custom `PYO3` and `Setuptools` build-flags to support next-generation Python runtimes.
+*   **CPU-Only Optimization**: Automatically detects hardware capabilities and defaults to **CPU-optimized PyTorch** binaries to ensure high performance on servers without NVIDIA GPUs.
 
 ---
 

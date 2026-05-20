@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,7 +35,7 @@ async def emit_heartbeat():
         await asyncio.sleep(10)
         uptime = time.time() - _STATS["start_time"]
         heartbeat = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             "component": "ingestion",
             "uptime_sec": round(uptime, 2),
             "packets": _STATS["packets_received"],

@@ -29,7 +29,7 @@ def mock_flow_event():
     }
 
 def test_extract_features_basic(mock_flow_event):
-    features = load_feature_names()
+    features = DEFAULT_FEATURES
     vector = extract_features_from_eve(mock_flow_event, features)
     
     assert vector is not None
@@ -61,7 +61,7 @@ def test_extract_features_zero_pkts():
             "age": 5
         }
     }
-    vector = extract_features_from_eve(event)
+    vector = extract_features_from_eve(event, features=DEFAULT_FEATURES)
     assert vector is not None
     
     # dload = (bwd_bytes * 8) / max(age, 0.001) = (500 * 8) / 5 = 800.0
@@ -72,7 +72,7 @@ def test_protocol_mapping():
     # Test known protocol
     # In V4, app_proto is encoded at the end
     event_http = {"event_type": "flow", "app_proto": "http", "flow": {}}
-    vector_http = extract_features_from_eve(event_http)
+    vector_http = extract_features_from_eve(event_http, features=DEFAULT_FEATURES)
     # app_proto is the last feature (index 48)
     # We don't know the exact encoding without the model, but it should be a float
     assert isinstance(vector_http[48], float)
@@ -102,7 +102,7 @@ def test_tcp_window_handling():
         },
         "flow": {}
     }
-    vector = extract_features_from_eve(event)
+    vector = extract_features_from_eve(event, features=DEFAULT_FEATURES)
     
     idx_swin = DEFAULT_FEATURES.index("swin")
     idx_dwin = DEFAULT_FEATURES.index("dwin")

@@ -121,11 +121,15 @@ check_disk_space() {
 check_model_files() {
     local missing=0
     local models=(
+        "models/manifest.json"
+        "models/model_meta.json"
         "models/rf_model.pkl"
         "models/scaler.pkl"
         "models/vae_encoder.keras"
         "models/vae_decoder.keras"
         "models/vae_scaler.pkl"
+        "models/vae_config.json"
+        "models/feature_schema.json"
         "models/feature_order.json"
     )
     

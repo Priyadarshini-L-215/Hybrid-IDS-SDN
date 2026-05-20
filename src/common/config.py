@@ -44,7 +44,7 @@ def refresh_config():
            BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, DEV_MODE, \
            ALIENTVAULT_KEY, PCAP_ENABLED, SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, \
            SDN_BRIDGE_NAME, SDN_HONEYPOT_IP, SDN_FALLBACK_TO_IPSET, \
-           BATCH_SIZE, BATCH_FLUSH_INTERVAL, REDIS_DB, AUTOENCODER_THRESHOLD
+           BATCH_SIZE, BATCH_FLUSH_INTERVAL, REDIS_DB, AUTOENCODER_THRESHOLD, DB_RETENTION_DAYS
     
     YAML_CONFIG = _load_yaml_config()
     
@@ -99,6 +99,12 @@ def refresh_config():
     SDN_BRIDGE_NAME = get_cfg("sdn.bridge_name", "br-sentinel")
     SDN_HONEYPOT_IP = get_cfg("sdn.honeypot_ip", "10.99.0.2")
     SDN_FALLBACK_TO_IPSET = get_cfg("sdn.fallback_to_ipset", True)
+    
+    # DB Retention
+    DB_RETENTION_DAYS = int(get_cfg("system.db_retention_days", 7))
+    
+    # Precedence: Env > YAML > Default
+    AUTOENCODER_THRESHOLD = float(os.environ.get("AUTOENCODER_THRESHOLD", get_cfg("detection.autoencoder_threshold", 0.0283)))
 
 # Initialize with defaults
 API_PORT = 3000
@@ -123,12 +129,16 @@ ACTIVE_SCALER_FILE = "scaler.pkl"
 DEV_MODE = False
 BATCH_SIZE = 20
 BATCH_FLUSH_INTERVAL = 0.25
+DB_RETENTION_DAYS = 7
 SDN_ENABLED = False
 SDN_CONTROLLER_HOST = "127.0.0.1"
 SDN_CONTROLLER_PORT = 8080
 SDN_BRIDGE_NAME = "br-sentinel"
 SDN_HONEYPOT_IP = "10.99.0.2"
 SDN_FALLBACK_TO_IPSET = True
+ALIENTVAULT_KEY = ""
+PCAP_ENABLED = False
+AUTOENCODER_THRESHOLD = 0.0283
 
 # Load dynamic config
 refresh_config()
@@ -143,15 +153,18 @@ HEARTBEAT_LOG = LOG_DIR / "consumer_heartbeat.txt"
 # --- DATABASE PATH ---
 DB_PATH = BASE_DIR / "data" / "alerts_fresh.db"
 
-# --- MODEL PATHS ---
+# --- MODEL PATHS (DYNAMIC) ---
 MODELS_DIR = BASE_DIR / "models"
-RF_MODEL_PATH = MODELS_DIR / ACTIVE_MODEL_FILE
-SCALER_PATH = MODELS_DIR / ACTIVE_SCALER_FILE
+def get_model_path():
+    return MODELS_DIR / ACTIVE_MODEL_FILE
+
+def get_scaler_path():
+    return MODELS_DIR / ACTIVE_SCALER_FILE
+
 AUTOENCODER_PATH = MODELS_DIR / "vae_encoder.keras"
 FEATURES_PATH = MODELS_DIR / "features.json"
 
-# Autoencoder anomaly threshold.
-AUTOENCODER_THRESHOLD = float(os.environ.get("AUTOENCODER_THRESHOLD", "0.0283"))
+# Threshold moved into refresh_config() for better precedence handling
 
 # --- SYSTEM SETTINGS ---
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))

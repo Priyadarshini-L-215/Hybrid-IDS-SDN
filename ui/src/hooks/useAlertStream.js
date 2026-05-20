@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { apiClient } from '../utils/apiClient';
 
 /**
@@ -213,8 +213,38 @@ export const useAlertStream = () => {
     ));
   };
 
+  /**
+   * DERIVED DATA: Incidents
+   * Groups raw alerts by src_ip and prediction within the current session.
+   */
+  const incidents = useMemo(() => {
+    const groups = {};
+    alerts.forEach(alert => {
+      const key = `${alert.src_ip}_${alert.prediction}`;
+      if (!groups[key]) {
+        groups[key] = {
+          id: `inc_${key}_${alert.timestamp}`,
+          src_ip: alert.src_ip,
+          prediction: alert.prediction,
+          count: 0,
+          last_seen: alert.timestamp,
+          severity: alert.severity || 1,
+          alerts: [],
+          enrichment: alert.enrichment
+        };
+      }
+      groups[key].count += 1;
+      if (new Date(alert.timestamp) > new Date(groups[key].last_seen)) {
+        groups[key].last_seen = alert.timestamp;
+      }
+      groups[key].alerts.push(alert);
+    });
+    return Object.values(groups).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen));
+  }, [alerts]);
+
   return {
     alerts,
+    incidents,
     updateAlert,
     streamStatus,
     error,

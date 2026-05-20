@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    "E501",   # Line too long — allow existing long lines during migration
+    "B008",   # Do not perform function calls in default arguments (FastAPI Depends pattern)
+    "UP007",  # Use X | Y for union type hints — not yet applied everywhere
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["common", "relay", "ml_engine"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+strict = false
+warn_return_any = false
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]

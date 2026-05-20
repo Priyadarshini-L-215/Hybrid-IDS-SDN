@@ -5,6 +5,7 @@ set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 APP_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+MODELS_DIR="$PROJECT_ROOT/models"
 
 echo "================================================================="
 echo "            SENTINEL CORE DIAGNOSTICS"
@@ -59,18 +60,11 @@ fi
 
 echo ""
 echo "[+] Checking Model Assets..."
-check_model() {
-    if [ -f "$PROJECT_ROOT/models/$1" ]; then
-        echo -e "[${GREEN}OK${RESET}] Model asset found: $1"
-    else
-        echo -e "[${YELLOW}WARN${RESET}] Model asset missing: $1"
-    fi
-}
-check_model "rf_model.pkl"
-check_model "scaler.pkl"
-check_model "vae_model.pth"
-check_model "vae_scaler.pkl"
-check_model "features.json"
+[ -f "$MODELS_DIR/rf_model.pkl" ] && echo -e "[${GREEN}OK${RESET}] Model asset found: rf_model.pkl" || echo -e "[${RED}FAIL${RESET}] Model asset missing: rf_model.pkl"
+[ -f "$MODELS_DIR/scaler.pkl" ] && echo -e "[${GREEN}OK${RESET}] Model asset found: scaler.pkl" || echo -e "[${RED}FAIL${RESET}] Model asset missing: scaler.pkl"
+[ -f "$MODELS_DIR/vae_encoder.keras" ] && echo -e "[${GREEN}OK${RESET}] Model asset found: vae_encoder.keras" || echo -e "[${RED}FAIL${RESET}] Model asset missing: vae_encoder.keras"
+[ -f "$MODELS_DIR/vae_decoder.keras" ] && echo -e "[${GREEN}OK${RESET}] Model asset found: vae_decoder.keras" || echo -e "[${RED}FAIL${RESET}] Model asset missing: vae_decoder.keras"
+[ -f "$MODELS_DIR/vae_scaler.pkl" ] && echo -e "[${GREEN}OK${RESET}] Model asset found: vae_scaler.pkl" || echo -e "[${RED}FAIL${RESET}] Model asset missing: vae_scaler.pkl"
 
 echo ""
 echo "[+] Checking Ports..."

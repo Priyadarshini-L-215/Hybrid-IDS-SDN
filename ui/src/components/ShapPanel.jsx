@@ -16,6 +16,25 @@ const ShapPanel = ({ alert }) => {
 
   return (
     <div className="shap-explanation-container" style={{ marginTop: '1.5rem' }}>
+      {/* XAI Natural Language Explanation */}
+      {alert.xai_explanation && (
+        <div style={{
+          background: 'rgba(59, 130, 246, 0.1)',
+          borderLeft: '4px solid var(--primary)',
+          padding: '1rem',
+          borderRadius: '0 8px 8px 0',
+          marginBottom: '1.5rem',
+          display: 'flex',
+          gap: '0.75rem',
+          alignItems: 'flex-start'
+        }}>
+          <Info size={20} style={{ color: 'var(--primary)', flexShrink: 0, marginTop: '2px' }} />
+          <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.5 }}>
+            {alert.xai_explanation}
+          </p>
+        </div>
+      )}
+
       {/* SHAP Features Section */}
       <div className="detail-section-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
         <BarChart3 size={16} className="text-primary" />

@@ -1,6 +1,6 @@
 #!/bin/bash
 # start.sh - Unified Sentinel Core Launcher with Health Checks
-# Features: Dependency ordering, health checks, timeout management, PID tracking
+# Features: Dependency ordering, health checks, supervisor loop, parallel startup
 
 set -euo pipefail
 
@@ -25,6 +25,11 @@ export TF_ENABLE_ONEDNN_OPTS="${TF_ENABLE_ONEDNN_OPTS:-0}"
 # UTILITIES
 # ============================================================================
 
+log_info() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $1" | tee -a "$STARTUP_LOG_FILE"; }
+log_error() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] [ERROR] $1" | tee -a "$STARTUP_LOG_FILE" >&2; }
+log_success() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] [SUCCESS] $1" | tee -a "$STARTUP_LOG_FILE"; }
+log_warn() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] [WARN] $1" | tee -a "$STARTUP_LOG_FILE"; }
+
 check_lock() {
     if [ -f "$STATE_LOCK_FILE" ]; then
         local pid
@@ -39,160 +44,16 @@ check_lock() {
     echo $$ > "$STATE_LOCK_FILE"
 }
 
-wait_for_port() {
-    local port=$1
-    local name=$2
-    local timeout=${3:-30}
-    log_info "Waiting for $name on port $port (timeout: ${timeout}s)..."
-    local elapsed=0
-    while [ $elapsed -lt "$timeout" ]; do
-        if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
-            log_success "$name is responsive on port $port"
-            return 0
-        fi
-        sleep 1
-        elapsed=$((elapsed + 1))
+keep_sudo_alive() {
+    while true; do
+        sudo -n true 2>/dev/null || true
+        sleep 60
     done
-    log_error "$name (port $port) failed to start"
-    return 1
-}
-
-log_info() {
-    local msg="[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $1"
-    echo "$msg" | tee -a "$STARTUP_LOG_FILE"
-}
-
-log_error() {
-    local msg="[$(date +'%Y-%m-%d %H:%M:%S')] [ERROR] $1"
-    echo "$msg" | tee -a "$STARTUP_LOG_FILE" >&2
-}
-
-log_success() {
-    local msg="[$(date +'%Y-%m-%d %H:%M:%S')] [SUCCESS] $1"
-    echo "$msg" | tee -a "$STARTUP_LOG_FILE"
-}
-
-log_warn() {
-    local msg="[$(date +'%Y-%m-%d %H:%M:%S')] [WARN] $1"
-    echo "$msg" | tee -a "$STARTUP_LOG_FILE"
-}
-
-# Setup logging
-setup_logging() {
-    mkdir -p "$PROJECT_ROOT/data/logs"
-    : > "$STARTUP_LOG_FILE"
-}
-
-source_env_file() {
-    if [ -f "$PROJECT_ROOT/.env" ]; then
-        # shellcheck disable=SC1091
-        set -a
-        source "$PROJECT_ROOT/.env"
-        set +a
-    fi
-}
-
-# Activate virtual environment (Auto-setup if missing)
-activate_venv() {
-    if [ ! -d "$PROJECT_ROOT/.venv" ] || [ ! -d "$PROJECT_ROOT/ui/node_modules" ]; then
-        log_warn "Missing environment or dependencies. Running auto-setup..."
-        if ! ./setup.sh; then
-            log_error "Auto-setup failed. Please run ./setup.sh manually."
-            exit 1
-        fi
-    fi
-
-    # shellcheck source=/dev/null
-    if ! source "$PROJECT_ROOT/.venv/bin/activate"; then
-        log_error "Failed to activate virtual environment"
-        exit 1
-    fi
-
-    # Verify venv Python has required packages
-    if ! "$PROJECT_ROOT/.venv/bin/python" -c "import structlog; import yaml; import fastapi" 2>/dev/null; then
-        log_warn "Virtual environment missing required packages. Attempting repair..."
-        if ! ./setup.sh; then
-            log_error "Venv repair failed"
-            exit 1
-        fi
-    fi
-
-    log_info "Environment ready"
-    
-    # Run configuration validator
-    log_info "Validating configuration and model files..."
-    if ! "$PROJECT_ROOT/.venv/bin/python" "$PROJECT_ROOT/src/common/config_validator.py"; then
-        log_error "Configuration validation failed. Check the errors above."
-        exit 1
-    fi
-}
-
-# Load configuration from Python
-load_config() {
-    export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
-    source_env_file
-
-    if ! SURICATA_SOCKET=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import SURICATA_SOCKET; print(SURICATA_SOCKET)" 2>/dev/null); then
-        log_warn "Could not load SURICATA_SOCKET from config. Using default."
-        SURICATA_SOCKET="/tmp/sentinel_suricata.sock"
-    fi
-
-    if ! API_PORT=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import API_PORT; print(API_PORT)" 2>/dev/null); then
-        log_warn "Could not load API_PORT from config, using default 3000"
-        API_PORT=3000
-    fi
-
-    SDN_ENABLED=$("$APP_PYTHON" -c "import sys; sys.path.insert(0, '$PROJECT_ROOT/src'); from common.config import SDN_ENABLED; print(str(SDN_ENABLED).lower())" 2>/dev/null || echo "false")
-
-    log_info "Loaded config: API_PORT=$API_PORT, SDN_ENABLED=$SDN_ENABLED"
-}
-
-verify_models() {
-    log_info "Verifying critical model files..."
-    local missing=0
-    local critical_files=(
-        "models/rf_model.pkl"
-        "models/scaler.pkl"
-        "models/vae_encoder.keras"
-        "models/vae_decoder.keras"
-    )
-    
-    for f in "${critical_files[@]}"; do
-        if [ ! -f "$PROJECT_ROOT/$f" ]; then
-            log_warn "Missing critical model file: $f"
-            missing=$((missing + 1))
-        fi
-    done
-    
-    if [ $missing -gt 0 ]; then
-        log_warn "Some model files are missing. Inference may be degraded or fail."
-        log_info "Tip: Run ./setup.sh to synchronize models from 'new model' directory."
-    else
-        log_success "All critical model files verified"
-    fi
-}
-
-# ============================================================================
-# HEALTH CHECKS
-# ============================================================================
-
-is_port_available() {
-    local port=$1
-    ! nc -z 127.0.0.1 "$port" 2>/dev/null
-}
-
-is_process_running() {
-    local pattern=$1
-    pgrep -f "$pattern" >/dev/null 2>&1
 }
 
 wait_for_condition() {
-    local name=$1
-    local check_cmd=$2
-    local timeout=$3
-    
+    local name=$1; local check_cmd=$2; local timeout=$3
     log_info "Waiting for $name (timeout: ${timeout}s)..."
-    
     local elapsed=0
     while [ $elapsed -lt "$timeout" ]; do
         if eval "$check_cmd" 2>/dev/null; then
@@ -202,7 +63,6 @@ wait_for_condition() {
         sleep 1
         elapsed=$((elapsed + 1))
     done
-
     log_error "$name did not start within ${timeout}s"
     return 1
 }
@@ -212,241 +72,178 @@ wait_for_condition() {
 # ============================================================================
 
 ensure_sudo_access() {
-    log_info "Checking sudo access for system services..."
-    if ! sudo -n true 2>/dev/null; then
-        log_warn "Sudo password may be required"
-        sudo -v || { log_error "Sudo access denied"; exit 1; }
+    log_info "Checking sudo access..."
+    if ! sudo -v; then
+        log_error "Sudo access required for network sensors and mitigation"
+        exit 1
     fi
-    log_success "Sudo access confirmed"
+    keep_sudo_alive &
+    SUDO_KEEP_ALIVE_PID=$!
 }
 
-cleanup_stale_processes() {
-    log_info "Cleaning up stale processes and sockets..."
-    pkill -9 -f "src/ml_engine/consumer.py" 2>/dev/null || true
-    pkill -9 -f "src/ml_engine/ingestion.py" 2>/dev/null || true
-    pkill -9 -f "relay.app:app" 2>/dev/null || true
-    pkill -9 -f "uvicorn.*relay.app" 2>/dev/null || true
-    # UI dev server should be managed separately per implementation plan
-    # pkill -9 -f "npm.*dev" 2>/dev/null || true
-    pkill -9 -f "ryu-manager" 2>/dev/null || true
-    pkill -9 -f "src/sdn/honeypot.py" 2>/dev/null || true
-    
-    # Cleanup stale sockets
-    sudo rm -f /tmp/sentinel_suricata.sock 2>/dev/null || true
-    sudo rm -f /tmp/suricata_sentinel.pid 2>/dev/null || true
-    
-    sleep 2
-    log_success "Cleanup complete"
-}
-
-cleanup_on_interrupt() {
-    log_warn "Interrupt received, stopping Sentinel Core..."
+cleanup() {
+    log_warn "Cleanup triggered. Stopping services..."
+    [ -n "${SUDO_KEEP_ALIVE_PID:-}" ] && kill "$SUDO_KEEP_ALIVE_PID" 2>/dev/null || true
     "$PROJECT_ROOT/stop.sh" >/dev/null 2>&1 || true
+    rm -f "$STATE_LOCK_FILE"
 }
+
+trap cleanup EXIT INT TERM
+
+activate_venv() {
+    if [ ! -d "$PROJECT_ROOT/.venv" ]; then
+        log_error "Virtual environment missing. Please run ./setup.sh"
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$PROJECT_ROOT/.venv/bin/activate"
+}
+
+# Set Python path to include src (safely handle existing PYTHONPATH)
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 start_redis() {
     log_info "Starting Redis..."
     sudo systemctl start redis-server 2>/dev/null || true
-    if wait_for_condition "Redis Connectivity" "redis-cli ping 2>/dev/null | grep -q PONG" 15; then
-        return 0
-    fi
-    return 1
-}
-
-start_sdn_infrastructure() {
-    if [ "$SDN_ENABLED" != "true" ]; then return 0; fi
-    log_info "Starting SDN Infrastructure (OVS Setup)..."
-    sudo ./sdn_setup.sh
-}
-
-start_ryu_controller() {
-    if [ "$SDN_ENABLED" != "true" ]; then return 0; fi
-    log_info "Starting Ryu SDN Controller..."
-    ryu-manager src/sdn/sentinel_controller.py --ofp-tcp-listen-port 6653 >> data/logs/ryu.log 2>&1 &
-    local pid=$!
-    echo "ryu_pid=$pid" >> "$STATE_FILE"
-    wait_for_condition "Ryu REST API" "nc -z 127.0.0.1 8080" 15
-}
-
-start_honeypot() {
-    if [ "$SDN_ENABLED" != "true" ]; then return 0; fi
-    log_info "Starting Dionaea Honeypot Sink..."
-    # Start in the honeypot namespace
-    sudo ip netns exec honeypot python3 src/sdn/honeypot.py >> data/logs/honeypot.log 2>&1 &
-    local pid=$!
-    echo "honeypot_pid=$pid" >> "$STATE_FILE"
-    log_success "Honeypot active (PID: $pid)"
+    wait_for_condition "Redis" "redis-cli ping | grep -q PONG" 15
 }
 
 start_ingestion() {
     log_info "Starting Ingestion Bridge..."
     "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/ingestion.py" >> "$PROJECT_ROOT/data/logs/ingestion.log" 2>&1 &
-    local pid=$!
-    echo "ingestion_pid=$pid" >> "$STATE_FILE"
-    wait_for_condition "Ingestion Socket" "test -S $SURICATA_SOCKET" 30
+    echo "ingestion_pid=$!" >> "$STATE_FILE"
 }
 
 start_suricata() {
-    log_info "Starting Suricata sensor..."
-
-    cleanup_stale_suricata_pidfile() {
-        local pidfile=$1
-        if [ ! -f "$pidfile" ]; then
-            return 0
-        fi
-
-        local pid
-        pid=$(tr -d '[:space:]' < "$pidfile" 2>/dev/null || true)
-
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            log_info "Suricata pidfile is active: $pidfile (PID $pid)"
-            return 0
-        fi
-
-        log_warn "Removing stale Suricata pidfile: $pidfile"
-        sudo rm -f "$pidfile"
-    }
-
-    cleanup_stale_suricata_pidfile "/tmp/suricata_sentinel.pid"
-    cleanup_stale_suricata_pidfile "/var/run/suricata.pid"
-    cleanup_stale_suricata_pidfile "/run/suricata.pid"
-
-    local suricata_cmd
-    suricata_cmd=$(command -v suricata 2>/dev/null || true)
-    if [ -z "$suricata_cmd" ]; then
-        log_error "suricata binary not found"
-        return 1
-    fi
-
-    # Template the suricata config
-    local template_file="$PROJECT_ROOT/config/suricata/suricata.yaml"
-    local active_file="$PROJECT_ROOT/config/suricata/suricata.yaml.active"
+    log_info "Starting Suricata..."
+    local interface
+    interface=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5}' | head -n 1 || echo "eth0")
     
-    if [ -f "$template_file" ]; then
-        log_info "Templating Suricata config..."
-        # Find default interface if not provided
-        local interface
-        interface=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5}' | head -n 1)
-        interface=${interface:-eth0}
-        
-        sed -e "s|__REPO_ROOT__|$PROJECT_ROOT|g" \
-            -e "s|__SURICATA_INTERFACE__|$interface|g" \
-            "$template_file" > "$active_file"
-        log_success "Suricata config ready (interface: $interface)"
-    else
-        log_error "Suricata template config not found at $template_file"
+    if ! ip link show "$interface" >/dev/null 2>&1; then
+        log_error "Network interface $interface not found"
         return 1
     fi
 
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
-        sudo systemctl stop suricata >/dev/null 2>&1 || true
-        # We start directly if using custom config, as systemd service usually points to /etc/suricata
-    fi
-
-    log_info "Starting Suricata directly with project config..."
+    local config_active="$PROJECT_ROOT/config/suricata/suricata.yaml.active"
+    sed -e "s|__REPO_ROOT__|$PROJECT_ROOT|g" -e "s|__SURICATA_INTERFACE__|$interface|g" \
+        "$PROJECT_ROOT/config/suricata/suricata.yaml" > "$config_active"
+    
+    # Remove stale PID if present
+    sudo rm -f /var/run/suricata.pid >/dev/null 2>&1
+    
     sudo pkill -f "suricata -c .*suricata.yaml.active" >/dev/null 2>&1 || true
-    
-    # Start Suricata in daemon mode with project config
-    sudo "$suricata_cmd" --af-packet -c "$active_file" -D >> "$PROJECT_ROOT/data/logs/suricata-start.log" 2>&1
-    sleep 3
-
-    if is_process_running "suricata"; then
-        local suricata_pid
-        suricata_pid=$(pgrep -f "suricata -c .*suricata.yaml.active" | head -n 1 || true)
-        if [ -n "$suricata_pid" ]; then
-            echo "suricata_pid=$suricata_pid" >> "$STATE_FILE"
-        fi
-        log_success "Suricata active with project config (PID: $suricata_pid)"
-        return 0
-    fi
-
-    log_error "Suricata failed to start with project config"
-    tail -n 30 "$PROJECT_ROOT/data/logs/suricata-start.log" >> "$STARTUP_LOG_FILE" 2>&1 || true
-    return 1
+    sudo suricata --af-packet -c "$config_active" -D >> "$PROJECT_ROOT/data/logs/suricata.log" 2>&1
+    sleep 2
+    local spid
+    spid=$(pgrep -f "suricata -c .*suricata.yaml.active" | head -n 1 || true)
+    [ -n "$spid" ] && echo "suricata_pid=$spid" >> "$STATE_FILE"
 }
 
 start_consumer() {
-    log_info "Starting ML Consumer (Schema: 49 features)..."
+    log_info "Starting ML Consumer..."
     "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/consumer.py" >> "$PROJECT_ROOT/data/logs/consumer.log" 2>&1 &
-    local pid=$!
-    echo "consumer_pid=$pid" >> "$STATE_FILE"
-    
-    # Wait for consumer heartbeat or at least confirm it stayed alive
-    log_info "Waiting for ML Engine to initialize models..."
-    sleep 5
-    
-    if is_process_running "consumer.py"; then
-        log_success "ML Consumer active (PID: $pid)"
-        return 0
-    else
-        log_error "ML Consumer failed to start. Check data/logs/consumer.log"
-        return 1
-    fi
+    echo "consumer_pid=$!" >> "$STATE_FILE"
 }
 
 start_relay() {
     log_info "Starting Relay API..."
-    "$APP_PYTHON" -m uvicorn relay.app:app --host 0.0.0.0 --port "$API_PORT" >> "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
-    local pid=$!
-    echo "relay_pid=$pid" >> "$STATE_FILE"
-    wait_for_port "$API_PORT" "Relay API"
+    # Kill any existing processes on port 8000
+    sudo fuser -k 8000/tcp >/dev/null 2>&1 || true
+    
+    "$PROJECT_ROOT/.venv/bin/python" -m uvicorn relay.app:app --host 0.0.0.0 --port 8000 --reload > "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
+    local relay_pid=$!
+    echo "relay_pid=$relay_pid" >> "$STATE_FILE"
+
+    # Wait for Relay API to be healthy
+    local RELAY_TIMEOUT=60
+    local count=0
+    log_info "Waiting for Relay API (timeout: ${RELAY_TIMEOUT}s)..."
+    while ! curl -s http://localhost:8000/api/health > /dev/null; do
+        sleep 1
+        ((count++))
+        if [ $count -ge $RELAY_TIMEOUT ]; then
+            log_error "Relay API did not start within ${RELAY_TIMEOUT}s"
+            cat "$PROJECT_ROOT/data/logs/relay.log" | tail -n 20
+            exit 1
+        fi
+    done
+    log_success "Relay API is ready"
+
+    # Verify Suricata (give it more time if needed)
+    local suricata_pid
+    suricata_pid=$(grep "suricata_pid=" "$STATE_FILE" | cut -d'=' -f2)
+    if [ -n "$suricata_pid" ] && ! kill -0 "$suricata_pid" 2>/dev/null; then
+        log_warn "Suricata PID $suricata_pid is not running. Checking if it's still initializing..."
+        sleep 10
+        if kill -0 "$suricata_pid" 2>/dev/null; then
+             log_success "Suricata is now running"
+        else
+             log_warn "Suricata failed to start. Monitoring system anyway..."
+        fi
+    fi
 }
 
 start_ui() {
-    log_info "Ensuring Dashboard UI is built..."
+    log_info "Starting React UI..."
     cd "$PROJECT_ROOT/ui"
+    # Kill any existing processes on port 3000
+    sudo fuser -k 3000/tcp >/dev/null 2>&1 || true
     
-    if [ ! -d "dist" ]; then
-        log_warn "UI dist directory missing. Running npm run build..."
-        npm run build || { log_error "UI build failed"; return 1; }
-    fi
+    # Start Vite via node directly to bypass permission issues on NTFS/fuseblk
+    VITE_PORT=3000 VITE_BACKEND_PORT=8000 node ./node_modules/vite/bin/vite.js --host 127.0.0.1 >> "$PROJECT_ROOT/data/logs/ui.log" 2>&1 &
+    echo "ui_pid=$!" >> "$STATE_FILE"
     cd "$PROJECT_ROOT"
 }
 
+monitor_services() {
+    log_info "Starting supervisor loop..."
+    while true; do
+        while IFS='=' read -r key pid; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                log_warn "Service $key (PID $pid) died. Attempting restart..."
+                case "$key" in
+                    ingestion_pid) start_ingestion ;;
+                    consumer_pid) start_consumer ;;
+                    relay_pid) start_relay ;;
+                    ui_pid) start_ui ;;
+                esac
+            fi
+        done < "$STATE_FILE"
+        sleep 10
+    done
+}
+
 # ============================================================================
-# MAIN EXECUTION
+# MAIN
 # ============================================================================
 
 main() {
-    setup_logging
-    source_env_file
+    mkdir -p "$PROJECT_ROOT/data/logs"
     check_lock
-    
-    echo "================================================================="
     ensure_sudo_access
     
-    # Start Redis first because the validator needs it
+    echo "================================================================="
+    echo "           SENTINEL CORE: BOOT SEQUENCE ACTIVE"
+    echo "================================================================="
+
     start_redis || exit 1
-    
-    # Ensure state file is fresh and track interrupts
-    : > "$STATE_FILE"
-    trap cleanup_on_interrupt INT TERM
-    
     activate_venv
-    load_config
-    verify_models
-    cleanup_stale_processes
-    start_sdn_infrastructure
-    start_ryu_controller
-    start_honeypot
-    start_ingestion || exit 1
+    
+    # Clean state
+    : > "$STATE_FILE"
+    
+    # Parallel startup where possible
+    start_ingestion
     start_suricata || log_warn "Suricata failed to start"
-    start_consumer || exit 1
+    start_consumer
     start_relay || exit 1
     start_ui
-
-    log_success "SENTINEL CORE IS NOW ACTIVE"
-    echo "Dashboard: http://127.0.0.1:${API_PORT}"
     
-    # Keep alive if not interactive (e.g. running under systemd)
-    if [ ! -t 1 ]; then
-        log_info "Running in non-interactive mode. Staying alive..."
-        while true; do sleep 60; done
-    else
-        # Tail logs if interactive
-        log_info "Interactive mode. Tailing logs..."
-        tail -f "$PROJECT_ROOT/data/logs/relay.log" "$PROJECT_ROOT/data/logs/consumer.log"
-    fi
+    log_success "SENTINEL CORE IS ACTIVE"
+    echo "View Dashboard: http://localhost:3000"
+    echo "================================================================="
+    
+    monitor_services
 }
 
 main "$@"

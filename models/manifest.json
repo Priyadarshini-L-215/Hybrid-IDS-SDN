@@ -6,18 +6,18 @@
         },
         "metadata": "model_meta.json",
         "model_family": "vae_anomaly_detector",
-        "name": "v4.0.0-vae",
+        "name": "v4.0.0-multi-retrained",
         "rf": {
-            "model": "rf_multi_pipeline.onnx",
-            "onnx": "rf_multi_pipeline.onnx",
-            "scaler": "scaler_multi.pkl"
+            "model": "rf_model.pkl",
+            "onnx": "rf_model.pkl",
+            "scaler": "scaler.pkl"
         },
         "vae": {
             "config": "vae_config.json",
             "decoder": "vae_decoder.keras",
             "encoder": "vae_encoder.keras",
             "scaler": "vae_scaler.pkl",
-            "threshold": 0.3
+            "threshold": 0.019742
         }
     },
     "backups": [

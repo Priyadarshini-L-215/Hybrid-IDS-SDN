@@ -21,6 +21,8 @@ import { useHealthStatus } from './hooks/useHealthStatus';
 import { useStats } from './hooks/useStats';
 import ErrorBoundary from './components/ErrorBoundary';
 import ShapPanel from './components/ShapPanel';
+import AttackMap from './components/AttackMap';
+import MitreMatrix from './components/MitreMatrix';
 import { apiClient } from './utils/apiClient';
 
 import './App.css';
@@ -137,12 +139,17 @@ const CompactIP = ({ ip, onClick, type }) => {
 // --- MAIN APPLICATION ---
 function App() {
   // ===== CUSTOM HOOKS (State Management) =====
-  const { alerts, updateAlert, isConnected, bufferSize } = useAlertStream();
+  const { alerts, incidents, updateAlert, isConnected, bufferSize } = useAlertStream();
   const { health, isHealthy, refresh: refreshHealth } = useHealthStatus();
   const { stats, chartData } = useStats(alerts);
 
   // ===== UI STATE ONLY =====
   const [activeTab, setActiveTab] = useState(() => localStorage.getItem('sentinel_active_tab') || 'overview');
+  const [viewMode, setViewMode] = useState('raw'); // 'raw' or 'incident'
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchParams, setSearchParams] = useState({ src_ip: '', prediction: '', limit: 50 });
   
   useEffect(() => {
     localStorage.setItem('sentinel_active_tab', activeTab);
@@ -526,6 +533,50 @@ function App() {
             </div>
           </div>
 
+          <div className="global-search-container" style={{ flex: 1, margin: '0 3rem', maxWidth: '500px' }}>
+            <div className="filter-bar" style={{ position: 'relative' }}>
+              <Search size={16} className="text-primary" />
+              <input 
+                type="text" 
+                className="filter-input" 
+                placeholder="Global historical search (IP, CIDR, classification...)" 
+                onFocus={() => setSearchOpen(true)}
+                value={searchParams.src_ip}
+                onChange={(e) => setSearchParams({...searchParams, src_ip: e.target.value})}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter') {
+                    setSearchLoading(true);
+                    try {
+                      const data = await apiClient.get('/api/search', searchParams);
+                      setSearchResults(data.results);
+                    } catch (err) { console.error(err); }
+                    finally { setSearchLoading(false); }
+                  }
+                }}
+              />
+              {searchOpen && (
+                <div className="glass-panel" style={{ position: 'absolute', top: '120%', left: 0, right: 0, padding: '1rem', borderRadius: '16px', zHeight: 1000, maxHeight: '400px', overflowY: 'auto' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                    <span style={{ fontSize: '0.7rem', fontWeight: 900 }}>HISTORICAL RESULTS</span>
+                    <X size={14} className="cursor-pointer" onClick={() => setSearchOpen(false)} />
+                  </div>
+                  {searchLoading ? <div className="animate-pulse">Searching forensics database...</div> : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {searchResults?.map(r => (
+                        <div key={r.event_id} className="leaderboard-row" style={{ fontSize: '0.7rem' }}>
+                          <span>{r.src_ip}</span>
+                          <Badge variant={r.prediction.includes('attack') ? 'danger' : 'info'}>{r.prediction}</Badge>
+                          <span className="text-muted">{new Date(r.timestamp).toLocaleDateString()}</span>
+                        </div>
+                      ))}
+                      {!searchResults && <div style={{ fontSize: '0.65rem', opacity: 0.5 }}>Press Enter to search historical database</div>}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="engine-metrics">
             <div className="metric-item">
               <span className="metric-label">Inference Latency</span>
@@ -590,9 +641,21 @@ function App() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                         <Terminal size={18} className="text-primary" />
-                        <span className="gradient-text" style={{ fontWeight: 800 }}>LIVE THREAT STREAM</span>
+                        <span className="gradient-text" style={{ fontWeight: 800 }}>LIVE {viewMode === 'raw' ? 'THREAT STREAM' : 'INCIDENT QUEUE'}</span>
                       </div>
                       <div style={{ display: 'flex', gap: '8px' }}>
+                        <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', padding: '2px', borderRadius: '10px', marginRight: '1rem' }}>
+                          <button 
+                            className={`btn btn-sm ${viewMode === 'raw' ? 'btn-primary' : ''}`} 
+                            style={{ background: viewMode === 'raw' ? 'var(--primary)' : 'transparent', color: viewMode === 'raw' ? '#000' : 'inherit' }}
+                            onClick={() => setViewMode('raw')}
+                          >RAW</button>
+                          <button 
+                            className={`btn btn-sm ${viewMode === 'incident' ? 'btn-primary' : ''}`} 
+                            style={{ background: viewMode === 'incident' ? 'var(--primary)' : 'transparent', color: viewMode === 'incident' ? '#000' : 'inherit' }}
+                            onClick={() => setViewMode('incident')}
+                          >INCIDENTS</button>
+                        </div>
                         <button className="btn btn-secondary btn-sm" onClick={() => setFilterLevel('ALL')} style={{ opacity: filterLevel === 'ALL' ? 1 : 0.5 }}>ALL</button>
                         <button className="btn btn-danger btn-sm" onClick={() => setFilterLevel('ATTACKS')} style={{ opacity: filterLevel === 'ATTACKS' ? 1 : 0.5 }}>THREATS</button>
                         <button className="btn btn-secondary btn-sm" title="Export CSV" onClick={exportAlerts}><Download size={12} /></button>
@@ -611,98 +674,108 @@ function App() {
                       {filterQuery && <X size={14} className="text-muted cursor-pointer" onClick={() => setFilterQuery('')} />}
                     </div>
                   </div>
-                  <div className="table-scroller" style={{ maxHeight: '600px', overflowY: 'auto' }}>
-                    <table className="alerts-table">
-                      <thead><tr><th>Timestamp</th><th>Source Node</th><th>Classification</th><th>Score</th><th>Mitigation</th></tr></thead>
-                      <tbody>
-                        {filteredAlerts.map((alert) => {
-                          const prediction = (alert.prediction || 'Unknown').toLowerCase();
-                          const isAttack = prediction.includes('attack') || prediction.includes('anomaly');
-                          const isSuspicious = prediction.includes('suspicious');
-                          const confidence = typeof alert.confidence === 'number' ? alert.confidence : 0;
-                          const isExpanded = expandedRow === alert.event_id; // CHANGED: event_id instead of index
-                          
-                          return (
-                            <React.Fragment key={alert.event_id}>
-                              <tr 
-                                onClick={() => toggleExpandRow(alert)}
-                                className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`}
-                              >
-                                <td className="text-muted" style={{ fontSize: '0.65rem', fontWeight: 800 }}>{new Date(alert.timestamp).toLocaleTimeString()}</td>
-                                <td style={{ minWidth: '180px' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <span style={{ fontSize: '1.2rem' }}>{getFlagEmoji(alert.enrichment?.country_code)}</span>
-                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                      <CompactIP 
-                                        ip={alert.src_ip} 
-                                        type={alert.event_type}
-                                        onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} 
-                                      />
-                                      <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>{alert.event_type === 'system_alert' ? 'Sentinel Internal' : (alert.enrichment?.city || 'Internal/Local')}</span>
-                                    </div>
-                                  </div>
-                                </td>
-                                <td>
-                                  <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
-                                    {alert.prediction}
-                                  </Badge>
-                                </td>
-                                <td>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                     <div style={{ width: '40px', height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
-                                        <div style={{ width: `${confidence}%`, height: '100%', background: confidence > 80 ? 'var(--danger)' : confidence > 50 ? 'var(--warning)' : 'var(--success)', transition: 'width 0.5s ease' }} />
-                                     </div>
-                                     <span style={{ fontWeight: 800, fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>{confidence.toFixed(1)}%</span>
-                                  </div>
-                                </td>
-                                <td>
-                                   <Badge variant={alert.mitigation ? 'info' : 'muted'}>
-                                     {alert.mitigation || 'LOGGED'}
-                                   </Badge>
-                                </td>
+                    <div className="table-scroller" style={{ maxHeight: '600px', overflowY: 'auto' }}>
+                      {viewMode === 'raw' ? (
+                        <table className="alerts-table">
+                          <thead><tr><th>Timestamp</th><th>Source Node</th><th>Classification</th><th>Score</th><th>Mitigation</th></tr></thead>
+                          <tbody>
+                            {filteredAlerts.map((alert) => {
+                              const prediction = (alert.prediction || 'Unknown').toLowerCase();
+                              const isAttack = prediction.includes('attack') || prediction.includes('anomaly');
+                              const isSuspicious = prediction.includes('suspicious');
+                              const confidence = typeof alert.confidence === 'number' ? alert.confidence : 0;
+                              const isExpanded = expandedRow === alert.event_id;
+                              
+                              return (
+                                <React.Fragment key={alert.event_id}>
+                                  <tr 
+                                    onClick={() => toggleExpandRow(alert)}
+                                    className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`}
+                                  >
+                                    <td className="text-muted" style={{ fontSize: '0.65rem', fontWeight: 800 }}>{new Date(alert.timestamp).toLocaleTimeString()}</td>
+                                    <td style={{ minWidth: '180px' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span style={{ fontSize: '1.2rem' }}>{getFlagEmoji(alert.enrichment?.country_code)}</span>
+                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                          <CompactIP 
+                                            ip={alert.src_ip} 
+                                            type={alert.event_type}
+                                            onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} 
+                                          />
+                                          <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>{alert.event_type === 'system_alert' ? 'Sentinel Internal' : (alert.enrichment?.city || 'Internal/Local')}</span>
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
+                                        {alert.prediction}
+                                      </Badge>
+                                    </td>
+                                    <td>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                         <div style={{ width: '40px', height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
+                                            <div style={{ width: `${confidence}%`, height: '100%', background: confidence > 80 ? 'var(--danger)' : confidence > 50 ? 'var(--warning)' : 'var(--success)', transition: 'width 0.5s ease' }} />
+                                         </div>
+                                         <span style={{ fontWeight: 800, fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>{confidence.toFixed(1)}%</span>
+                                      </div>
+                                    </td>
+                                    <td>
+                                       <Badge variant={alert.mitigation ? 'info' : 'muted'}>
+                                         {alert.mitigation || 'LOGGED'}
+                                       </Badge>
+                                    </td>
+                                  </tr>
+                                  {isExpanded && (
+                                    <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
+                                      <td colSpan="5" style={{ padding: '1.5rem' }}>
+                                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1.5rem' }}>
+                                            <div>
+                                              <ShapPanel alert={alert} />
+                                            </div>
+                                            <div>
+                                              <h4 style={{ fontSize: '0.6rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Enrichment</h4>
+                                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.7rem' }}>
+                                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Globe size={12} className="text-muted" /> {alert.enrichment?.location || 'Unknown'}</div>
+                                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'} {alert.enrichment?.isp && alert.enrichment.isp !== 'Unknown' ? `(${alert.enrichment.isp})` : ''}</div>
+                                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><FileText size={12} className="text-muted" /> {alert.protocol?.toUpperCase()} / {alert.dst_port || '0'}</div>
+                                              </div>
+                                            </div>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                              <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); downloadPcap(alert.id || alert.event_id); }}><FileText size={14} /> PCAP</button>
+                                               <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }}><Fingerprint size={14} /> DEEP FORENSICS</button>
+                                              <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'block'); }}>BLOCK IP</button>
+                                            </div>
+                                         </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <table className="alerts-table">
+                          <thead><tr><th>Incident ID</th><th>Primary Actor</th><th>Attack Type</th><th>Hits</th><th>Last Activity</th></tr></thead>
+                          <tbody>
+                            {incidents.map((inc) => (
+                              <tr key={inc.id} className="alert-row">
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem' }}>{inc.id.substring(0, 12)}...</td>
+                                <td><CompactIP ip={inc.src_ip} onClick={() => fetchNodeIntel(inc.src_ip)} /></td>
+                                <td><Badge variant="danger">{inc.prediction}</Badge></td>
+                                <td style={{ fontWeight: 900 }}>{inc.count}</td>
+                                <td className="text-muted">{new Date(inc.last_seen).toLocaleTimeString()}</td>
                               </tr>
-                              {isExpanded && (
-                                <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
-                                  <td colSpan="5" style={{ padding: '1.5rem' }}>
-                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1.5rem' }}>
-                                        <div>
-                                          <ShapPanel alert={alert} />
-                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Signature</span><span>{alert.forensics?.stage_scores?.signature ? 'DETECTED' : 'CLEAN'}</span></div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Neural</span><span>{(alert.forensics?.stage_scores?.ml * 100).toFixed(1)}%</span></div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span className="text-muted">Anomaly</span><span>{(alert.forensics?.stage_scores?.anomaly * 100).toFixed(1)}%</span></div>
-                                          </div>
-                                        </div>
-                                        <div>
-                                          <h4 style={{ fontSize: '0.6rem', textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '0.75rem', letterSpacing: '0.1em' }}>Enrichment</h4>
-                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.7rem' }}>
-                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Globe size={12} className="text-muted" /> {alert.enrichment?.location || 'Unknown'}</div>
-                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'} {alert.enrichment?.isp && alert.enrichment.isp !== 'Unknown' ? `(${alert.enrichment.isp})` : ''}</div>
-                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><FileText size={12} className="text-muted" /> {alert.protocol?.toUpperCase()} / {alert.dst_port || '0'}</div>
-                                          </div>
-                                        </div>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                          <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); downloadPcap(alert.id || alert.event_id); }}><FileText size={14} /> PCAP</button>
-                                           <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }}><Fingerprint size={14} /> DEEP FORENSICS</button>
-                                          {alert.is_mitigated ? (
-                                            <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'unblock'); }}>WHITELIST</button>
-                                          ) : (
-                                            <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'block'); }}>BLOCK IP</button>
-                                          )}
-                                        </div>
-                                     </div>
-                                  </td>
-                                </tr>
-                              )}
-                            </React.Fragment>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
                 </div>
 
                 <div className="content-stack">
+                  <AttackMap alerts={alerts} />
+                  
                   <GlassCard title="Real-time Traffic Velocity" icon={Activity} subtitle="Events per second (Ingress vs Threats)">
                     <div style={{ height: '240px', width: '100%', position: 'relative' }}>
                       <ResponsiveContainer width="100%" height="100%">
@@ -785,6 +858,8 @@ function App() {
                         {shapAggregated.length === 0 && <p style={{ opacity: 0.3, fontSize: '0.65rem', textAlign: 'center' }}>Awaiting more detections...</p>}
                      </div>
                   </GlassCard>
+
+                  <MitreMatrix />
                 </div>
               </div>
 

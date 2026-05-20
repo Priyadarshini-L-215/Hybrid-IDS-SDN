@@ -1,6 +1,6 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-pydantic==2.9.2
+fastapi
+uvicorn[standard]
+pydantic
 structlog==24.4.0
 websockets==16.0
 redis==5.0.8
@@ -21,6 +21,10 @@ river==0.24.2
 onnxruntime==1.25.1
 shap==0.51.0
 aiofiles
-ryu>=4.34
-eventlet>=0.35.0
+# SDN Dependencies (Optional - may fail on Python 3.12+)
+# ryu>=4.34
+# eventlet>=0.35.0
 maxminddb-geolite2
+requests
+psutil>=5.9.0
+aiosqlite>=0.20.0

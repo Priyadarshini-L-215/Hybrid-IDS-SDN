@@ -1,23 +1,23 @@
 detection:
-  autoencoder_threshold: 0.04
   anomaly_min_samples: 10
-
+  autoencoder_threshold: 0.04
   correlation_window: 10.0
   decision_engine:
     thresholds:
+      anomaly: 0.6
       attack: 0.9
       suspicious: 0.7
-      anomaly: 0.6
     weights:
-      signature: 1.0
-      ml: 0.7
       anomaly: 0.3
-
+      ml: 0.7
+      signature: 1.0
   dos_threshold: 100
   ml:
-    active_model: rf_multi_pipeline.onnx
-    active_scaler: scaler_multi.pkl
+    active_model: rf_model.pkl
+    active_scaler: scaler.pkl
   port_scan_threshold: 25
+forensics:
+  pcap_enabled: true
 mitigation:
   block_ttl: 300
   rate_limit_per_sec: 5
@@ -34,5 +34,3 @@ system:
   log_level: INFO
   use_json_logging: false
   worker_count: 8
-forensics:
-  pcap_enabled: true

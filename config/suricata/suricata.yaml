@@ -92,8 +92,8 @@ outputs:
 
 af-packet:
   - interface: __SURICATA_INTERFACE__
-    cluster-id: 99
-    cluster-type: cluster_flow
+    cluster-id: 98
+    cluster-type: single
     defrag: yes
 
 app-layer:

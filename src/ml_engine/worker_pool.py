@@ -12,6 +12,7 @@ from ml_engine.drift_detector import DriftDetector
 from common.alert_builder import build_alert_payload
 from common.fp_store import fp_store
 from ml_engine.baseline_updater import baseline_monitor, BaselineUpdater
+from ml_engine.deep_models import deep_manager
 import numpy as np
 
 class NPEncoder(json.JSONEncoder):
@@ -59,8 +60,12 @@ class WorkerPool:
         
         # Initialize Drift Detector & Baseline Updater
         self.drift_detector = DriftDetector(on_drift=self._on_drift_detected)
-        self.baseline_updater = BaselineUpdater(self.ml_engine.vae_detector, baseline_monitor)
+        self.baseline_updater = BaselineUpdater(self.ml_engine, baseline_monitor)
         self.normal_mse_buffer = [] # Buffer for auto-refresh
+        
+        # SOTA: Federated Threat Broker
+        from ml_engine.federated_broker import FederatedThreatBroker
+        self.federated_broker = FederatedThreatBroker(node_id="sentinel-node-1")
         
         # Persistent GeoIP Reader
         self.geoip_reader = None
@@ -71,6 +76,9 @@ class WorkerPool:
             logger.info("GeoIP database initialized")
         except Exception as e:
             logger.warning("Failed to initialize GeoIP reader, will use fallback", error=str(e))
+            
+        # Tier 2: Deep Inference Queue
+        self.deep_queue = asyncio.Queue()
 
     async def _get_fallback_geoip(self, ip: str) -> Optional[dict]:
         """Fetch GeoIP data from a public API as a fallback."""
@@ -126,6 +134,16 @@ class WorkerPool:
             
         # Start cache cleanup task
         self.worker_tasks.append(asyncio.create_task(self._cleanup_task()))
+        
+        # Start Deep Inference loop
+        self.worker_tasks.append(asyncio.create_task(self._deep_inference_loop()))
+        
+        # Start PEL recovery task
+        self.worker_tasks.append(asyncio.create_task(self._recover_pending_messages()))
+        
+        # Start Federated Threat Broker
+        if hasattr(self, "federated_broker"):
+            self.federated_broker.start(self.ml_engine, fp_store)
             
         logger.info("Worker pool started", count=self.worker_count)
 
@@ -141,6 +159,84 @@ class WorkerPool:
                     del self.dedup_cache[k]
             if keys_to_remove:
                 logger.debug("Dedup cache cleaned", removed=len(keys_to_remove))
+
+    async def _deep_inference_loop(self):
+        """Asynchronously processes events using heavy Tier 2 Deep Models without blocking routing."""
+        logger.info("Deep Inference Queue started.")
+        while self.running:
+            try:
+                # Get batch of events to evaluate deeply
+                alert, event = await self.deep_queue.get()
+                
+                # Extract sequence metrics (simulated from current flow state)
+                # In production this would be raw sliding window packets
+                src_ip = alert.get("src_ip")
+                
+                # Mock packet sequence extraction for Transformer
+                # (sizes, iats)
+                dummy_sequence = np.random.rand(1, 10, 4)
+                
+                def run_inference():
+                    return deep_manager.evaluate_sequence(dummy_sequence)
+                    
+                loop = asyncio.get_running_loop()
+                score = await loop.run_in_executor(None, run_inference)
+                
+                # If Tier 2 detects something Tier 1 missed
+                if score > 0.85 and alert.get("prediction") == "normal":
+                    logger.warning("Tier 2 Deep Model flagged an anomaly!", src_ip=src_ip, score=score)
+                    # Issue retroactive block
+                    await self._apply_mitigation(alert, {"prediction": "zero-day anomaly", "final_score": score})
+                    
+                self.deep_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Deep inference failed", error=str(e))
+                await asyncio.sleep(1)
+
+    async def _recover_pending_messages(self):
+        """Reclaims and processes messages stuck in the Pending Entries List (PEL)."""
+        group_name = "sentinel_workers"
+        await asyncio.sleep(5) # Wait for workers to settle
+        
+        while self.running:
+            try:
+                # Read pending messages for this group (ID '0' means pending)
+                # We use a dummy consumer name 'recovery-worker'
+                streams = await rc.async_redis_client.xreadgroup(
+                    group_name, "recovery-worker", {REDIS_QUEUE_NAME: "0"}, count=100, block=10
+                )
+                
+                if not streams:
+                    await asyncio.sleep(300) # Check every 5 minutes
+                    continue
+                
+                for _, messages in streams:
+                    if not messages: continue
+                    logger.info("PEL Recovery: processing pending messages", count=len(messages))
+                    # Extract IDs and data
+                    batch_ids = [m[0] for m in messages]
+                    batch_msgs = []
+                    for m_id, data in messages:
+                        try:
+                            batch_msgs.append(json.loads(data["event"]))
+                        except Exception:
+                            await rc.async_redis_client.xack(REDIS_QUEUE_NAME, group_name, m_id)
+                    
+                    if batch_msgs:
+                        results = self.ml_engine.predict_batch(batch_msgs)
+                        # Minimal processing for recovery (just broadcast/ACK)
+                        for i, res in enumerate(results):
+                            alert = build_alert_payload(batch_msgs[i], res)
+                            if self.broadcast_func:
+                                await self.broadcast_func([alert])
+                        
+                        await rc.async_redis_client.xack(REDIS_QUEUE_NAME, group_name, *batch_ids)
+                
+            except Exception as e:
+                logger.debug("PEL recovery loop error", error=str(e))
+                await asyncio.sleep(60)
 
     async def _worker_loop(self, worker_id: str):
         """Main loop: XREADGROUP -> Batch Process -> ACK."""
@@ -253,6 +349,14 @@ class WorkerPool:
                     
                     # 3b. Enrichment & CTI (Parallelizable network calls)
                     await self._enrich_event(alert)
+                    
+                    # 3b-2. Push to Tier 2 Asynchronous Deep Inference
+                    # We only deep-inspect a sample of normal traffic to save compute, but all suspicious traffic
+                    if alert.get("prediction") != "normal" or time.time() % 10 < 2:
+                        try:
+                            self.deep_queue.put_nowait((alert, raw_event))
+                        except asyncio.QueueFull:
+                            pass
                     
                     # 3c. Re-evaluate decision if CTI data is present
                     cti_score = alert.get("enrichment", {}).get("cti", {}).get("reputation_score", 0.0)
@@ -452,6 +556,9 @@ class WorkerPool:
         if self.worker_tasks:
             await asyncio.gather(*self.worker_tasks, return_exceptions=True)
         self.worker_tasks = []
+
+        if hasattr(self, "federated_broker"):
+            await self.federated_broker.stop()
 
         from ml_engine.cti_client import close_cti_client
         await close_cti_client()

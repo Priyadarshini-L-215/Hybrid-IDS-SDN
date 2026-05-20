@@ -62,8 +62,8 @@ class BaselineUpdater:
     In a full implementation, this would trigger a retraining job.
     For this V4 upgrade, it performs 'adaptive thresholding' and signals for retraining.
     """
-    def __init__(self, detector, drift_monitor: DriftMonitor):
-        self.detector = detector
+    def __init__(self, ml_engine, drift_monitor: DriftMonitor):
+        self.ml_engine = ml_engine
         self.monitor = drift_monitor
         self.is_updating = False
 
@@ -80,14 +80,20 @@ class BaselineUpdater:
             # Simulate a computationally intensive update
             await asyncio.sleep(2) 
             
+            # Dynamically fetch the current VAE detector from ML Engine
+            detector = getattr(self.ml_engine, "vae_detector", None)
+            if detector is None or not getattr(detector, "is_ready", False):
+                logger.warning("Cannot refresh baseline: VAE detector is None or not ready")
+                return
+            
             # 1. Re-calculate MSE for the 'normal' samples
-            mse = self.detector.raw_mse(recent_normal_samples)
+            mse = detector.raw_mse(recent_normal_samples)
             
             # 2. Update threshold: Set to 99th percentile of recent normal MSE + 10% buffer
             new_threshold = np.percentile(mse, 99) * 1.1
-            old_threshold = self.detector.threshold
+            old_threshold = detector.threshold
             
-            self.detector.threshold = float(new_threshold)
+            detector.threshold = float(new_threshold)
             self.monitor.set_baseline(mse)
             self.monitor.drift_detected = False
             self.monitor.last_refresh = time.time()
@@ -95,6 +101,14 @@ class BaselineUpdater:
             logger.info("Baseline refresh complete", 
                         old_threshold=old_threshold, 
                         new_threshold=new_threshold)
+            
+            # SOTA Federated Sync: Broadcast the threshold update to peers
+            try:
+                from ml_engine.federated_broker import FederatedThreatBroker
+                broker = FederatedThreatBroker(node_id="sentinel-node-1")
+                asyncio.create_task(broker.broadcast_vae_threshold(new_threshold))
+            except Exception as broadcast_err:
+                logger.debug("Failed to broadcast federated threshold update", error=str(broadcast_err))
             
         except Exception as e:
             logger.error("Baseline refresh failed", error=str(e))

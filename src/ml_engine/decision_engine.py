@@ -32,6 +32,9 @@ class DecisionEngine:
             "anomaly": ML_THRESHOLD_ANOMALY
         }
         
+        from ml_engine.adversarial_guard import AdversarialGuard
+        self.adversarial_guard = AdversarialGuard()
+        
         logger.info("Decision Engine initialized", 
                     weights=self.weights, 
                     thresholds=self.thresholds)
@@ -41,7 +44,8 @@ class DecisionEngine:
                ml_score: Optional[float], 
                anomaly_score: Optional[float],
                cti_score: Optional[float] = None,
-               prediction: dict = None) -> Tuple[str, float]:
+               prediction: dict = None,
+               event: dict = None) -> Tuple[str, float]:
         """
         Calculates final classification and confidence.
         Returns: (classification, final_score)
@@ -84,9 +88,24 @@ class DecisionEngine:
             # Behavioral detections are capped slightly below 1.0 to reflect probabilistic nature
             final_score = min(0.98, normalized_score)
 
+        # 2b. Adversarial Evasion Check
+        evasion_score = 0.0
+        evasion_reasons = []
+        if event and self.adversarial_guard:
+            feat_vec = prediction.get("_feature_vector") if prediction else None
+            evasion_score, evasion_reasons = self.adversarial_guard.detect_evasion(
+                event, features=feat_vec
+            )
+            if prediction:
+                prediction["adversarial_score"] = evasion_score
+                prediction["evasion_reasons"] = evasion_reasons
+
         # 3. Categorization
-        if final_score >= self.thresholds.get("attack", 0.9):
+        if final_score >= self.thresholds.get("attack", 0.9) or evasion_score >= 0.5:
             classification = "attack"
+            if evasion_score >= 0.5:
+                # Elevate final confidence score to reflect high severity of evasion
+                final_score = max(final_score, 0.95)
         elif final_score >= self.thresholds.get("suspicious", 0.7):
             classification = "suspicious"
         elif final_score >= self.thresholds.get("anomaly", 0.6):
@@ -98,6 +117,7 @@ class DecisionEngine:
                      ml=ml_score, 
                      anomaly=anomaly_score, 
                      sig=sig_present,
+                     evasion_score=evasion_score,
                      score=round(final_score, 4), 
                      decision=classification,
                      top_features=prediction.get("shap_top3", []) if prediction else [])

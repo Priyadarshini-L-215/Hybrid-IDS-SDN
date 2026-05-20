@@ -57,9 +57,8 @@ async def get_ip_forensics_details(ip_address: str):
     from common.database import db
     from ml_engine.firewall import ActiveFirewall
     try:
-        loop = asyncio.get_running_loop()
         # 1. Get base forensics from DB
-        forensics = await loop.run_in_executor(None, db.get_ip_forensics, ip_address)
+        forensics = await db.get_ip_forensics(ip_address)
         
         if not forensics:
             return {
@@ -77,7 +76,7 @@ async def get_ip_forensics_details(ip_address: str):
         except Exception: pass
 
         # 3. Find similar IPs for correlation
-        similar_nodes = await loop.run_in_executor(None, db.find_similar_ips, ip_address, 3)
+        similar_nodes = await db.find_similar_ips(ip_address, 3)
 
         # 4. Aggregate results
         return {

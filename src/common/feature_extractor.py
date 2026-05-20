@@ -22,6 +22,13 @@ def extract_ttl_from_packet(packet_b64: str) -> float:
         eth_type = packet_bytes[12:14].hex()
         sll_type = packet_bytes[14:16].hex()
         
+        if eth_type == '8100': # VLAN Tagged
+            vlan_eth_type = packet_bytes[16:18].hex()
+            if vlan_eth_type == '0800': # IPv4
+                return float(packet_bytes[18 + 8])
+            elif vlan_eth_type == '86dd': # IPv6
+                return float(packet_bytes[18 + 7])
+        
         if eth_type == '0800': # IPv4 Ethernet
             return float(packet_bytes[14 + 8])
         elif eth_type == '86dd': # IPv6 Ethernet
@@ -100,18 +107,24 @@ class StatefulFeatureTracker:
             self._update_indices(event_meta, 1)
 
     def _update_indices(self, entry, delta):
-        """Helper to increment/decrement all related indices."""
+        """Helper to increment/decrement all related indices with zero-pruning."""
         s, d = entry['src_ip'], entry['dst_ip']
         srv = entry['service']
         dp, sp = entry['dst_port'], entry['src_port']
         
-        self.idx_src[s] += delta
-        self.idx_dst[d] += delta
-        self.idx_src_srv[(s, srv)] += delta
-        self.idx_dst_srv[(d, srv)] += delta
-        self.idx_dst_dport[(d, dp)] += delta
-        self.idx_dst_sport[(d, sp)] += delta
-        self.idx_src_dst[(s, d)] += delta
+        # Helper to update and prune
+        def _upd(idx, key, d):
+            idx[key] += d
+            if idx[key] <= 0:
+                del idx[key]
+
+        _upd(self.idx_src, s, delta)
+        _upd(self.idx_dst, d, delta)
+        _upd(self.idx_src_srv, (s, srv), delta)
+        _upd(self.idx_dst_srv, (d, srv), delta)
+        _upd(self.idx_dst_dport, (d, dp), delta)
+        _upd(self.idx_dst_sport, (d, sp), delta)
+        _upd(self.idx_src_dst, (s, d), delta)
 
     def get_ct_stats(self, src_ip, dst_ip, service, dst_port, src_port):
         """O(1) lookups instead of O(n) linear scan."""
@@ -156,24 +169,28 @@ DEFAULT_FEATURES = [
 ]
 
 def load_feature_names(features_path: str | Path = None) -> list:
+    global _CACHED_FEATURES
+    if features_path is None and _CACHED_FEATURES is not None:
+        return _CACHED_FEATURES
+    
+    is_default = features_path is None
     if features_path is None:
         features_path = Path(__file__).resolve().parents[2] / "models" / "features.json"
     
     features_path = Path(features_path)
-    global _CACHED_FEATURES
-    if _CACHED_FEATURES is not None:
-        return _CACHED_FEATURES
-
     try:
         if not features_path.exists():
-            _CACHED_FEATURES = DEFAULT_FEATURES
+            if is_default:
+                _CACHED_FEATURES = DEFAULT_FEATURES
             return DEFAULT_FEATURES
         with open(features_path, 'r', encoding='utf-8') as f:
             features = json.load(f)
-        _CACHED_FEATURES = features
+        if is_default:
+            _CACHED_FEATURES = features
         return features
     except Exception:
-        _CACHED_FEATURES = DEFAULT_FEATURES
+        if is_default:
+            _CACHED_FEATURES = DEFAULT_FEATURES
         return DEFAULT_FEATURES
 
 def get_proto_encoder():
@@ -207,12 +224,12 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     if not flow and 'raw' in event:
         flow = event['raw'].get('flow', {})
     
-    # Basic Metrics
-    fwd_pkts = float(flow.get('pkts_toserver', 0))
-    bwd_pkts = float(flow.get('pkts_toclient', 0))
-    fwd_bytes = float(flow.get('bytes_toserver', 0))
-    bwd_bytes = float(flow.get('bytes_toclient', 0))
-    age_sec = float(flow.get('age', 0))
+    # Basic Metrics - Robust fallback for flat/aggregated events
+    fwd_pkts = float(flow.get('pkts_toserver') or event.get('packet_count') or 0)
+    bwd_pkts = float(flow.get('pkts_toclient') or 0)
+    fwd_bytes = float(flow.get('bytes_toserver') or event.get('byte_count') or 0)
+    bwd_bytes = float(flow.get('bytes_toclient') or 0)
+    age_sec = float(flow.get('age') or event.get('duration') or 0)
     age_ms = age_sec * 1000
     
     total_pkts = fwd_pkts + bwd_pkts

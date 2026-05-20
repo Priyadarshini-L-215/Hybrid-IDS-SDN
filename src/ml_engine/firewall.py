@@ -177,27 +177,38 @@ class ActiveFirewall:
             
             try:
                 loop = asyncio.get_running_loop()
-                def do_decay():
-                    pipe = cls._redis_client.pipeline()
-                    rehabilitated = []
-                    for ip, score in cls._redis_client.hscan_iter(cls.REDIS_REPUTATION_KEY):
-                        val = float(score)
-                        new_score = val * 0.9
-                        
-                        if val >= REPUTATION_TEMP_BLOCK and new_score < REPUTATION_TEMP_BLOCK:
-                            rehabilitated.append(ip)
-                        
-                        if new_score < 0.1:
-                            pipe.hdel(cls.REDIS_REPUTATION_KEY, ip)
-                        else:
-                            pipe.hset(cls.REDIS_REPUTATION_KEY, ip, new_score)
-                    
-                    pipe.execute()
-                    return rehabilitated
-                
-                rehabilitated_ips = await loop.run_in_executor(None, do_decay)
+                lua_decay = """
+                local key = KEYS[1]
+                local cursor = "0"
+                local rehab = {}
+                repeat
+                    local res = redis.call("HSCAN", key, cursor)
+                    cursor = res[1]
+                    local data = res[2]
+                    for i = 1, #data, 2 do
+                        local ip, score = data[i], tonumber(data[i+1])
+                        local new_score = score * tonumber(ARGV[1])
+                        if score >= tonumber(ARGV[3]) and new_score < tonumber(ARGV[3]) then
+                            table.insert(rehab, ip)
+                        end
+                        if new_score < tonumber(ARGV[2]) then
+                            redis.call("HDEL", key, ip)
+                        else
+                            redis.call("HSET", key, ip, new_score)
+                        end
+                    end
+                until cursor == "0"
+                return rehab
+                """
+                rehabilitated_ips = await loop.run_in_executor(
+                    None, 
+                    lambda: cls._redis_client.register_script(lua_decay)(
+                        keys=[cls.REDIS_REPUTATION_KEY], 
+                        args=[0.9, 0.1, REPUTATION_TEMP_BLOCK]
+                    )
+                )
                 for ip in rehabilitated_ips:
-                    logger.info("IP rehabilitated via decay", ip=ip)
+                    logger.info("IP rehabilitated via atomic decay", ip=ip)
                     await cls.unblock(ip)
                     
             except asyncio.CancelledError:

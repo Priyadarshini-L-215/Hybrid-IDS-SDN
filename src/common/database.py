@@ -1,16 +1,24 @@
+import aiosqlite
 import sqlite3
 import json
 import structlog
-import threading
+import asyncio
 import zlib
 import functools
-from common.config import DB_PATH
+import inspect
+from typing import List, Dict, Any, Optional, Union
+from common.config import DB_PATH, DB_RETENTION_DAYS
 
 logger = structlog.get_logger(__name__)
 
 class DatabaseHandler:
-    """Manages thread-safe database connections for high-performance logging."""
-    _local = threading.local()
+    """Manages asynchronous database connections using aiosqlite."""
+
+    def __init__(self, db_path=DB_PATH):
+        self.db_path = db_path
+        self._conn = None
+        self._lock = asyncio.Lock()
+        self._pruner_task = None
 
     @staticmethod
     @functools.lru_cache(maxsize=100)
@@ -22,69 +30,57 @@ class DatabaseHandler:
         except Exception:
             return {}
 
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = db_path
-        self._pruner_thread = None
-        self._stop_event = threading.Event()
-        
-        # Initial connection to setup schema
-        conn = self._get_conn()
-        self.init_db(conn)
-        
-        # Start pruner in a separate thread
-        self._pruner_thread = threading.Thread(target=self._pruner_loop, daemon=True)
-        self._pruner_thread.start()
+    async def _get_conn(self) -> aiosqlite.Connection:
+        """Get or create a persistent async database connection."""
+        async with self._lock:
+            if self._conn is None:
+                try:
+                    self._conn = await aiosqlite.connect(self.db_path, timeout=60)
+                    await self._conn.execute("PRAGMA journal_mode=WAL")
+                    await self._conn.execute("PRAGMA synchronous=NORMAL")
+                    await self._conn.execute("PRAGMA cache_size=-20000")
+                    await self._conn.execute("PRAGMA busy_timeout=60000")
+                    self._conn.row_factory = aiosqlite.Row
+                    
+                    # Initialize schema if new connection
+                    await self.init_db(self._conn)
+                    
+                    # Start pruner task
+                    if self._pruner_task is None:
+                        self._pruner_task = asyncio.create_task(self._pruner_loop())
+                except Exception as e:
+                    logger.error("Database connection failed", error=str(e))
+                    raise
+            return self._conn
 
-    def _get_conn(self):
-        """Get or create a thread-local database connection."""
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            try:
-                # Set a generous busy timeout and enable WAL mode for high concurrency
-                self._local.conn = sqlite3.connect(self.db_path, timeout=60)
-                self._local.conn.execute("PRAGMA journal_mode=WAL")
-                self._local.conn.execute("PRAGMA synchronous=NORMAL")
-                self._local.conn.execute("PRAGMA cache_size=-20000")
-                self._local.conn.execute("PRAGMA busy_timeout=60000")
-                self._local.conn.row_factory = sqlite3.Row
-            except sqlite3.Error as e:
-                logger.error("Database connection failed", thread=threading.current_thread().name, error=str(e))
-                raise
-        return self._local.conn
-
-    def _pruner_loop(self):
+    async def _pruner_loop(self):
         """Background task to prune old records every hour."""
-        RETENTION_DAYS = 7
-        while not self._stop_event.is_set():
+        while True:
             try:
-                conn = self._get_conn()
-                # Use DEFERRED to avoid deadlocking with concurrent write transactions.
-                # An exclusive lock is only acquired when the DELETE statement runs.
-                conn.execute("BEGIN DEFERRED")
-                cursor = conn.cursor()
-                cursor.execute(
-                    "DELETE FROM alerts WHERE created_at < datetime('now', ?)",
-                    (f'-{RETENTION_DAYS} days',)
-                )
-                deleted = cursor.rowcount
-                conn.commit()
-                if deleted > 0:
-                    logger.info("Pruned old alerts", count=deleted, retention_days=RETENTION_DAYS)
+                conn = await self._get_conn()
+                async with conn.execute("DELETE FROM alerts WHERE created_at < datetime('now', ?)", (f'-{DB_RETENTION_DAYS} days',)):
+                    deleted = conn.total_changes
+                    await conn.commit()
+                    if deleted > 0:
+                        logger.info("Pruned old alerts", count=deleted, retention_days=DB_RETENTION_DAYS)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error("Pruner error", error=str(e))
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
             
-            self._stop_event.wait(3600)
+            await asyncio.sleep(3600)
 
-    def init_db(self, conn=None):
+    async def init_db(self, conn: Optional[aiosqlite.Connection] = None):
         """Initialize the database schema."""
-        if conn is None: conn = self._get_conn()
+        if conn is None:
+            conn = self._conn
+        
+        if conn is None:
+            logger.error("Attempted to init_db without connection")
+            return
+
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.cursor()
-            cursor.execute('''
+            await conn.execute('''
             CREATE TABLE IF NOT EXISTS alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT UNIQUE,
@@ -105,6 +101,7 @@ class DatabaseHandler:
                 ja3_hash TEXT,
                 ja3_string TEXT,
                 shap_top3 TEXT,
+                xai_explanation TEXT,
                 enrichment TEXT,
                 mitre_id TEXT,
                 anomaly_score REAL,
@@ -114,13 +111,16 @@ class DatabaseHandler:
             )
             ''')
             
-            # Optimized Indexes for UI and Forensics
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_src_ts ON alerts (src_ip, created_at DESC)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_pred_ts ON alerts (prediction, created_at DESC)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (created_at DESC)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts (event_id)")
+            # Optimized Indexes
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_src_ts ON alerts (src_ip, created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_pred_ts ON alerts (prediction, created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (created_at DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_event_id ON alerts (event_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON alerts(timestamp DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_prediction ON alerts(prediction)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_src_ip ON alerts(src_ip)")
 
-            cursor.execute('''
+            await conn.execute('''
             CREATE TABLE IF NOT EXISTS false_positives (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 alert_id INTEGER,
@@ -132,66 +132,47 @@ class DatabaseHandler:
                 FOREIGN KEY(alert_id) REFERENCES alerts(id)
             )
             ''')
-            # Migrations for existing DBs
-            try:
-                cursor.execute("ALTER TABLE alerts ADD COLUMN event_id TEXT")
-                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_event_id ON alerts(event_id)")
-            except sqlite3.Error as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.warning(f"DB migration skipped for event_id column: {e}")
-            try:
-                cursor.execute("ALTER TABLE alerts ADD COLUMN mitigation TEXT")
-            except sqlite3.Error as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.warning(f"DB migration skipped for mitigation column: {e}")
-            try:
-                cursor.execute("ALTER TABLE alerts ADD COLUMN is_mitigated INTEGER DEFAULT 0")
-            except sqlite3.Error as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.warning(f"DB migration skipped for is_mitigated column: {e}")
-            try:
-                cursor.execute("ALTER TABLE alerts ADD COLUMN ja3_hash TEXT")
-                cursor.execute("ALTER TABLE alerts ADD COLUMN ja3_string TEXT")
-            except sqlite3.Error as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.warning(f"DB migration skipped for ja3 columns: {e}")
-            try:
-                cursor.execute("ALTER TABLE alerts ADD COLUMN shap_top3 TEXT")
-                cursor.execute("ALTER TABLE alerts ADD COLUMN enrichment TEXT")
-                cursor.execute("ALTER TABLE alerts ADD COLUMN mitre_id TEXT")
-                cursor.execute("ALTER TABLE alerts ADD COLUMN anomaly_score REAL")
-                cursor.execute("ALTER TABLE alerts ADD COLUMN correlation_id TEXT")
-            except sqlite3.Error as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.warning(f"DB migration skipped for forensic columns: {e}")
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON alerts(timestamp DESC)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_prediction ON alerts(prediction)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip ON alerts(src_ip)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip_ts ON alerts(src_ip, timestamp DESC)')
-            conn.commit()
-        except sqlite3.Error as e:
-            logger.error(f"Failed to initialize database: {e}")
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            
+            # Migrations for existing columns (wrapped in try/except)
+            migrations = [
+                "ALTER TABLE alerts ADD COLUMN ja3_hash TEXT",
+                "ALTER TABLE alerts ADD COLUMN ja3_string TEXT",
+                "ALTER TABLE alerts ADD COLUMN mitigation TEXT",
+                "ALTER TABLE alerts ADD COLUMN is_mitigated INTEGER DEFAULT 0",
+                "ALTER TABLE alerts ADD COLUMN shap_top3 TEXT",
+                "ALTER TABLE alerts ADD COLUMN xai_explanation TEXT",
+                "ALTER TABLE alerts ADD COLUMN enrichment TEXT",
+                "ALTER TABLE alerts ADD COLUMN mitre_id TEXT",
+                "ALTER TABLE alerts ADD COLUMN anomaly_score REAL",
+                "ALTER TABLE alerts ADD COLUMN correlation_id TEXT"
+            ]
+            for m in migrations:
+                try:
+                    await conn.execute(m)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e).lower():
+                        logger.debug("Migration already applied or failed", sql=m, error=str(e))
 
-    def add_alert(self, alert_data):
+            await conn.commit()
+        except Exception as e:
+            logger.error("Failed to initialize database", error=str(e))
+            if conn:
+                await conn.rollback()
+
+    async def add_alert(self, alert_data: Dict[str, Any]):
         """Insert a new alert into the database."""
         try:
             raw_event = json.dumps(alert_data.get('raw_event'))
             compressed_raw = zlib.compress(raw_event.encode('utf-8'))
             
-            conn = self._get_conn()
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.cursor()
-            cursor.execute('''
+            conn = await self._get_conn()
+            await conn.execute('''
             INSERT OR IGNORE INTO alerts (
                 event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
                 protocol, alert_sig, prediction, confidence, severity, category, 
                 mitigation, is_mitigated, ja3_hash, ja3_string, 
-                shap_top3, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                shap_top3, xai_explanation, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 alert_data.get('event_id'),
                 alert_data.get('timestamp'),
@@ -211,21 +192,19 @@ class DatabaseHandler:
                 alert_data.get('ja3_hash'),
                 alert_data.get('ja3_string'),
                 json.dumps(alert_data.get('shap_top3', [])),
+                alert_data.get('xai_explanation', ''),
                 json.dumps(alert_data.get('enrichment', {})),
                 alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
                 alert_data.get('anomaly_score', 0.0),
                 alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
-                sqlite3.Binary(compressed_raw)
+                compressed_raw
             ))
-            conn.commit()
-        except sqlite3.Error as e:
-            logger.error(f"Failed to add alert: {e}")
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            await conn.commit()
+        except Exception as e:
+            logger.error("Failed to add alert", error=str(e))
+            await conn.rollback()
 
-    def batch_add_alerts(self, alerts_data_list):
+    async def batch_add_alerts(self, alerts_data_list: List[Dict[str, Any]]):
         """Insert a batch of alerts in a single transaction."""
         if not alerts_data_list: return
         try:
@@ -252,73 +231,32 @@ class DatabaseHandler:
                     alert_data.get('ja3_hash'),
                     alert_data.get('ja3_string'),
                     json.dumps(alert_data.get('shap_top3', [])),
+                    alert_data.get('xai_explanation', ''),
                     json.dumps(alert_data.get('enrichment', {})),
                     alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
                     alert_data.get('anomaly_score', 0.0),
                     alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
-                    sqlite3.Binary(compressed_raw)
+                    compressed_raw
                 ))
             
-            conn = self._get_conn()
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.cursor()
-            cursor.executemany('''
+            conn = await self._get_conn()
+            await conn.executemany('''
             INSERT OR IGNORE INTO alerts (
                 event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
                 protocol, alert_sig, prediction, confidence, severity, category, 
                 mitigation, is_mitigated, ja3_hash, ja3_string, 
-                shap_top3, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                shap_top3, xai_explanation, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', params)
-            conn.commit()
-        except sqlite3.Error as e:
-            logger.error(f"Batch insert failed: {e}")
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            await conn.commit()
+        except Exception as e:
+            logger.error("Batch insert failed", error=str(e))
+            await conn.rollback()
 
-            # Fallback — individual inserts allow partial success,
-            # but we use SAVEPOINTs within a single transaction to avoid N+1 query overhead.
-            try:
-                conn = self._get_conn()
-                conn.execute("BEGIN IMMEDIATE")
-                cursor = conn.cursor()
-                for param in params:
-                    try:
-                        conn.execute("SAVEPOINT fallback")
-                        cursor.execute('''
-                        INSERT OR IGNORE INTO alerts (
-                            event_id, timestamp, event_type, src_ip, src_port, dst_ip, dst_port,
-                            protocol, alert_sig, prediction, confidence, severity, category,
-                            mitigation, is_mitigated, ja3_hash, ja3_string,
-                            shap_top3, enrichment, mitre_id, anomaly_score, correlation_id, raw_event
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', param)
-                        conn.execute("RELEASE SAVEPOINT fallback")
-                    except sqlite3.Error as item_err:
-                        # Log or swallow the error for the single item that failed
-                        logger.debug(f"Fallback item insert failed: {item_err}")
-                        conn.execute("ROLLBACK TO SAVEPOINT fallback")
-                conn.commit()
-            except sqlite3.Error as fallback_err:
-                logger.error(f"Fallback batch transaction failed: {fallback_err}")
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-
-    def query_alerts(self, limit=100, filter_type=None, offset=0):
+    async def query_alerts(self, limit=100, filter_type=None, offset=0) -> List[Dict[str, Any]]:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            
-            # Prioritize attack/alert events over normal flow events
-            # Order by event_type (alert first) then by timestamp DESC to get recent important events
-            query = """
-            SELECT * FROM alerts
-            WHERE 1=1
-            """
+            conn = await self._get_conn()
+            query = "SELECT * FROM alerts WHERE 1=1"
             params = []
             
             if filter_type and filter_type.lower() != 'all':
@@ -328,108 +266,189 @@ class DatabaseHandler:
                     query += " AND lower(prediction) = ?"
                     params.append(filter_type.lower())
             
-            query += """
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-            """
-            params.append(limit)
-            params.append(offset)
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
             
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            async with conn.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
             
             alerts = []
             for row in rows:
                 alert = dict(row)
-                try:
-                    for field in ['shap_top3', 'enrichment']:
-                        if alert.get(field):
-                            try:
-                                alert[field] = json.loads(alert[field])
-                            except Exception:
-                                alert[field] = {} if field == 'enrichment' else []
-                except Exception:
-                    pass
-
+                for field in ['shap_top3', 'enrichment']:
+                    if alert.get(field):
+                        try:
+                            alert[field] = json.loads(alert[field])
+                        except Exception:
+                            alert[field] = {} if field == 'enrichment' else []
                 alert.pop('raw_event', None)
                 alerts.append(alert)
             return alerts
-        except sqlite3.Error as e:
-            logger.error(f"Query failed: {e}")
+        except Exception as e:
+            logger.error("Query failed", error=str(e))
             return []
 
-    def get_ip_forensics(self, ip):
+    async def search_alerts(self, query_params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Advanced search with multiple filters."""
+        try:
+            conn = await self._get_conn()
+            query = "SELECT * FROM alerts WHERE 1=1"
+            params = []
+
+            if query_params.get("src_ip"):
+                query += " AND src_ip LIKE ?"
+                params.append(f"%{query_params['src_ip']}%")
+            
+            if query_params.get("prediction"):
+                query += " AND lower(prediction) = ?"
+                params.append(query_params['prediction'].lower())
+            
+            if query_params.get("severity"):
+                query += " AND severity >= ?"
+                params.append(query_params['severity'])
+            
+            if query_params.get("start_time"):
+                query += " AND timestamp >= ?"
+                params.append(query_params['start_time'])
+            
+            if query_params.get("end_time"):
+                query += " AND timestamp <= ?"
+                params.append(query_params['end_time'])
+            
+            if query_params.get("protocol"):
+                query += " AND lower(protocol) = ?"
+                params.append(query_params['protocol'].lower())
+
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(query_params.get("limit", 100))
+
+            async with conn.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+            
+            alerts = []
+            for row in rows:
+                alert = dict(row)
+                for field in ['shap_top3', 'enrichment']:
+                    if alert.get(field):
+                        try: alert[field] = json.loads(alert[field])
+                        except Exception: alert[field] = {}
+                alert.pop('raw_event', None)
+                alerts.append(alert)
+            return alerts
+        except Exception as e:
+            logger.error("Search failed", error=str(e))
+            return []
+
+    async def get_mitre_stats(self) -> List[Dict[str, Any]]:
+        """Aggregates alert counts by MITRE ATT&CK tactic/ID."""
+        try:
+            conn = await self._get_conn()
+            query = """
+                SELECT mitre_id, COUNT(*) as count, MAX(created_at) as last_seen
+                FROM alerts WHERE mitre_id IS NOT NULL
+                GROUP BY mitre_id ORDER BY count DESC
+            """
+            async with conn.execute(query) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            logger.error("MITRE stats failed", error=str(e))
+            return []
+
+    async def get_geo_stats(self) -> List[Dict[str, Any]]:
+        """Aggregates threat origins for map visualization."""
+        try:
+            conn = await self._get_conn()
+            # This requires parsing JSON enrichment in SQLite or doing it in Python
+            # For simplicity and performance, we'll fetch recent malicious alerts and aggregate here
+            query = """
+                SELECT enrichment FROM alerts 
+                WHERE lower(prediction) IN ('attack', 'anomaly', 'zero-day anomaly')
+                AND enrichment IS NOT NULL
+                ORDER BY created_at DESC LIMIT 500
+            """
+            async with conn.execute(query) as cursor:
+                rows = await cursor.fetchall()
+            
+            stats = {}
+            for row in rows:
+                try:
+                    data = json.loads(row['enrichment'])
+                    cc = data.get("country_code")
+                    if cc:
+                        if cc not in stats:
+                            stats[cc] = {"count": 0, "lat": data.get("lat"), "lon": data.get("lon")}
+                        stats[cc]["count"] += 1
+                except Exception: continue
+            
+            return [{"country_code": k, **v} for k, v in stats.items()]
+        except Exception as e:
+            logger.error("Geo stats failed", error=str(e))
+            return []
+
+    async def get_ip_forensics(self, ip: str) -> Optional[Dict[str, Any]]:
         """Returns detailed forensic metadata for a specific IP address."""
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
+            conn = await self._get_conn()
             
             # 1. Timeline metrics
-            cursor.execute("""
-                SELECT 
-                    MIN(timestamp) as first_seen, 
-                    MAX(timestamp) as last_seen,
-                    COUNT(*) as total_events
+            async with conn.execute("""
+                SELECT MIN(timestamp) as first_seen, MAX(timestamp) as last_seen, COUNT(*) as total_events
                 FROM alerts WHERE src_ip = ?
-            """, (ip,))
-            timeline = dict(cursor.fetchone())
+            """, (ip,)) as cursor:
+                row = await cursor.fetchone()
+                timeline = dict(row) if row else {"total_events": 0}
             
+            if timeline.get("total_events") == 0:
+                return None
+
             # 2. Prediction distribution
-            cursor.execute("""
-                SELECT prediction, COUNT(*) as count 
-                FROM alerts WHERE src_ip = ? 
-                GROUP BY prediction
-            """, (ip,))
-            predictions = {row['prediction']: row['count'] for row in cursor.fetchall()}
+            async with conn.execute("""
+                SELECT prediction, COUNT(*) as count FROM alerts WHERE src_ip = ? GROUP BY prediction
+            """, (ip,)) as cursor:
+                predictions = {row['prediction']: row['count'] for row in await cursor.fetchall()}
             
-            # 3. Get Top Signatures and JA3
-            cursor.execute("""
+            # 3. Top Signatures and JA3
+            async with conn.execute("""
                 SELECT alert_sig, COUNT(*) as count FROM alerts 
                 WHERE src_ip = ? AND alert_sig IS NOT NULL
                 GROUP BY alert_sig ORDER BY count DESC LIMIT 3
-            """, (ip,))
-            top_sigs = [dict(row) for row in cursor.fetchall()]
+            """, (ip,)) as cursor:
+                top_sigs = [dict(row) for row in await cursor.fetchall()]
 
-            cursor.execute("""
+            async with conn.execute("""
                 SELECT ja3_hash, COUNT(*) as count FROM alerts 
                 WHERE src_ip = ? AND ja3_hash IS NOT NULL
                 GROUP BY ja3_hash ORDER BY count DESC LIMIT 1
-            """, (ip,))
-            primary_ja3 = cursor.fetchone()
-            primary_ja3_hash = primary_ja3['ja3_hash'] if primary_ja3 else None
+            """, (ip,)) as cursor:
+                primary_ja3_row = await cursor.fetchone()
+                primary_ja3_hash = primary_ja3_row['ja3_hash'] if primary_ja3_row else None
             
-            # 4. Recent history & Latency Stats
-            cursor.execute("""
+            # 4. Recent history
+            async with conn.execute("""
                 SELECT timestamp, prediction, confidence, alert_sig, mitigation, 
-                       shap_top3, enrichment, anomaly_score, raw_event
+                       shap_top3, xai_explanation, enrichment, anomaly_score, raw_event
                 FROM alerts WHERE src_ip = ? 
                 ORDER BY timestamp DESC LIMIT 20
-            """, (ip,))
-            history_rows = cursor.fetchall()
+            """, (ip,)) as cursor:
+                history_rows = await cursor.fetchall()
             
             history = []
             latencies = []
             cti_data = None
             for row in history_rows:
                 h = dict(row)
-                try:
-                    raw_data = h['raw_event']
-                    if raw_data:
-                        evt = self._decompress_event(raw_data)
-                        # Extract latency
-                        lat = evt.get("latency", {}).get("total_ms")
-                        if lat: latencies.append(lat)
-                        # Extract CTI from the most recent event that has it
-                        if not cti_data:
-                            cti_data = evt.get("enrichment", {}).get("cti")
-                except Exception:
-                    pass
-                try:
-                    for field in ['shap_top3', 'enrichment']:
-                        if h.get(field):
-                            h[field] = json.loads(h[field])
-                except Exception: pass
-
+                if h.get('raw_event'):
+                    evt = self._decompress_event(h['raw_event'])
+                    lat = evt.get("latency", {}).get("total_ms")
+                    if lat: latencies.append(lat)
+                    if not cti_data:
+                        cti_data = evt.get("enrichment", {}).get("cti")
+                
+                for field in ['shap_top3', 'enrichment']:
+                    if h.get(field):
+                        try: h[field] = json.loads(h[field])
+                        except Exception: h[field] = {} if field == 'enrichment' else []
+                
                 h.pop('raw_event', None)
                 history.append(h)
             
@@ -447,174 +466,153 @@ class DatabaseHandler:
                 "top_signatures": top_sigs,
                 "history": history
             }
-        except sqlite3.Error as e:
-            logger.error(f"Forensics query failed for {ip}: {e}")
+        except Exception as e:
+            logger.error("Forensics query failed", ip=ip, error=str(e))
             return None
 
-    def find_similar_ips(self, ip, limit=5):
-        """
-        Finds other IPs that exhibit a similar attack pattern.
-        Pattern similarity is calculated based on overlapping alert signatures.
-        """
+    async def find_similar_ips(self, ip: str, limit=5) -> List[Dict[str, Any]]:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
+            conn = await self._get_conn()
+            async with conn.execute("SELECT DISTINCT alert_sig FROM alerts WHERE src_ip = ? AND alert_sig IS NOT NULL", (ip,)) as cursor:
+                target_sigs = [row['alert_sig'] for row in await cursor.fetchall()]
             
-            # 1. Get signatures and JA3 for the target IP
-            cursor.execute("SELECT DISTINCT alert_sig FROM alerts WHERE src_ip = ? AND alert_sig IS NOT NULL", (ip,))
-            target_sigs = [row['alert_sig'] for row in cursor.fetchall()]
+            async with conn.execute("SELECT DISTINCT ja3_hash FROM alerts WHERE src_ip = ? AND ja3_hash IS NOT NULL", (ip,)) as cursor:
+                target_ja3s = [row['ja3_hash'] for row in await cursor.fetchall()]
             
-            cursor.execute("SELECT DISTINCT ja3_hash FROM alerts WHERE src_ip = ? AND ja3_hash IS NOT NULL", (ip,))
-            target_ja3s = [row['ja3_hash'] for row in cursor.fetchall()]
-            
-            if not target_sigs and not target_ja3s:
-                return []
+            if not target_sigs and not target_ja3s: return []
                 
-            # 2. Find IPs that share these patterns
             sig_placeholders = ', '.join(['?'] * len(target_sigs)) if target_sigs else "NULL"
             ja3_placeholders = ', '.join(['?'] * len(target_ja3s)) if target_ja3s else "NULL"
             
             query = f"""
-                SELECT 
-                    src_ip, 
-                    COUNT(DISTINCT alert_sig) as shared_sigs,
-                    COUNT(DISTINCT ja3_hash) as shared_ja3s,
-                    COUNT(*) as total_alerts
+                SELECT src_ip, COUNT(DISTINCT alert_sig) as shared_sigs, COUNT(DISTINCT ja3_hash) as shared_ja3s, COUNT(*) as total_alerts
                 FROM alerts 
-                WHERE (alert_sig IN ({sig_placeholders}) OR ja3_hash IN ({ja3_placeholders}))
-                  AND src_ip != ?
-                GROUP BY src_ip
-                ORDER BY shared_ja3s DESC, shared_sigs DESC, total_alerts DESC
-                LIMIT ?
+                WHERE (alert_sig IN ({sig_placeholders}) OR ja3_hash IN ({ja3_placeholders})) AND src_ip != ?
+                GROUP BY src_ip ORDER BY shared_ja3s DESC, shared_sigs DESC, total_alerts DESC LIMIT ?
             """
-            
-            params = []
-            if target_sigs: params.extend(target_sigs)
-            if target_ja3s: params.extend(target_ja3s)
-            params.append(ip)
-            params.append(limit)
-            
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
-        except sqlite3.Error as e:
-            logger.error(f"Similarity search failed for {ip}: {e}")
+            params = target_sigs + target_ja3s + [ip, limit]
+            async with conn.execute(query, params) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+        except Exception as e:
+            logger.error("Similarity search failed", ip=ip, error=str(e))
             return []
 
-    def add_false_positive(self, alert_id):
-        """Logs an alert as a false positive for future retraining."""
+    async def add_false_positive(self, alert_id: int) -> bool:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
+            conn = await self._get_conn()
+            async with conn.execute("SELECT src_ip, prediction, confidence, alert_sig FROM alerts WHERE id = ?", (alert_id,)) as cursor:
+                alert = await cursor.fetchone()
             
-            # 1. Get alert data
-            cursor.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,))
-            row = cursor.fetchone()
-            if not row: return False
+            if not alert: return False
             
-            alert = dict(row)
-            
-            # 2. Insert into false_positives table
-            cursor.execute("""
+            await conn.execute("""
                 INSERT INTO false_positives (alert_id, src_ip, prediction, confidence, alert_sig)
                 VALUES (?, ?, ?, ?, ?)
             """, (alert_id, alert['src_ip'], alert['prediction'], alert['confidence'], alert['alert_sig']))
-            conn.commit()
+            await conn.commit()
             return True
-        except sqlite3.Error as e:
-            logger.error(f"Failed to log false positive: {e}")
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+        except Exception as e:
+            logger.error("Failed to log false positive", alert_id=alert_id, error=str(e))
+            await conn.rollback()
             return False
 
-    def get_stats(self):
-        """Calculate system stats."""
+    async def get_stats(self) -> Dict[str, int]:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            query = """
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN lower(prediction) IN ('attack', 'suspicious', 'anomaly', 'zero-day anomaly') THEN 1 ELSE 0 END) as attacks,
-                    SUM(CASE WHEN lower(prediction) = 'normal' THEN 1 ELSE 0 END) as normal
-                FROM alerts 
-                WHERE lower(category) != 'attack simulation'
-            """
-            cursor.execute(query)
-            row = cursor.fetchone()
+            conn = await self._get_conn()
+            async with conn.execute("""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN lower(prediction) IN ('attack', 'suspicious', 'anomaly', 'zero-day anomaly') THEN 1 ELSE 0 END) as attacks,
+                       SUM(CASE WHEN lower(prediction) = 'normal' THEN 1 ELSE 0 END) as normal
+                FROM alerts WHERE lower(category) != 'attack simulation'
+            """) as cursor:
+                r = await cursor.fetchone()
+                row = dict(r) if r else {"total": 0, "attacks": 0, "normal": 0}
             
             return {
                 "total_processed": row['total'] or 0,
                 "attack_total": row['attacks'] or 0,
                 "normal_total": row['normal'] or 0
             }
-        except sqlite3.Error as e:
-            logger.error(f"Stats query failed: {e}")
+        except Exception as e:
+            logger.error("Stats query failed", error=str(e))
             return {"total_processed": 0, "attack_total": 0, "normal_total": 0}
 
-    def get_alert_timeline(self, src_ip, limit=50):
-        """Returns a time-sorted list of alerts for a specific IP, with XAI data."""
+    async def get_alert_by_id(self, alert_id: Union[int, str]) -> Optional[Dict[str, Any]]:
         try:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM alerts 
-                WHERE src_ip = ? 
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            """, (src_ip, limit))
-            rows = cursor.fetchall()
+            conn = await self._get_conn()
+            if str(alert_id).isdigit():
+                async with conn.execute("SELECT * FROM alerts WHERE id = ?", (int(alert_id),)) as cursor:
+                    row = await cursor.fetchone()
+            else:
+                async with conn.execute("SELECT * FROM alerts WHERE event_id = ?", (str(alert_id),)) as cursor:
+                    row = await cursor.fetchone()
             
-            timeline = []
-            for row in rows:
-                alert = dict(row)
-                # Parse JSON fields
-                for field in ['shap_top3', 'enrichment']:
-                    try:
-                        if alert.get(field):
-                            alert[field] = json.loads(alert[field])
-                    except Exception:
-                        alert[field] = {} if field == 'enrichment' else []
-                
-                # Handle raw_event decompression
-                try:
-                    if alert.get('raw_event'):
-                        decompressed = zlib.decompress(alert['raw_event']).decode('utf-8')
-                        alert['raw_event'] = json.loads(decompressed)
-                except Exception:
-                    alert['raw_event'] = {}
-                timeline.append(alert)
-            return timeline
-        except sqlite3.Error as e:
-            logger.error(f"Timeline query failed for {src_ip}: {e}")
-            return []
+            if not row: return None
+            alert = dict(row)
+            if alert.get("raw_event"):
+                alert["raw_event"] = self._decompress_event(alert["raw_event"])
+            for field in ("shap_top3", "enrichment"):
+                if alert.get(field):
+                    try: alert[field] = json.loads(alert[field])
+                    except Exception: alert[field] = {} if field == "enrichment" else []
+            return alert
+        except Exception as e:
+            logger.error("get_alert_by_id failed", alert_id=alert_id, error=str(e))
+            return None
 
-    def close(self):
-        self._stop_event.set()
-        if hasattr(self._local, "conn") and self._local.conn:
-            self._local.conn.close()
-            self._local.conn = None
+    async def get_alert_signature(self, alert_id: int) -> Optional[str]:
+        try:
+            conn = await self._get_conn()
+            async with conn.execute("SELECT alert_sig FROM alerts WHERE id = ?", (alert_id,)) as cursor:
+                row = await cursor.fetchone()
+            return row["alert_sig"] if row else None
+        except Exception as e:
+            logger.error("get_alert_signature failed", alert_id=alert_id, error=str(e))
+            return None
+
+    async def close(self):
+        if self._pruner_task:
+            self._pruner_task.cancel()
+            try: await self._pruner_task
+            except asyncio.CancelledError: pass
+        if self._conn:
+            await self._conn.close()
+            self._conn = None
 
 _handler = None
-_lock = threading.Lock()
+_lock = asyncio.Lock()
 
-def _get_handler():
+async def _get_handler():
     global _handler
     if _handler is None:
-        with _lock:
+        async with _lock:
             if _handler is None:
                 _handler = DatabaseHandler()
     return _handler
 
-def init_db(): _get_handler().init_db()
-def add_alert(data): _get_handler().add_alert(data)
-def batch_add_alerts(data_list): _get_handler().batch_add_alerts(data_list)
-def query_alerts(limit=100, filter_type=None, offset=0): return _get_handler().query_alerts(limit, filter_type, offset)
-def get_recent_alerts(limit=100): return _get_handler().query_alerts(limit)
-def get_stats(): return _get_handler().get_stats()
-def get_ip_forensics(ip): return _get_handler().get_ip_forensics(ip)
-def find_similar_ips(ip, limit=5): return _get_handler().find_similar_ips(ip, limit)
-def add_false_positive(alert_id): return _get_handler().add_false_positive(alert_id)
-def get_alert_timeline(src_ip, limit=50): return _get_handler().get_alert_timeline(src_ip, limit)
-db = _get_handler()
+async def init_db(): await (await _get_handler())._get_conn()
+async def add_alert(data): await (await _get_handler()).add_alert(data)
+async def batch_add_alerts(data_list): await (await _get_handler()).batch_add_alerts(data_list)
+async def query_alerts(limit=100, filter_type=None, offset=0): return await (await _get_handler()).query_alerts(limit, filter_type, offset)
+async def get_recent_alerts(limit=100): return await (await _get_handler()).query_alerts(limit)
+async def get_stats(): return await (await _get_handler()).get_stats()
+async def get_ip_forensics(ip): return await (await _get_handler()).get_ip_forensics(ip)
+async def find_similar_ips(ip, limit=5): return await (await _get_handler()).find_similar_ips(ip, limit)
+async def add_false_positive(alert_id): return await (await _get_handler()).add_false_positive(alert_id)
+async def get_alert_by_id(alert_id): return await (await _get_handler()).get_alert_by_id(alert_id)
+async def get_alert_signature(alert_id: int): return await (await _get_handler()).get_alert_signature(alert_id)
+async def search_alerts(params): return await (await _get_handler()).search_alerts(params)
+async def get_mitre_stats(): return await (await _get_handler()).get_mitre_stats()
+async def get_geo_stats(): return await (await _get_handler()).get_geo_stats()
+
+# For backward compatibility if someone uses 'db' object directly
+class DBProxy:
+    def __getattr__(self, name):
+        async def wrapper(*args, **kwargs):
+            handler = await _get_handler()
+            method = getattr(handler, name)
+            if inspect.iscoroutinefunction(method):
+                return await method(*args, **kwargs)
+            return method(*args, **kwargs)
+        return wrapper
+db = DBProxy()

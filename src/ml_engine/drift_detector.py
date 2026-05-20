@@ -8,6 +8,7 @@ Design Principles:
 """
 import time
 import asyncio
+import inspect
 import structlog
 from typing import Optional, Callable
 
@@ -72,7 +73,7 @@ class DriftDetector:
                     }
                     
                     try:
-                        if asyncio.iscoroutinefunction(self.on_drift):
+                        if inspect.iscoroutinefunction(self.on_drift):
                             await self.on_drift(drift_info)
                         else:
                             self.on_drift(drift_info)

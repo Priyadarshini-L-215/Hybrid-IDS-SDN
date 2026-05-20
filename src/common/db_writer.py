@@ -69,10 +69,8 @@ class AsyncAlertWriter:
                 if batch:
                     try:
                         start_t = time.time()
-                        # We use the sync batch_add_alerts but wrap it in an executor
-                        # to avoid blocking the event loop
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, db.batch_add_alerts, batch)
+                        # Use the native async batch_add_alerts
+                        await db.batch_add_alerts(batch)
 
                         lat = (time.time() - start_t) * 1000
                         logger.debug("Async batch write complete", count=len(batch), latency_ms=round(lat, 2))

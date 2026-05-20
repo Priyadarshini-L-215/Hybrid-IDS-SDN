@@ -1,13 +1,13 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 class BaseMessage(BaseModel):
     model_config = ConfigDict(
         extra="ignore",
         protected_namespaces=()
     )
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
 
 class RawEvent(BaseMessage):
     """Schema for data coming from Suricata socket."""
@@ -65,3 +65,125 @@ class SystemStatus(BaseModel):
     error_count: int
     queue_depth: int
     extra: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# API Response Models
+# ---------------------------------------------------------------------------
+
+class HealthResponse(BaseModel):
+    """Response for GET /api/health."""
+    status: str
+    timestamp: str
+
+
+class AlertSummary(BaseModel):
+    """Compact alert representation in list responses."""
+    id: Optional[int] = None
+    event_id: Optional[str] = None
+    src_ip: Optional[str] = None
+    dst_ip: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_port: Optional[int] = None
+    protocol: Optional[str] = None
+    prediction: Optional[str] = None
+    confidence: Optional[float] = None
+    category: Optional[str] = None
+    alert_sig: Optional[str] = None
+    final_score: Optional[float] = None
+    timestamp: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class AlertsResponse(BaseModel):
+    """Response for GET /api/alerts."""
+    alerts: List[AlertSummary]
+    total_processed: int = 0
+    attack_total: int = 0
+    normal_total: int = 0
+    displayed_total: int = 0
+    error: Optional[str] = None
+
+
+class BaselineStatsDetail(BaseModel):
+    mean: float = 0.0
+    std: float = 0.0
+
+
+class BaselineStatusResponse(BaseModel):
+    """Response for GET /api/baseline/status."""
+    is_calibrated: bool
+    drift_detected: bool
+    last_refresh: str
+    accuracy_pct: float
+    last_trained: str
+    model_version: str
+    baseline_stats: BaselineStatsDetail
+
+
+class MLEngineStatus(BaseModel):
+    status: str
+    ready: bool
+
+    model_config = {"extra": "allow"}
+
+
+class PipelineChecks(BaseModel):
+    consumer_running: bool
+    redis_ok: bool
+    ws_port_open: bool
+
+
+class PipelineStatsDetail(BaseModel):
+    processed_total: int = 0
+    attacks: int = 0
+    normal: int = 0
+
+
+class PipelineStatusResponse(BaseModel):
+    """Response for GET /api/pipeline/status."""
+    status: str
+    ml_engine: Dict[str, Any]
+    redis_ok: bool
+    queue_depth: int
+    stats: PipelineStatsDetail
+    ipset: Dict[str, Any]
+    ipset_detailed: Dict[str, Any]
+    checks: PipelineChecks
+
+
+class PipelineStatusSlimResponse(BaseModel):
+    """Response for GET /api/pipeline/status/slim."""
+    status: str
+    ml_engine: str
+    consumer: str
+    blocked_count: int = 0
+    ts: float
+    trace_id: str
+
+
+class MitigationResult(BaseModel):
+    """Response for POST /api/mitigation/* endpoints."""
+    success: bool
+    message: str
+
+
+class NodeIntelligenceResponse(BaseModel):
+    """Response for GET /api/intelligence/node/{ip}."""
+    ip: str
+    alert_count: int = 0
+    recent_activity: List[Any] = Field(default_factory=list)
+    reputation_score: int = 0
+    is_mitigated: bool = False
+    predictions: Dict[str, Any] = Field(default_factory=dict)
+    top_signatures: List[Any] = Field(default_factory=list)
+    geo: Dict[str, Any] = Field(default_factory=dict)
+    cti: Dict[str, Any] = Field(default_factory=dict)
+    first_seen: Optional[str] = None
+    last_seen: Optional[str] = None
+    ja3_hash: Optional[str] = None
+    lateral_movement_risk: List[Any] = Field(default_factory=list)
+    error: Optional[str] = None
+
+    model_config = {"extra": "allow"}

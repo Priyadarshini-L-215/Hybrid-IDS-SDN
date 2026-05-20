@@ -17,15 +17,14 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from common.config import (
-    REDIS_ALERT_STREAM, setup_logging, API_PORT
+    REDIS_ALERT_STREAM, setup_logging, API_PORT, DEV_MODE
 )
 from ml_engine import redis_client as rc
 from relay.ws_manager import ConnectionManager
 from ml_engine.engine import MLEngine
 from ml_engine.firewall import ActiveFirewall
 
-# Import routers
-from relay.routes import system, simulation, forensics, models, lab, pcap
+
 
 # Initialize logging
 setup_logging("relay")
@@ -139,10 +138,13 @@ app.add_middleware(
 )
 
 # Request ID Middleware
+import time as _time
 import uuid
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
+from common.metrics import PROM_API_REQUESTS, PROM_API_LATENCY
+
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -150,20 +152,58 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         # Add to structlog context for this request
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
-        
+
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
 
+
+class PrometheusMiddleware(BaseHTTPMiddleware):
+    """Records per-endpoint request counts and latency for Prometheus scraping."""
+
+    async def dispatch(self, request: Request, call_next):
+        # Normalise the path (strip IDs) for low-cardinality metric labels
+        path = request.url.path
+        start = _time.perf_counter()
+        response = await call_next(request)
+        elapsed = _time.perf_counter() - start
+
+        PROM_API_REQUESTS.labels(
+            method=request.method,
+            endpoint=path,
+            status_code=str(response.status_code)
+        ).inc()
+        PROM_API_LATENCY.labels(endpoint=path).observe(elapsed)
+        return response
+
+
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(PrometheusMiddleware)
 
 # Include Routers
-app.include_router(system.router)
+from relay.routes import (
+    health, config_api, mitigation_api, intelligence_api,
+    simulation, forensics, models, lab, pcap
+)
+
+app.include_router(health.router)
+app.include_router(config_api.router)
+app.include_router(mitigation_api.router)
+app.include_router(intelligence_api.router)
 app.include_router(models.router)
 app.include_router(lab.router)
 app.include_router(forensics.router)
 app.include_router(pcap.router)
 app.include_router(simulation.router)
+
+# Developer-only routes — only mounted when DEV_MODE is enabled.
+# This ensures /api/dev/reset is NEVER reachable in production.
+if DEV_MODE:
+    from relay.routes import dev as dev_routes
+    app.include_router(dev_routes.router)
+    logger.warning("DEV_MODE is enabled — developer endpoints are active")
+
+
 
 # --- WEBSOCKET ---
 @app.websocket("/ws/alerts")

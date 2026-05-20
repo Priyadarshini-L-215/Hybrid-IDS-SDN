@@ -30,7 +30,12 @@ class SDNClient:
     async def block(self, ip: str, ttl: int = 0) -> bool:
         """Install DROP flow rule for source IP."""
         try:
-            resp = await self.async_client.post(f"{self.api_url}/block", json={"ip": ip, "ttl": ttl})
+            if not self._async_client:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.post(f"{self.api_url}/block", json={"ip": ip, "ttl": ttl})
+                    return resp.status_code == 200
+            
+            resp = await self._async_client.post(f"{self.api_url}/block", json={"ip": ip, "ttl": ttl})
             if resp.status_code == 200:
                 logger.info("SDN: Blocked IP", ip=ip, ttl=ttl)
                 return True
@@ -62,7 +67,14 @@ class SDNClient:
     async def get_flows(self) -> Dict[str, Any]:
         """Fetch current flow rules and stats from controller."""
         try:
-            resp = await self.async_client.get(f"{self.api_url}/flows")
+            if not self._async_client:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(f"{self.api_url}/flows")
+                    if resp.status_code == 200:
+                        return resp.json()
+                    return {"blocked_ips": [], "status": "offline"}
+
+            resp = await self._async_client.get(f"{self.api_url}/flows")
             if resp.status_code == 200:
                 return resp.json()
         except Exception as e:

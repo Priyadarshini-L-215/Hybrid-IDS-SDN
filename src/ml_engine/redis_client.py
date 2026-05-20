@@ -102,7 +102,7 @@ async def test_async_redis():
 
 async def close_async_redis():
     """Close the async Redis client if it was initialized."""
-    global async_redis_client
+    global async_redis_client, _async_initialized
     if async_redis_client is None:
         return
 
@@ -112,6 +112,7 @@ async def close_async_redis():
         logger.warning(f"[Redis] Failed to close async client cleanly: {e}")
     finally:
         async_redis_client = None
+        _async_initialized = False
 
 
 def get_queue_depth(queue_name):

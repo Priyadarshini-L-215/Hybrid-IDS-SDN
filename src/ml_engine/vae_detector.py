@@ -7,15 +7,15 @@ into a clean interface for use by the ML Engine.
 Updated to support the 49-feature UNSW-NB15 schema.
 """
 
-import structlog
 import os
+if not os.environ.get("KERAS_BACKEND"):
+    os.environ["KERAS_BACKEND"] = "torch"
+
+import structlog
 import numpy as np
 from pathlib import Path
 import joblib
 from typing import Tuple, Optional, List, Union
-
-# Note: Keras backend is now set at application entry point (consumer.py, relay/app.py)
-# before any ML module imports to ensure consistency across the application.
 
 try:
     import keras
@@ -30,7 +30,7 @@ except ImportError:
     ONNX_AVAILABLE = False
 
 if KERAS_AVAILABLE:
-    @keras.saving.register_keras_serializable()
+    @keras.saving.register_keras_serializable(package="Sentinel")
     class Sampling(keras.layers.Layer):
         """Uses (z_mean, z_log_var) to sample z."""
         def call(self, inputs):
@@ -87,11 +87,9 @@ class VaeAnomalyDetector:
                 logger.info("VAE using ONNX runtime for inference")
             elif KERAS_AVAILABLE:
                 # Load Keras models (original logic)
-                custom_objects = {'Sampling': Sampling}
-                keras.utils.get_custom_objects()['Sampling'] = Sampling
-                with keras.saving.custom_object_scope(custom_objects):
-                    self.encoder = keras.models.load_model(encoder_path, compile=False, safe_mode=False)
-                    self.decoder = keras.models.load_model(decoder_path, compile=False, safe_mode=False)
+                # Keras 3 uses the serializable registration
+                self.encoder = keras.models.load_model(encoder_path, compile=False, safe_mode=False)
+                self.decoder = keras.models.load_model(decoder_path, compile=False, safe_mode=False)
                 logger.info("VAE using Keras for inference")
             else:
                 logger.error("Neither Keras nor ONNX available for VAE detector")

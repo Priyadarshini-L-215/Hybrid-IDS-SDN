@@ -21,7 +21,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 from common.config import (
-    RF_MODEL_PATH, SCALER_PATH, AUTOENCODER_PATH, 
+    get_model_path, get_scaler_path, AUTOENCODER_PATH, 
     MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
     ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE,
     ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES,
@@ -157,7 +157,7 @@ class MLEngine:
             # 2. Load Scaler
             from common.config import ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, MODELS_DIR
             
-            scaler_path = MODELS_DIR / ACTIVE_SCALER_FILE
+            scaler_path = get_scaler_path()
             if scaler_path.exists():
                 self.scaler = joblib.load(scaler_path)
                 self.stage_status["scaler"] = "loaded"
@@ -166,7 +166,7 @@ class MLEngine:
                 self.load_warnings.append(f"Missing scaler: {scaler_path}")
             
             # 3. Load RF (Check extension)
-            model_path = MODELS_DIR / ACTIVE_MODEL_FILE
+            model_path = get_model_path()
             if ONNX_AVAILABLE and model_path.suffix == ".onnx" and model_path.exists():
                 self.rf_session = ort.InferenceSession(str(model_path))
                 self.stage_status["rf"] = "loaded_onnx"
@@ -262,6 +262,29 @@ class MLEngine:
             logger.error("Failed to load models", error=str(e))
             self.fallback_mode = True
 
+    def _predict_batch_raw(self, X: np.ndarray) -> np.ndarray:
+        """Raw inference on numpy array."""
+        if not self.is_ready or self.fallback_mode:
+            return np.zeros(len(X))
+        
+        try:
+            # Align features
+            expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
+            if X.shape[1] != expected_dim:
+                if X.shape[1] > expected_dim:
+                    X_aligned = X[:, :expected_dim]
+                else:
+                    X_aligned = np.pad(X, ((0, 0), (0, expected_dim - X.shape[1])), mode='constant')
+            else:
+                X_aligned = X
+            
+            X_scaled = self.scaler.transform(X_aligned)
+            probs = self.rf_model.predict_proba(X_scaled)
+            return probs[:, 1]
+        except Exception as e:
+            logger.error("Raw batch prediction failed", error=str(e))
+            return np.zeros(len(X))
+
     def _validate_schema(self) -> bool:
         """Validates that the loaded models and scaler match the feature_order dimension."""
         expected_dim = len(self.feature_order)
@@ -283,11 +306,12 @@ class MLEngine:
                 return False
         
         # Validate VAE
-        if self.vae_detector and hasattr(self.vae_detector, "input_dim"):
-            if self.vae_detector.input_dim != expected_dim:
+        if self.vae_detector:
+            vae_dim = getattr(self.vae_detector, "n_features", getattr(self.vae_detector, "input_dim", None))
+            if vae_dim is not None and vae_dim != expected_dim:
                 logger.warning("VAE dimension mismatch", 
                                expected=expected_dim, 
-                               actual=self.vae_detector.input_dim)
+                               actual=vae_dim)
                 # We don't fail the whole engine for VAE mismatch, just disable VAE
                 self.stage_status["vae"] = "dim_mismatch"
                 self.vae_detector = None
@@ -317,13 +341,17 @@ class MLEngine:
             "vae_threshold": self.vae_threshold,
         }
 
-    def predict_batch(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def predict_batch(self, events: Union[List[Dict[str, Any]], np.ndarray]) -> Union[List[Dict[str, Any]], np.ndarray]:
         """
-        Processes a batch of raw Suricata events.
-        Returns a list of result dicts with scores and decisions.
+        Processes a batch of raw Suricata events or a pre-processed numpy array.
+        Returns a list of result dicts or a numpy array of scores.
         """
-        if not events:
-            return []
+        if events is None or (isinstance(events, (list, np.ndarray)) and len(events) == 0):
+            return [] if isinstance(events, list) else np.array([])
+
+        if isinstance(events, np.ndarray):
+            # Fast path for raw numpy arrays (e.g., from evaluator)
+            return self._predict_batch_raw(events)
 
         start_time = time.time()
         results = []
@@ -356,7 +384,21 @@ class MLEngine:
                 expected_dim=len(self.feature_order) if self.feature_order else 77,
             )
         
-        # 2. Inference
+        # 2. Diagnostic Check for All-Zero Features
+        zero_vec_count = 0
+        for vec in valid_features:
+            if all(v == 0.0 or v == 0 for v in vec):
+                zero_vec_count += 1
+        
+        if zero_vec_count > 0:
+            logger.warning(
+                "Detected all-zero feature vectors in batch",
+                zero_count=zero_vec_count,
+                total_valid=len(valid_features),
+                suggestion="Check feature_extractor.py logic for event structure mismatches"
+            )
+
+        # 3. Inference
         t_infer_start = time.time()
         
         # Initialize scores as None (meaning "no opinion/skipped")
@@ -423,8 +465,15 @@ class MLEngine:
                 batch_shap_results = {} 
                 if self.shap_explainer:
                     try:
-                        # OPTIMIZATION: Only run SHAP for uncertain or suspicious samples
-                        suspicious_mask = (np.array(ml_scores_valid) > 0.1) & (np.array(ml_scores_valid) < 0.95)
+                        # Run SHAP for all suspicious and obvious attack samples.
+                        # We include anomalies (VAE) and signature-based alerts in the mask.
+                        ml_mask = (np.array(ml_scores_valid) > 0.05)
+                        anomaly_mask = np.array([float(s) if s is not None else 0.0 for s in batch_anomaly_scores]) > 0.2
+                        
+                        # Also include any events that have signatures
+                        sig_mask = np.array([events[idx].get("event_type") == "alert" for idx in valid_indices])
+                        
+                        suspicious_mask = ml_mask | anomaly_mask | sig_mask
                         
                         if suspicious_mask.any():
                             t_shap_start = time.time()
@@ -498,12 +547,13 @@ class MLEngine:
                 "ml_score": safe_score(ml_scores[i]),
                 "anomaly_score": safe_score(anomaly_score),
                 "sig_present": sig_present,
-                "shap_top3": shap_top3
+                "shap_top3": shap_top3,
+                "_feature_vector": valid_features[v_idx] if v_idx is not None and v_idx < len(valid_features) else None,
             }
 
 
             classification, normalized_score = self.decision_engine.decide(
-                sig_present, ml_scores[i], anomaly_score, cti_score, res
+                sig_present, ml_scores[i], anomaly_score, cti_score, res, event
             )
             
             res.update({
@@ -516,8 +566,6 @@ class MLEngine:
                     "infer_ms": round(infer_ms / batch_count, 2),
                     "total_ms": round((time.time() - start_time) * 1000 / batch_count, 2)
                 },
-                # Feature vector for baseline retraining — only set for valid events
-                "_feature_vector": valid_features[v_idx] if v_idx is not None and v_idx < len(valid_features) else None,
             })
             results.append(res)
             

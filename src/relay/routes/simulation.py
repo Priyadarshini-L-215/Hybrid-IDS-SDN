@@ -27,18 +27,28 @@ def _validate_ip(target: str) -> str:
 
 
 def _track_process(process: subprocess.Popen):
+    _reap_completed()
     _spawned_processes.add(process)
     return process
 
 
 def _cleanup_spawned_processes():
+    """Terminates active processes and clears the tracking set."""
     for process in list(_spawned_processes):
         try:
-            if process.poll() is None:
+            if process.poll() is not None:
+                _spawned_processes.discard(process)
+            else:
                 process.terminate()
+                _spawned_processes.discard(process)
         except Exception:
             pass
 
+def _reap_completed():
+    """Periodically removes finished processes from memory."""
+    for process in list(_spawned_processes):
+        if process.poll() is not None:
+            _spawned_processes.discard(process)
 
 atexit.register(_cleanup_spawned_processes)
 

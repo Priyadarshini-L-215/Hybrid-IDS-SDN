@@ -1,7 +1,1 @@
-{
-    "threshold": 0.18122412264347076,
-    "latent_dim": 16,
-    "input_dim": 49,
-    "model_type": "vae_keras",
-    "last_updated": "2026-05-09"
-}
+{"threshold": 0.014004365541040897, "input_dim": 22}

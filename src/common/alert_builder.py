@@ -10,6 +10,7 @@ import json
 import uuid
 import math
 from common.mitre_mapper import get_mitre_info
+from common.xai_translator import translate_shap_to_text
 
 def safe_float(v):
     try:
@@ -122,6 +123,7 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         "is_simulation": event.get("is_simulation"),
         "mitre": get_mitre_info(final_classification, normalized_sig),
         "shap_top3": prediction.get("shap_top3", []),
+        "xai_explanation": translate_shap_to_text(prediction.get("shap_top3", []), final_classification),
         "anomaly_score": safe_float(prediction.get("anomaly_score")),
         "ja3_hash": event.get("tls", {}).get("ja3", {}).get("hash"),
         "ja3_string": event.get("tls", {}).get("ja3", {}).get("string"),
@@ -137,3 +139,4 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
         },
         "raw_event": event,
     }
+

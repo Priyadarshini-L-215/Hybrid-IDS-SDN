@@ -23,14 +23,13 @@ async def download_pcap(event_id: str):
 
     # 1. Get alert metadata for extraction
     try:
-        conn = db._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT src_ip FROM alerts WHERE id = ?", (event_id,))
-        row = cursor.fetchone()
-        if not row:
+        alert = await db.get_alert_by_id(event_id)
+        if not alert:
             raise HTTPException(status_code=404, detail="Alert not found in database.")
         
-        ip = row['src_ip']
+        ip = alert['src_ip']
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Database query failed for PCAP extraction", error=str(e))
         raise HTTPException(status_code=500, detail="Internal database error.")

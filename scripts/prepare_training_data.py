@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 def prepare_data():
-    print("=== Sentinel Core: Data Preparation Pipeline ===")
+    print("=== Sentinel Core: Data Preparation Pipeline (v4) ===")
     
     # Paths
     BASE_DIR = Path(__file__).resolve().parents[1]
@@ -26,27 +26,50 @@ def prepare_data():
 
     # Load Data
     print(f"Loading raw data: {RAW_FILE.name}")
+    # Raw file has leading spaces in column names
     df = pd.read_csv(RAW_FILE)
     df.columns = [c.strip() for c in df.columns]
 
-    # Mapping
+    # Mapping CIC-IDS2017 to UNSW-NB15 (Sentinel)
+    # Note: This is an approximation as the features are not 1:1
     mapping = {
-        'Total Length of Fwd Packets': 'Fwd Packets Length Total',
-        'Total Length of Bwd Packets': 'Bwd Packets Length Total',
-        'Min Packet Length': 'Packet Length Min',
-        'Max Packet Length': 'Packet Length Max',
-        'Average Packet Size': 'Avg Packet Size',
-        'Init_Win_bytes_forward': 'Init Fwd Win Bytes',
-        'Init_Win_bytes_backward': 'Init Bwd Win Bytes',
-        'act_data_pkt_fwd': 'Fwd Act Data Packets',
-        'min_seg_size_forward': 'Fwd Seg Size Min'
+        'Flow Duration': 'flow_duration',
+        'Total Fwd Packets': 'total_fwd_packets',
+        'Total Backward Packets': 'total_bwd_packets',
+        'Total Length of Fwd Packets': 'total_fwd_bytes',
+        'Total Length of Bwd Packets': 'total_bwd_bytes',
+        'Flow IAT Mean': 'flow_iat_mean',
+        'Flow IAT Std': 'flow_iat_std',
+        'Fwd IAT Mean': 'fwd_iat_mean',
+        'Bwd IAT Mean': 'bwd_iat_mean',
+        'Packet Length Mean': 'pkt_len_mean',
+        'Packet Length Std': 'pkt_len_std',
+        'Init_Win_bytes_forward': 'swin',
+        'Init_Win_bytes_backward': 'dwin',
+        'Avg Fwd Segment Size': 'smeansz',
+        'Avg Bwd Segment Size': 'dmeansz',
+        'act_data_pkt_fwd': 'spkts',
+        'min_seg_size_forward': 'ct_state_ttl' # Proxying
     }
+    
+    # Rename mapped columns
+    print("Mapping columns...")
     df.rename(columns=mapping, inplace=True)
-
-    # Add missing Protocol (TCP=6)
-    if 'Protocol' not in df.columns:
-        print("Adding default Protocol (6.0)")
-        df['Protocol'] = 6.0
+    
+    # Aliases for duplicated logic in extractor
+    df['sbytes'] = df['total_fwd_bytes']
+    df['dbytes'] = df['total_bwd_bytes']
+    df['spkts'] = df['total_fwd_packets']
+    df['dpkts'] = df['total_bwd_packets']
+    
+    # Fill defaults for missing features
+    print("Filling missing features with defaults...")
+    for f in expected_features:
+        if f not in df.columns:
+            if 'ttl' in f:
+                df[f] = 64.0
+            else:
+                df[f] = 0.0
 
     # Ensure Label is numeric (0=Benign, 1=Attack)
     print("Normalizing labels...")
@@ -54,17 +77,15 @@ def prepare_data():
 
     # Keep only expected features + Label
     print(f"Selecting {len(expected_features)} features...")
-    
-    # Fill any remaining missing features with 0
-    for f in expected_features:
-        if f not in df.columns:
-            df[f] = 0.0
-            
     final_df = df[expected_features + ['Label']]
     
     # Clean data (NaNs and Infs)
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.fillna(0, inplace=True)
+
+    # Convert everything to float32 except Label
+    for col in expected_features:
+        final_df[col] = final_df[col].astype(np.float32)
 
     # Save
     print(f"Saving normalized dataset to {OUTPUT_FILE}")
