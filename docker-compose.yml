@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel-relay
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel-consumer
+    command: python src/ml_engine/consumer.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    restart: unless-stopped
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel-ingestion
+    command: python src/ml_engine/ingestion.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  ui:
+    image: node:20-alpine
+    container_name: sentinel-ui
+    working_dir: /app
+    volumes:
+      - ./ui:/app
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_PORT=3000
+      - VITE_BACKEND_PORT=8000
+    command: sh -c "npm install --legacy-peer-deps && npm run dev -- --host 0.0.0.0"
+    depends_on:
+      - relay
+    restart: unless-stopped
+
+volumes:
+  redis_data:

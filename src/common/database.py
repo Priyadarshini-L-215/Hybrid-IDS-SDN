@@ -135,6 +135,7 @@ class DatabaseHandler:
             
             # Migrations for existing columns (wrapped in try/except)
             migrations = [
+                "ALTER TABLE alerts ADD COLUMN event_id TEXT",
                 "ALTER TABLE alerts ADD COLUMN ja3_hash TEXT",
                 "ALTER TABLE alerts ADD COLUMN ja3_string TEXT",
                 "ALTER TABLE alerts ADD COLUMN mitigation TEXT",

@@ -78,9 +78,27 @@ async def get_ip_forensics_details(ip_address: str):
         # 3. Find similar IPs for correlation
         similar_nodes = await db.find_similar_ips(ip_address, 3)
 
-        # 4. Aggregate results
+        # 4. Calculate stats
+        preds = forensics.get("predictions", {})
+        attacks = preds.get("attack", 0) + preds.get("anomaly", 0)
+        susp = preds.get("suspicious", 0)
+        total = forensics.get("total_events", 1)
+        rep_score = int(min(100, ((attacks * 1.0 + susp * 0.5) / total) * 100))
+        
+        # 5. Extract latest Geo data
+        geo = {"country": "Unknown", "city": "Unknown", "asn": "Unknown"}
+        history = forensics.get("history", [])
+        if history:
+            latest = history[0]
+            if "enrichment" in latest and latest["enrichment"]:
+                geo = latest["enrichment"]
+
+        # 6. Aggregate results
         return {
             **forensics,
+            "alert_count": forensics.get("total_events", 0),
+            "reputation_score": rep_score,
+            "geo": geo,
             "is_mitigated": is_mitigated,
             "lateral_movement_risk": similar_nodes
         }

@@ -25,7 +25,7 @@ from common.config import (
     MODELS_DIR, ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
     ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE,
     ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES,
-    AUTOENCODER_THRESHOLD,
+    AUTOENCODER_THRESHOLD, DEV_MODE,
     get_cfg
 )
 from common.model_manifest import get_active_model_spec, load_model_manifest
@@ -197,6 +197,25 @@ class MLEngine:
             else:
                 self.load_warnings.append(f"Missing active model: {model_path}")
 
+            # Safety check: warning if mock models are loaded
+            is_mock_model = False
+            if self.rf_model and getattr(self.rf_model, "is_mock", False):
+                is_mock_model = True
+            if self.scaler and getattr(self.scaler, "is_mock", False):
+                is_mock_model = True
+            if is_mock_model:
+                if not DEV_MODE:
+                    logger.critical(
+                        "SECURITY WARNING: MOCK MACHINE LEARNING MODEL LOADED IN PRODUCTION ENVIRONMENT! "
+                        "Mock models use random weights and MinMaxScaler trained on random mock datasets. "
+                        "The classification logic will produce low-quality results. Please deploy real trained models."
+                    )
+                    self.load_warnings.append("Loaded mock ML models in production mode")
+                else:
+                    logger.warning(
+                        "Mock machine learning model loaded (development mode)."
+                    )
+
             # 4. Load VAE Anomaly Detector (Stage 3 — Keras)
             vae_encoder_path = MODELS_DIR / "vae_encoder.keras"
             vae_decoder_path = MODELS_DIR / "vae_decoder.keras"
@@ -217,6 +236,7 @@ class MLEngine:
                     decoder_path=vae_decoder_path,
                     scaler_path=vae_scaler_path,
                     threshold=self.vae_threshold,
+                    feature_order=self.feature_order,
                 )
                 if self.vae_detector.is_ready:
                     self.stage_status["vae"] = "loaded"
@@ -308,7 +328,8 @@ class MLEngine:
         # Validate VAE
         if self.vae_detector:
             vae_dim = getattr(self.vae_detector, "n_features", getattr(self.vae_detector, "input_dim", None))
-            if vae_dim is not None and vae_dim != expected_dim:
+            # VAE is allowed to use its 22-feature subset or match the expected RF dimension
+            if vae_dim is not None and vae_dim != expected_dim and vae_dim != 22:
                 logger.warning("VAE dimension mismatch", 
                                expected=expected_dim, 
                                actual=vae_dim)

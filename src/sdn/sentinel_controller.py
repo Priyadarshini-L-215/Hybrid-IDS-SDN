@@ -2,16 +2,43 @@
 # Implements L2 Learning Switch + REST API for Flow Mitigation
 
 import json
-from ryu.base import app_manager
-from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
-from ryu.controller.handler import set_ev_cls
-from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet
-from ryu.lib.packet import ether_types
-from ryu.app.wsgi import WSGIApplication, ControllerBase, route
-from webob import Response
+
+try:
+    from ryu.base import app_manager
+    from ryu.controller import ofp_event
+    from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
+    from ryu.controller.handler import set_ev_cls
+    from ryu.ofproto import ofproto_v1_3
+    from ryu.lib.packet import packet
+    from ryu.lib.packet import ethernet
+    from ryu.lib.packet import ether_types
+    from ryu.app.wsgi import WSGIApplication, ControllerBase, route
+    from webob import Response
+    RYU_AVAILABLE = True
+except ImportError:
+    # Dummy fallbacks for imports so the module can be imported without Ryu/Webob installed
+    class DummyRyuApp:
+        pass
+    class DummyControllerBase:
+        def __init__(self, *args, **kwargs):
+            pass
+    class DummyResponse:
+        def __init__(self, *args, **kwargs):
+            pass
+    app_manager = type('dummy', (), {'RyuApp': DummyRyuApp})
+    ControllerBase = DummyControllerBase
+    Response = DummyResponse
+    ofp_event = type('dummy', (), {'EventOFPSwitchFeatures': None, 'EventOFPFlowRemoved': None, 'EventOFPPacketIn': None})
+    CONFIG_DISPATCHER = None
+    MAIN_DISPATCHER = None
+    set_ev_cls = lambda *args, **kwargs: lambda f: f
+    ofproto_v1_3 = type('dummy', (), {'OFP_VERSION': 0})
+    packet = type('dummy', (), {'Packet': None})
+    ethernet = type('dummy', (), {'ethernet': None})
+    ether_types = type('dummy', (), {'ETH_TYPE_LLDP': 0, 'ETH_TYPE_IP': 0})
+    WSGIApplication = None
+    route = lambda *args, **kwargs: lambda f: f
+    RYU_AVAILABLE = False
 
 # --- REST API CONTROLLER ---
 
