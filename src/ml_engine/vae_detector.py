@@ -61,8 +61,15 @@ class VaeAnomalyDetector:
 
     DEFAULT_THRESHOLD = 0.3
 
+    VAE_FEATURES = [
+        "flow_duration", "total_fwd_packets", "total_bwd_packets", "total_fwd_bytes", "total_bwd_bytes",
+        "flow_iat_mean", "flow_iat_std", "fwd_iat_mean", "bwd_iat_mean", "pkt_len_mean", "pkt_len_std",
+        "sload", "dttl", "swin", "dwin", "sinpkt", "ct_state_ttl", "ct_srv_src", "ct_srv_dst",
+        "ct_dst_sport_ltm", "smeansz", "dmeansz"
+    ]
+
     def __init__(self, encoder_path: str | Path, decoder_path: str | Path, scaler_path: str | Path,
-                 threshold: float = DEFAULT_THRESHOLD):
+                 threshold: float = DEFAULT_THRESHOLD, feature_order: Optional[List[str]] = None):
         self.threshold = threshold
         self._ready = False
         self.encoder = None
@@ -70,11 +77,20 @@ class VaeAnomalyDetector:
         self.scaler = None
         self.use_onnx = False
 
+        # Calculate indices of the 22 VAE features in the feature_order
+        self.feature_order = feature_order or self.VAE_FEATURES
+        self.vae_indices = []
+        for f in self.VAE_FEATURES:
+            if f in self.feature_order:
+                self.vae_indices.append(self.feature_order.index(f))
+            else:
+                self.vae_indices.append(0)
+
         try:
             # 1. Load MinMaxScaler
             self.scaler = joblib.load(scaler_path)
-            self.n_features = getattr(self.scaler, 'n_features_in_', 49)
-            logger.info(f"VAE scaler loaded (features={self.n_features})")
+            self.n_features = 22  # The model expects 22 features
+            logger.info(f"VAE scaler loaded, n_features set to {self.n_features}")
 
             # 2. Check for ONNX alternatives
             onnx_enc = Path(str(encoder_path).replace(".keras", ".onnx"))
@@ -112,29 +128,33 @@ class VaeAnomalyDetector:
             return np.zeros((len(X), 1)), np.zeros(len(X))
 
         try:
-            # 1. Feature Shape Validation
-            if X.shape[1] != self.n_features:
-                if X.shape[1] > self.n_features:
-                    X_input = X[:, :self.n_features]
+            # 1. Feature Shape Validation using the 49-feature scaler
+            scaler_features = getattr(self.scaler, 'n_features_in_', 49)
+            if X.shape[1] != scaler_features:
+                if X.shape[1] > scaler_features:
+                    X_input = X[:, :scaler_features]
                 else:
-                    X_input = np.pad(X, ((0, 0), (0, self.n_features - X.shape[1])), mode='constant')
+                    X_input = np.pad(X, ((0, 0), (0, scaler_features - X.shape[1])), mode='constant')
             else:
                 X_input = X
 
             X_scaled = self.scaler.transform(X_input).astype(np.float32)
+            
+            # Slice to only keep the 22 features that the Keras VAE model expects
+            X_scaled_sliced = X_scaled[:, self.vae_indices]
  
             # VAE Inference
             if self.use_onnx:
                 input_name = self.encoder.get_inputs()[0].name
-                z = self.encoder.run(None, {input_name: X_scaled})[0]
+                z = self.encoder.run(None, {input_name: X_scaled_sliced})[0]
                 input_name_dec = self.decoder.get_inputs()[0].name
                 X_recon = self.decoder.run(None, {input_name_dec: z})[0]
             else:
-                encoder_output = self.encoder.predict(X_scaled, verbose=0)
+                encoder_output = self.encoder.predict(X_scaled_sliced, verbose=0)
                 z = encoder_output[0] if isinstance(encoder_output, list) else encoder_output
                 X_recon = self.decoder.predict(z, verbose=0)
  
-            mse = np.mean(np.power(X_scaled - X_recon, 2), axis=1)
+            mse = np.mean(np.power(X_scaled_sliced - X_recon, 2), axis=1)
             return z, mse
         except Exception as e:
             logger.error(f"VAE get_latent_and_mse error: {e}")

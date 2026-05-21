@@ -165,7 +165,11 @@ setup_python_venv() {
     # Check if venv exists and has critical packages
     local venv_healthy=false
     if [ -f "$venv_python" ]; then
-        if "$venv_python" -c "import fastapi, uvicorn, redis, sklearn, requests" 2>/dev/null; then
+        local check_cmd="import fastapi, uvicorn, redis, sklearn, requests"
+        if [ "${DEV_INSTALL:-false}" = true ]; then
+            check_cmd="$check_cmd, pytest, pytest_mock, responses, respx"
+        fi
+        if "$venv_python" -c "$check_cmd" 2>/dev/null; then
             venv_healthy=true
         fi
     fi
@@ -223,6 +227,17 @@ setup_python_venv() {
     if ! "$venv_python" -m pip install -r "$PROJECT_ROOT/requirements.txt" --break-system-packages; then
         log_error "Critical Python dependencies failed to install."
         return 1
+    fi
+
+    if [ "${DEV_INSTALL:-false}" = true ]; then
+        log_info "Installing developer/testing dependencies from requirements-dev.txt..."
+        if [ -f "$PROJECT_ROOT/requirements-dev.txt" ]; then
+            if ! "$venv_python" -m pip install -r "$PROJECT_ROOT/requirements-dev.txt" --break-system-packages; then
+                log_warn "Failed to install some development dependencies, continuing..."
+            fi
+        else
+            log_warn "requirements-dev.txt not found, skipping dev installation"
+        fi
     fi
 
     log_success "Python venv and dependencies installed"
@@ -379,11 +394,34 @@ setup_model_files() {
         while IFS= read -r -d '' src; do
             cp "$src" "$PROJECT_ROOT/models/$(basename "$src")"
         done < <(find "$PROJECT_ROOT/new model" -maxdepth 1 -type f -print0)
+    log_info "Synchronizing model files for 49-feature schema..."
+
+    mkdir -p "$PROJECT_ROOT/models"
+
+    # Check if 'new model' directory exists and has files
+    if [ -d "$PROJECT_ROOT/new model" ]; then
+        log_info "Found updated models in 'new model' directory. Synchronizing..."
+
+        # Files to sync from 'new model'
+        local files_to_sync=("rf_model.pkl" "scaler.pkl" "feature_order.pkl" "le_proto.pkl")
+
+        for file in "${files_to_sync[@]}"; do
+            if [ -f "$PROJECT_ROOT/new model/$file" ]; then
+                log_info "Copying $file to models/..."
+                cp "$PROJECT_ROOT/new model/$file" "$PROJECT_ROOT/models/$file"
+            fi
+        done
     fi
 
     # Ensure other required V4 files are present
-    if [ ! -f "$PROJECT_ROOT/models/feature_order.json" ] && [ -f "$PROJECT_ROOT/models/feature_names_v4.json" ]; then
-        cp "$PROJECT_ROOT/models/feature_names_v4.json" "$PROJECT_ROOT/models/feature_order.json"
+    if [ ! -f "$PROJECT_ROOT/models/feature_order.json" ]; then
+        if [ -f "$PROJECT_ROOT/models/feature_order_multi.json" ]; then
+            log_info "Creating feature_order.json from feature_order_multi.json..."
+            cp "$PROJECT_ROOT/models/feature_order_multi.json" "$PROJECT_ROOT/models/feature_order.json"
+        elif [ -f "$PROJECT_ROOT/models/feature_names_v4.json" ]; then
+            log_info "Creating feature_order.json from v4 names..."
+            cp "$PROJECT_ROOT/models/feature_names_v4.json" "$PROJECT_ROOT/models/feature_order.json"
+        fi
     fi
 
     generate_mock_models
@@ -422,6 +460,7 @@ def generate_mocks(models_dir):
     rf_path = os.path.join(models_dir, "rf_model.pkl")
     if not os.path.exists(rf_path) or os.path.getsize(rf_path) < 100:
         model = RandomForestClassifier(n_estimators=5, max_depth=3).fit(X, y)
+        model.is_mock = True
         joblib.dump(model, rf_path)
         print(f"Generated functional mock RF: {rf_path}")
 
@@ -429,6 +468,7 @@ def generate_mocks(models_dir):
     scaler_path = os.path.join(models_dir, "scaler.pkl")
     if not os.path.exists(scaler_path) or os.path.getsize(scaler_path) < 100:
         scaler = MinMaxScaler().fit(X)
+        scaler.is_mock = True
         joblib.dump(scaler, scaler_path)
         print(f"Generated functional mock Scaler: {scaler_path}")
 
@@ -436,6 +476,7 @@ def generate_mocks(models_dir):
     vae_scaler_path = os.path.join(models_dir, "vae_scaler.pkl")
     if not os.path.exists(vae_scaler_path) or os.path.getsize(vae_scaler_path) < 100:
         scaler = MinMaxScaler().fit(X)
+        scaler.is_mock = True
         joblib.dump(scaler, vae_scaler_path)
         print(f"Generated functional mock VAE Scaler: {vae_scaler_path}")
 
@@ -537,6 +578,23 @@ EOF
 # ============================================================================
 
 main() {
+    # Parse options
+    DEV_INSTALL=false
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --dev)
+                DEV_INSTALL=true
+                shift
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Usage: ./setup.sh [--dev]"
+                exit 1
+                ;;
+        esac
+    done
+    export DEV_INSTALL
+
     echo "======================================================================="
     echo "           SENTINEL CORE: UNIFIED SYSTEM INSTALLER"
     echo "======================================================================="

@@ -99,7 +99,26 @@ const StatCard = ({ label, value, icon: Icon, color = 'var(--primary)', subtitle
   </div>
 );
 
-const CompactIP = ({ ip, onClick, type }) => {
+const HighlightText = ({ text, highlight }) => {
+  if (!highlight || !text) {
+    return <span>{text}</span>;
+  }
+  const strText = String(text);
+  const parts = strText.split(new RegExp(`(${highlight.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')})`, 'gi'));
+  return (
+    <span>
+      {parts.map((part, index) => 
+        part.toLowerCase() === highlight.toLowerCase() ? (
+          <mark key={index} className="match-highlight">{part}</mark>
+        ) : (
+          part
+        )
+      )}
+    </span>
+  );
+};
+
+const CompactIP = ({ ip, onClick, type, highlight }) => {
   if (type === 'system_alert') return <span className="text-muted" style={{ fontSize: '0.7rem', letterSpacing: '1px' }}>SYSTEM</span>;
   if (!ip || ip === '---') return <span>---</span>;
   
@@ -130,8 +149,95 @@ const CompactIP = ({ ip, onClick, type }) => {
         fontWeight: 700,
         color: isLocal ? 'var(--success)' : 'var(--primary)'
       }}>
-        {displayIp}
+        <HighlightText text={displayIp} highlight={highlight} />
       </span>
+    </div>
+  );
+};
+
+// --- premium Cybernetic gauges ---
+const RiskGauge = ({ score }) => {
+  const percentage = Math.min(Math.max(score || 0, 0), 100);
+  const color = percentage > 70 ? 'var(--danger)' : percentage > 35 ? 'var(--warning)' : 'var(--success)';
+  const glowColor = percentage > 70 ? 'var(--danger-glow)' : percentage > 35 ? 'var(--warning-glow)' : 'var(--success-glow)';
+  const radius = 30;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference - (percentage / 100) * circumference;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', width: '100%' }}>
+      <div style={{ position: 'relative', width: '80px', height: '80px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{
+          position: 'absolute',
+          width: '60px',
+          height: '60px',
+          borderRadius: '50%',
+          boxShadow: `0 0 20px ${glowColor}`,
+          opacity: 0.1,
+          pointerEvents: 'none'
+        }} />
+        <svg viewBox="0 0 70 70" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+          <circle cx="35" cy="35" r={radius} fill="none" stroke="rgba(255,255,255,0.02)" strokeWidth="3" />
+          <circle cx="35" cy="35" r={radius} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="4" strokeDasharray="3, 3" />
+          <motion.circle
+            cx="35"
+            cy="35"
+            r={radius}
+            fill="none"
+            stroke={color}
+            strokeWidth="4.5"
+            strokeDasharray={circumference}
+            initial={{ strokeDashoffset: circumference }}
+            animate={{ strokeDashoffset }}
+            transition={{ duration: 1.2, ease: "easeOut" }}
+            strokeLinecap="round"
+            style={{ filter: `drop-shadow(0 0 4px ${color})` }}
+          />
+        </svg>
+        <div style={{ position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <span style={{ fontSize: '1.1rem', fontWeight: 900, fontFamily: 'var(--font-mono)', color: '#fff' }}>
+            {percentage}%
+          </span>
+          <span style={{ fontSize: '0.45rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.05em', marginTop: '-2px' }}>
+            {percentage > 70 ? 'CRITICAL' : percentage > 35 ? 'WARNING' : 'SECURE'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ObservationsDisplay = ({ count }) => {
+  const isHigh = count > 50;
+  const isMedium = count > 5;
+  const color = isHigh ? 'var(--danger)' : isMedium ? 'var(--warning)' : 'var(--success)';
+  const glowClass = isHigh ? 'breathing-glow-danger' : '';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
+      <div 
+        className={glowClass}
+        style={{ 
+          background: 'rgba(255, 255, 255, 0.01)',
+          border: '1px solid rgba(255, 255, 255, 0.06)',
+          borderRadius: '16px',
+          padding: '0.4rem 1.1rem',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '2px',
+          minWidth: '100px',
+          transition: 'all 0.3s ease',
+          boxShadow: isHigh ? '0 0 10px rgba(255, 0, 85, 0.1)' : 'none'
+        }}
+      >
+        <span style={{ fontSize: '1.4rem', fontWeight: 900, fontFamily: 'var(--font-mono)', color: color, textShadow: `0 0 8px ${color}30` }}>
+          {count}
+        </span>
+        <span style={{ fontSize: '0.45rem', fontWeight: 800, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
+          Observations
+        </span>
+      </div>
     </div>
   );
 };
@@ -214,6 +320,7 @@ function App() {
   const [selectedIp, setSelectedIp] = useState(null);
   const [nodeIntel, setNodeIntel] = useState(null);
   const [loadingIntel, setLoadingIntel] = useState(false);
+  const [forensicsTab, setForensicsTab] = useState('timeline');
 
   // Manual Mitigation
   const [manualIp, setManualIp] = useState('');
@@ -481,6 +588,7 @@ function App() {
   return (
     <div className="dashboard-container">
       <div className="bg-blobs">
+        <div className="cyber-grid-overlay" />
         <div className="blob blob-1" /><div className="blob blob-2" /><div className="blob blob-3" />
       </div>
 
@@ -688,7 +796,10 @@ function App() {
                               
                               return (
                                 <React.Fragment key={alert.event_id}>
-                                  <tr 
+                                  <motion.tr 
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ duration: 0.3 }}
                                     onClick={() => toggleExpandRow(alert)}
                                     className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`}
                                   >
@@ -701,6 +812,7 @@ function App() {
                                             ip={alert.src_ip} 
                                             type={alert.event_type}
                                             onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} 
+                                            highlight={filterQuery}
                                           />
                                           <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>{alert.event_type === 'system_alert' ? 'Sentinel Internal' : (alert.enrichment?.city || 'Internal/Local')}</span>
                                         </div>
@@ -708,7 +820,7 @@ function App() {
                                     </td>
                                     <td>
                                       <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
-                                        {alert.prediction}
+                                        <HighlightText text={alert.prediction} highlight={filterQuery} />
                                       </Badge>
                                     </td>
                                     <td>
@@ -724,7 +836,7 @@ function App() {
                                          {alert.mitigation || 'LOGGED'}
                                        </Badge>
                                     </td>
-                                  </tr>
+                                  </motion.tr>
                                   {isExpanded && (
                                     <tr style={{ background: 'rgba(0,0,0,0.3)' }}>
                                       <td colSpan="5" style={{ padding: '1.5rem' }}>
@@ -1017,13 +1129,16 @@ function App() {
                    </div>
                 </GlassCard>
                 <GlassCard title="Execution Console" icon={Terminal} subtitle="Tool standard output (STDOUT/STDERR)">
-                   <pre 
-                     ref={simConsoleRef} 
-                     className="terminal-output" 
-                     style={{ height: '400px', overflowY: 'auto' }}
-                   >
-                     {simOutput || 'Awaiting simulation initialization...'}
-                   </pre>
+                   <div style={{ position: 'relative', overflow: 'hidden', borderRadius: '12px' }}>
+                     <div className="scanline-overlay" />
+                     <pre 
+                       ref={simConsoleRef} 
+                       className={`terminal-output ${simulating ? 'crt-flicker vibrate-attack' : ''}`} 
+                       style={{ height: '400px', overflowY: 'auto' }}
+                     >
+                       {simOutput || 'Awaiting simulation initialization...'}
+                     </pre>
+                   </div>
                 </GlassCard>
               </div>
             </motion.div>
@@ -1191,79 +1306,165 @@ function App() {
                 <div style={{ height: '400px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><RefreshCcw className="animate-spin text-primary" size={48} /></div>
               ) : nodeIntel ? (
                 <div className="content-stack">
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '20px', border: '1px solid var(--border)' }}>
-                      <div className="stat-label" style={{ marginBottom: '8px' }}>Risk Score</div>
-                      <div style={{ fontSize: '2rem', fontWeight: 900, color: (nodeIntel.reputation_score || 0) > 60 ? 'var(--danger)' : 'var(--success)', fontFamily: 'var(--font-mono)' }}>{nodeIntel.reputation_score || 0}%</div>
+                  {/* Summary Metric Strip */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', alignItems: 'center' }}>
+                    <div style={{ background: 'rgba(10, 16, 30, 0.4)', backdropFilter: 'blur(16px)', padding: '1.25rem', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', boxShadow: 'inset 0 2px 8px rgba(255,255,255,0.02)' }}>
+                      <div className="stat-label" style={{ marginBottom: '4px', letterSpacing: '0.1em' }}>Risk Index</div>
+                      <RiskGauge score={nodeIntel.reputation_score || 0} />
                     </div>
-                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '20px', border: '1px solid var(--border)' }}>
-                      <div className="stat-label" style={{ marginBottom: '8px' }}>Observations</div>
-                      <div style={{ fontSize: '2rem', fontWeight: 900, fontFamily: 'var(--font-mono)' }}>{nodeIntel.alert_count || 0}</div>
+                    <div style={{ background: 'rgba(10, 16, 30, 0.4)', backdropFilter: 'blur(16px)', padding: '1.25rem', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', justifyContent: 'center', minHeight: '142px', boxShadow: 'inset 0 2px 8px rgba(255,255,255,0.02)' }}>
+                      <div className="stat-label" style={{ marginBottom: '4px', letterSpacing: '0.1em' }}>Observations</div>
+                      <ObservationsDisplay count={nodeIntel.alert_count || 0} />
                     </div>
                   </div>
 
-                  <div style={{ height: '220px', background: 'rgba(0,0,0,0.2)', borderRadius: '20px', padding: '1.5rem', border: '1px solid var(--border)' }}>
-                    <div className="stat-label" style={{ marginBottom: '1.5rem' }}>Verdict Distribution</div>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie data={Object.entries(nodeIntel.predictions || {}).map(([name, value]) => ({ name, value }))} cx="50%" cy="50%" innerRadius={45} outerRadius={65} paddingAngle={8} dataKey="value">
-                          {Object.entries(nodeIntel.predictions || {}).map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                        </Pie>
-                        <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '12px' }} />
-                      </PieChart>
-                    </ResponsiveContainer>
+                  {/* Forensics Tab Trigger Navigation */}
+                  <div className="forensics-tabs">
+                    <button
+                      className={`forensics-tab-btn ${forensicsTab === 'timeline' ? 'active' : ''}`}
+                      onClick={() => setForensicsTab('timeline')}
+                    >
+                      <History size={14} /> Timeline
+                    </button>
+                    <button
+                      className={`forensics-tab-btn ${forensicsTab === 'insights' ? 'active' : ''}`}
+                      onClick={() => setForensicsTab('insights')}
+                    >
+                      <Share2 size={14} /> Insights & Profile
+                    </button>
                   </div>
 
-                  <GlassCard title="Lateral Movement Risk" icon={Share2} subtitle="Nodes with similar behavioral signatures">
-                    <div className="content-stack">
-                      {nodeIntel.lateral_movement_risk?.length > 0 ? (
-                        nodeIntel.lateral_movement_risk.map((node, idx) => (
-                          <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(56, 189, 248, 0.05)', borderRadius: '12px', border: '1px solid rgba(56, 189, 248, 0.1)' }}>
-                            <CompactIP ip={node.src_ip} onClick={() => fetchNodeIntel(node.src_ip)} />
-                            <div style={{ display: 'flex', gap: '10px', fontSize: '0.7rem', fontWeight: 800 }}>
-                              <span className="text-primary" title="Shared Signatures">{node.shared_sigs} SIGS</span>
-                              <span className="text-muted">{node.total_alerts} ALERTS</span>
-                            </div>
+                  {forensicsTab === 'timeline' && (
+                    <GlassCard title="Forensic Timeline" icon={History} subtitle="Behavioral activity reconstruction">
+                       <div className="timeline-mini" style={{ maxHeight: '400px', overflowY: 'auto', paddingRight: '10px' }}>
+                          {nodeIntel.history?.length > 0 ? (
+                            nodeIntel.history.map((entry, idx) => (
+                              <div key={idx} className="timeline-item">
+                                 <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 800, marginBottom: '4px' }}>{new Date(entry.timestamp).toLocaleString()}</div>
+                                 <div style={{ fontSize: '0.75rem', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
+                                   <span style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.alert_sig || 'General Traffic'}</span>
+                                   <Badge variant={entry.prediction?.toLowerCase().includes('attack') ? 'danger' : 'success'}>
+                                     {entry.prediction}
+                                   </Badge>
+                                 </div>
+                                 {entry.shap_top3?.length > 0 && (
+                                   <div style={{ fontSize: '0.65rem', marginTop: '6px', color: 'var(--text-secondary)', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                     <Zap size={10} className="text-warning" />
+                                     Key Driver: <span className="text-primary">{entry.shap_top3[0][0] || entry.shap_top3[0].feature}</span>
+                                   </div>
+                                 )}
+                                 {entry.mitigation && (
+                                   <div style={{ fontSize: '0.65rem', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                     <Shield size={10} className="text-primary" />
+                                     <span style={{ opacity: 0.7 }}>Response: </span>
+                                     <span className="text-primary" style={{ fontWeight: 700 }}>{entry.mitigation}</span>
+                                   </div>
+                                 )}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="empty-state-small">No historical alerts found for this IP.</div>
+                          )}
+                       </div>
+                    </GlassCard>
+                  )}
+
+                  {forensicsTab === 'insights' && (
+                    <>
+                      {/* Node Profile Metadata Card */}
+                      <div className="glass-card" style={{ padding: '1.25rem', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '0.7rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 800 }}>JA3 FINGERPRINT</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--primary)', fontWeight: 700 }}>
+                              {nodeIntel.ja3_hash || 'None Captured'}
+                            </span>
                           </div>
-                        ))
-                      ) : (
-                        <p style={{ opacity: 0.5, fontSize: '0.7rem', textAlign: 'center' }}>No similar behavior detected.</p>
-                      )}
-                    </div>
-                  </GlassCard>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 800 }}>GEOGRAPHIC REGION</span>
+                            <span style={{ color: '#fff', fontWeight: 700 }}>
+                              {nodeIntel.geo?.city || 'Unknown'}, {nodeIntel.geo?.country || 'Unknown'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 800 }}>ASN IDENTIFIER</span>
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 700 }}>
+                              {nodeIntel.geo?.asn || 'Internal Network'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 800 }}>FIRST ACTIVITY</span>
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+                              {nodeIntel.first_seen ? new Date(nodeIntel.first_seen).toLocaleString() : 'N/A'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ color: 'var(--text-muted)', fontWeight: 800 }}>LAST SEEN TRAIL</span>
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+                              {nodeIntel.last_seen ? new Date(nodeIntel.last_seen).toLocaleString() : 'N/A'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
 
-                  <GlassCard title="Forensic Timeline" icon={History} subtitle="Behavioral activity reconstruction">
-                     <div className="timeline-mini" style={{ maxHeight: '400px', overflowY: 'auto', paddingRight: '10px' }}>
-                        {nodeIntel.history?.length > 0 ? (
-                          nodeIntel.history.map((entry, idx) => (
-                            <div key={idx} className="timeline-item">
-                               <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 800, marginBottom: '4px' }}>{new Date(entry.timestamp).toLocaleString()}</div>
-                               <div style={{ fontSize: '0.75rem', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
-                                 <span style={{ maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.alert_sig || 'General Traffic'}</span>
-                                 <Badge variant={entry.prediction?.toLowerCase().includes('attack') ? 'danger' : 'success'}>
-                                   {entry.prediction}
-                                 </Badge>
-                               </div>
-                               {entry.shap_top3?.length > 0 && (
-                                 <div style={{ fontSize: '0.65rem', marginTop: '6px', color: 'var(--text-secondary)', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                                   <Zap size={10} className="text-warning" />
-                                   Key Driver: <span className="text-primary">{entry.shap_top3[0][0] || entry.shap_top3[0].feature}</span>
-                                 </div>
-                               )}
-                               {entry.mitigation && (
-                                 <div style={{ fontSize: '0.65rem', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                   <Shield size={10} className="text-primary" />
-                                   <span style={{ opacity: 0.7 }}>Response: </span>
-                                   <span className="text-primary" style={{ fontWeight: 700 }}>{entry.mitigation}</span>
-                                 </div>
-                               )}
-                            </div>
-                          ))
-                        ) : (
-                          <div className="empty-state-small">No historical alerts found for this IP.</div>
-                        )}
-                     </div>
-                  </GlassCard>
+                      {/* Verdict Pie Chart */}
+                      <div style={{ height: '220px', background: 'rgba(10, 16, 30, 0.4)', backdropFilter: 'blur(16px)', borderRadius: '20px', padding: '1.25rem', border: '1px solid rgba(255,255,255,0.06)', position: 'relative' }}>
+                        <div className="stat-label" style={{ marginBottom: '0.75rem', letterSpacing: '0.05em' }}>Verdict Distribution</div>
+                        <div style={{ position: 'relative', height: '140px' }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie 
+                                data={Object.entries(nodeIntel.predictions || {}).map(([name, value]) => ({ name, value }))} 
+                                cx="50%" 
+                                cy="50%" 
+                                innerRadius={42} 
+                                outerRadius={60} 
+                                paddingAngle={6} 
+                                dataKey="value"
+                              >
+                                {Object.entries(nodeIntel.predictions || {}).map(([name, value], index) => {
+                                  let cellColor = 'var(--primary)';
+                                  const nameLower = name.toLowerCase();
+                                  if (nameLower.includes('normal') || nameLower.includes('benign')) cellColor = 'var(--success)';
+                                  else if (nameLower.includes('attack') || nameLower.includes('malicious') || nameLower.includes('ddos') || nameLower.includes('scan')) cellColor = 'var(--danger)';
+                                  else if (nameLower.includes('suspicious') || nameLower.includes('anomaly')) cellColor = 'var(--warning)';
+                                  else cellColor = COLORS[index % COLORS.length];
+                                  return <Cell key={`cell-${index}`} fill={cellColor} stroke="rgba(255,255,255,0.05)" strokeWidth={1} style={{ filter: `drop-shadow(0 0 3px ${cellColor}40)` }} />;
+                                })}
+                              </Pie>
+                              <Tooltip contentStyle={{ background: 'rgba(15, 23, 42, 0.95)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', fontSize: '0.75rem', color: '#fff' }} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                          {/* Central Label */}
+                          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
+                            <span style={{ fontSize: '1.25rem', fontWeight: 900, fontFamily: 'var(--font-mono)', color: '#fff', lineHeight: '1.1' }}>
+                              {Object.values(nodeIntel.predictions || {}).reduce((a, b) => a + b, 0)}
+                            </span>
+                            <span style={{ fontSize: '0.45rem', color: 'var(--text-muted)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: '1px' }}>Events</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Lateral Movement Similar Nodes */}
+                      <GlassCard title="Lateral Movement Risk" icon={Share2} subtitle="Nodes with similar behavioral signatures">
+                        <div className="content-stack">
+                          {nodeIntel.lateral_movement_risk?.length > 0 ? (
+                            nodeIntel.lateral_movement_risk.map((node, idx) => (
+                              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.75rem', background: 'rgba(56, 189, 248, 0.05)', borderRadius: '12px', border: '1px solid rgba(56, 189, 248, 0.1)' }}>
+                                <CompactIP ip={node.src_ip} onClick={() => fetchNodeIntel(node.src_ip)} />
+                                <div style={{ display: 'flex', gap: '10px', fontSize: '0.7rem', fontWeight: 800 }}>
+                                  <span className="text-primary" title="Shared Signatures">{node.shared_sigs} SIGS</span>
+                                  <span className="text-muted">{node.total_alerts} ALERTS</span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <p style={{ opacity: 0.5, fontSize: '0.7rem', textAlign: 'center' }}>No similar behavior detected.</p>
+                          )}
+                        </div>
+                      </GlassCard>
+                    </>
+                  )}
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
                     {nodeIntel.is_mitigated ? (

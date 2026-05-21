@@ -8,9 +8,10 @@ sys.path.insert(0, 'src')
 
 from common.config import (
     REDIS_HOST, REDIS_PORT, REDIS_QUEUE_NAME,
-    USE_REDIS_QUEUE, WORKER_COUNT, BATCH_SIZE,
+    WORKER_COUNT, BATCH_SIZE,
     EVE_LOG, WS_PORT
 )
+USE_REDIS_QUEUE = True
 
 # Conditional imports — gracefully skip if not installed
 _redis_available = False

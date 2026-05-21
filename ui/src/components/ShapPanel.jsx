@@ -46,7 +46,7 @@ const ShapPanel = ({ alert }) => {
         if (typeof tops === 'string') {
           try { tops = JSON.parse(tops); } catch (e) { tops = []; }
         }
-        
+
         if (tops.length > 0) {
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2rem' }}>
@@ -55,30 +55,32 @@ const ShapPanel = ({ alert }) => {
                 const displayValue = typeof value === 'number' ? value : 0;
                 const absValue = Math.abs(displayValue);
                 const percentage = Math.min(Math.max(absValue * 100, 5), 100);
-            
-            return (
-              <div key={idx} className="shap-row">
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px' }}>
-                  <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{feature}</span>
-                  <span style={{ color: getShapColor(value), fontWeight: 700 }}>
-                    {typeof value === 'number' ? `${value > 0 ? '+' : ''}${value.toFixed(4)}` : 'N/A'}
-                  </span>
-                </div>
-                <div style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${percentage}%` }}
-                    transition={{ duration: 0.8, delay: idx * 0.1 }}
-                    style={{ 
-                      height: '100%', 
-                      background: getShapColor(value),
-                      boxShadow: `0 0 10px ${getShapColor(value)}50`
-                    }}
-                  />
-                </div>
-              </div>
-            );
-          })}
+
+                return (
+                  <div key={idx} className="shap-row">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px' }}>
+                      <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{feature}</span>
+                      <span style={{ color: getShapColor(value), fontWeight: 700 }}>
+                        {typeof value === 'number' ? `${value > 0 ? '+' : ''}${value.toFixed(4)}` : 'N/A'}
+                      </span>
+                    </div>
+                    <div style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                      <motion.div
+                        initial={{ width: 0 }}
+                        animate={{ width: `${percentage}%` }}
+                        transition={{ duration: 0.8, delay: idx * 0.1 }}
+                        style={{
+                          height: '100%',
+                          background: value > 0
+                            ? 'linear-gradient(90deg, var(--danger-glow), var(--danger))'
+                            : 'linear-gradient(90deg, var(--success-glow), var(--success))',
+                          boxShadow: `0 0 12px ${value > 0 ? 'var(--danger-glow)' : 'var(--success-glow)'}`
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           );
         } else {
@@ -97,20 +99,20 @@ const ShapPanel = ({ alert }) => {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
-        <ScoreMetric 
-          label="Signature" 
-          value={stageScores.signature || 0} 
-          color="var(--primary)" 
+        <ScoreMetric
+          label="Signature"
+          value={stageScores.signature || 0}
+          color="var(--primary)"
         />
-        <ScoreMetric 
-          label="ML Engine" 
-          value={stageScores.ml || alert.confidence / 100 || 0} 
-          color="var(--secondary)" 
+        <ScoreMetric
+          label="ML Engine"
+          value={stageScores.ml || alert.confidence / 100 || 0}
+          color="var(--secondary)"
         />
-        <ScoreMetric 
-          label="Anomaly" 
-          value={stageScores.anomaly || anomalyScore || 0} 
-          color="var(--warning)" 
+        <ScoreMetric
+          label="Anomaly"
+          value={stageScores.anomaly || anomalyScore || 0}
+          color="var(--warning)"
         />
       </div>
     </div>
@@ -119,12 +121,12 @@ const ShapPanel = ({ alert }) => {
 
 const ScoreMetric = ({ label, value, color }) => {
   const percentage = Math.min(Math.max(value * 100, 0), 100);
-  
+
   return (
-    <div style={{ 
-      background: 'rgba(255,255,255,0.03)', 
-      padding: '0.75rem', 
-      borderRadius: '12px', 
+    <div style={{
+      background: 'rgba(255,255,255,0.03)',
+      padding: '0.75rem',
+      borderRadius: '12px',
       border: '1px solid rgba(255,255,255,0.05)',
       display: 'flex',
       flexDirection: 'column',
@@ -147,6 +149,7 @@ const ScoreMetric = ({ label, value, color }) => {
             animate={{ strokeDashoffset: 100 - percentage }}
             transition={{ duration: 1, ease: "easeOut" }}
             strokeLinecap="round"
+            style={{ filter: `drop-shadow(0px 0px 3px ${color})` }}
           />
         </svg>
         <span style={{ position: 'absolute', fontSize: '0.7rem', fontWeight: 800, color: '#fff' }}>

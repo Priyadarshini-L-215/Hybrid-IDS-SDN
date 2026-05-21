@@ -177,6 +177,25 @@ check_internet() {
     fi
 }
 
+check_test_suite_health() {
+    local venv_pytest=".venv/bin/pytest"
+    local venv_python=".venv/bin/python"
+    if [ -f "$venv_pytest" ] && [ -f "$venv_python" ]; then
+        if "$venv_python" -c "import pytest, pytest_mock, responses, respx" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} Test suite environment is healthy (pytest & mock packages found)"
+            return 0
+        else
+            echo -e "${YELLOW}⚠${NC} Test suite environment incomplete (run setup.sh --dev to install test dependencies)"
+            WARNINGS=$((WARNINGS + 1))
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}⚠${NC} Test suite environment not setup (missing venv or pytest)"
+        WARNINGS=$((WARNINGS + 1))
+        return 1
+    fi
+}
+
 # Main execution
 main() {
     echo "======================================================================="
@@ -220,6 +239,10 @@ main() {
     echo "[+] Checking Data Files..."
     check_model_files
     check_config_files
+    echo ""
+
+    echo "[+] Checking Test Suite Environment..."
+    check_test_suite_health
     echo ""
 
     echo "[+] Checking System Configuration..."

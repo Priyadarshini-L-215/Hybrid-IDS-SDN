@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 import structlog
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
@@ -131,6 +131,23 @@ def evaluate_dataset(csv_source: Union[str, Path, io.BytesIO], ml_engine, label_
         pred_final = [str(x) for x in predictions]
         
         report = classification_report(y_true_final, pred_final, output_dict=True, zero_division=0)
+        
+        # Calculate confusion matrix values safely
+        try:
+            tn, fp, fn, tp = confusion_matrix(y_true_final, pred_final, labels=["normal", "attack"]).ravel()
+            
+            # Inject counts into metrics dict for the frontend confusion matrix display
+            if "normal" not in report:
+                report["normal"] = {}
+            if "attack" not in report:
+                report["attack"] = {}
+                
+            report["normal"]["tn"] = int(tn)
+            report["normal"]["fp"] = int(fp)
+            report["attack"]["fn"] = int(fn)
+            report["attack"]["tp"] = int(tp)
+        except Exception as cm_err:
+            logger.warning("Failed to compute confusion matrix values", error=str(cm_err))
         
         return {
             "success": True,
