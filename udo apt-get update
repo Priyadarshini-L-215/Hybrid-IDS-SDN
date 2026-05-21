@@ -1,0 +1,7 @@
++-- Desired=Unknown/Install/Remove/Purge/Hold
+|+- Status=Not/Inst/Conf-files/Unpacked/halF-conf/Half-inst/trig-aWait/Trig-pend
+||+ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)
+||| Name            Version      Architecture Description
++++-===============-============-============-==============================================
+ii  build-essential 12.12ubuntu2 amd64        Informational list of build-essential packages
+un  python3-dev     <none>       <none>       (no description available)

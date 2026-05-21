@@ -1,1 +1,0 @@
-{"feature_order": ["flow_duration", "total_fwd_packets", "total_bwd_packets", "total_fwd_bytes", "total_bwd_bytes", "flow_iat_mean", "flow_iat_std", "fwd_iat_mean", "bwd_iat_mean", "pkt_len_mean", "pkt_len_std", "sload", "dttl", "swin", "dwin", "sinpkt", "ct_state_ttl", "ct_srv_src", "ct_srv_dst", "ct_dst_sport_ltm", "smeansz", "dmeansz"]}

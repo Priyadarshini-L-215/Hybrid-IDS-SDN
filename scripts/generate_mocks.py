@@ -3,28 +3,38 @@ import os
 import json
 
 def generate_mocks(models_dir):
-    # Dummy RF/Scaler (Pickle)
-    for f in ["rf_model.pkl", "scaler.pkl", "vae_scaler.pkl", "feature_order.pkl"]:
-        path = os.path.join(models_dir, f)
-        if not os.path.exists(path):
-            with open(path, 'wb') as fd:
-                pickle.dump({"mock": True}, fd)
-            print(f"Generated mock: {f}")
+    import joblib, numpy as np, json
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.preprocessing import MinMaxScaler
+    
+    feature_count = 49
+    X = np.random.rand(100, feature_count)
+    y = np.random.randint(0, 2, 100)
+    
+    # 1. Functional RF Model
+    rf_path = os.path.join(models_dir, "rf_model.pkl")
+    if not os.path.exists(rf_path) or os.path.getsize(rf_path) < 100:
+        model = RandomForestClassifier(n_estimators=5, max_depth=3).fit(X, y)
+        joblib.dump(model, rf_path)
+        print(f"Generated functional mock RF: {rf_path}")
 
-    # Dummy Keras (just empty files that pass exists check)
-    for f in ["vae_encoder.keras", "vae_decoder.keras"]:
-        path = os.path.join(models_dir, f)
-        if not os.path.exists(path):
-            with open(path, 'w') as fd:
-                fd.write("MOCK_KERAS_MODEL")
-            print(f"Generated mock: {f}")
+    # 2. Functional Scaler
+    scaler_path = os.path.join(models_dir, "scaler.pkl")
+    if not os.path.exists(scaler_path) or os.path.getsize(scaler_path) < 100:
+        scaler = MinMaxScaler().fit(X)
+        joblib.dump(scaler, scaler_path)
+        print(f"Generated functional mock Scaler: {scaler_path}")
 
-    # Feature order JSON
-    path = os.path.join(models_dir, "feature_order.json")
-    if not os.path.exists(path):
-        with open(path, 'w') as fd:
-            json.dump(["feature1", "feature2"], fd)
-        print(f"Generated mock: feature_order.json")
+    # 3. VAE Scaler
+    vae_scaler_path = os.path.join(models_dir, "vae_scaler.pkl")
+    if not os.path.exists(vae_scaler_path) or os.path.getsize(vae_scaler_path) < 100:
+        scaler = MinMaxScaler().fit(X)
+        joblib.dump(scaler, vae_scaler_path)
+        print(f"Generated functional mock VAE Scaler: {vae_scaler_path}")
+
+    # 4. Keras placeholders (need real files for keras.load_model to not crash)
+    # Note: Keras models are harder to generate without keras installed in the setup environment
+    # but we'll at least ensure the pkl files are fixed as they are the primary blocker for scores.
 
 if __name__ == "__main__":
     import sys

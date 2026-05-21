@@ -15,9 +15,15 @@ STARTUP_LOG_FILE="$PROJECT_ROOT/data/logs/startup.log"
 STARTUP_TIMEOUT=60
 APP_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
-# Force CPU-only ML startup unless the operator explicitly overrides it.
+# Choose GPU or CPU based on environment and available hardware.
 export KERAS_BACKEND="${KERAS_BACKEND:-torch}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:--1}"
+if [ -z "${CUDA_VISIBLE_DEVICES+x}" ]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        export CUDA_VISIBLE_DEVICES="0"
+    else
+        export CUDA_VISIBLE_DEVICES="-1"
+    fi
+fi
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export TF_ENABLE_ONEDNN_OPTS="${TF_ENABLE_ONEDNN_OPTS:-0}"
 
@@ -91,12 +97,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 activate_venv() {
-    if [ ! -d "$PROJECT_ROOT/.venv" ]; then
-        log_error "Virtual environment missing. Please run ./setup.sh"
+    if [ ! -x "$APP_PYTHON" ]; then
+        log_error "Virtual environment missing or broken. Please run ./setup.sh"
         exit 1
     fi
-    # shellcheck source=/dev/null
-    source "$PROJECT_ROOT/.venv/bin/activate"
+
+    if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
+        # shellcheck source=/dev/null
+        source "$PROJECT_ROOT/.venv/bin/activate"
+    else
+        log_warn "No activate script found in virtual environment; using interpreter directly."
+    fi
+
+    export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
 }
 
 # Set Python path to include src (safely handle existing PYTHONPATH)
@@ -185,14 +198,24 @@ start_relay() {
 
 start_ui() {
     log_info "Starting React UI..."
-    cd "$PROJECT_ROOT/ui"
+    cd "$PROJECT_ROOT/ui" || { log_error "Cannot cd to ui directory"; return 1; }
+
     # Kill any existing processes on port 3000
     sudo fuser -k 3000/tcp >/dev/null 2>&1 || true
-    
+
+    if [ ! -f "$PROJECT_ROOT/ui/node_modules/vite/bin/vite.js" ]; then
+        log_warn "Vite binary missing. Installing UI dependencies..."
+        if ! npm install --legacy-peer-deps; then
+            log_error "Failed to install UI dependencies"
+            cd "$PROJECT_ROOT" || return 1
+            return 1
+        fi
+    fi
+
     # Start Vite via node directly to bypass permission issues on NTFS/fuseblk
     VITE_PORT=3000 VITE_BACKEND_PORT=8000 node ./node_modules/vite/bin/vite.js --host 127.0.0.1 >> "$PROJECT_ROOT/data/logs/ui.log" 2>&1 &
     echo "ui_pid=$!" >> "$STATE_FILE"
-    cd "$PROJECT_ROOT"
+    cd "$PROJECT_ROOT" || return 1
 }
 
 monitor_services() {

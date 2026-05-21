@@ -76,28 +76,28 @@ setup_logging_dir() {
 }
 
 setup_system_packages() {
-    if is_complete "system_packages"; then
-        log_info "System packages already installed (skipping)"
-        return 0
-    fi
-
     log_info "Checking and installing system dependencies..."
     
     local required_pkgs=("python3-dev" "python3-pip" "python3-venv" "build-essential" "curl" "git" "psmisc" "net-tools" "nmap" "nftables" "iptables" "redis-server" "suricata" "ipset" "software-properties-common" "openvswitch-switch" "hping3" "tcpdump" "libgeoip-dev" "geoip-bin" "libsqlite3-dev")
 
     local missing_pkgs=()
     for pkg in "${required_pkgs[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $pkg"; then
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
             missing_pkgs+=("$pkg")
         fi
     done
 
     if [ ${#missing_pkgs[@]} -eq 0 ]; then
+        if is_complete "system_packages"; then
+            log_info "System packages already installed (skipping)"
+            return 0
+        fi
         log_info "All system packages already installed"
         mark_complete "system_packages"
         return 0
     fi
 
+    log_info "Missing system packages detected: ${missing_pkgs[*]}"
     log_info "Updating package manager (resilient mode)..."
     # Allow release info changes (common in dev/beta distros)
     sudo apt-get update --allow-releaseinfo-change || log_warn "Apt update had some issues, continuing best-effort..."
@@ -189,6 +189,17 @@ setup_python_venv() {
         fi
     fi
 
+    if ! "$venv_python" -m pip --version >/dev/null 2>&1; then
+        log_info "Bootstrapping pip into virtual environment..."
+        if ! "$PROJECT_ROOT/.venv/bin/python" -m ensurepip --upgrade >/dev/null 2>&1; then
+            log_warn "ensurepip unavailable; attempting fallback pip bootstrap"
+            if ! python3 -m ensurepip --upgrade >/dev/null 2>&1; then
+                log_error "Failed to bootstrap pip into virtual environment"
+                return 1
+            fi
+        fi
+    fi
+
     log_info "Upgrading pip and compatibility tools..."
     # Set PYO3 flag for Python 3.14 compatibility with Rust-based packages
     export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
@@ -228,7 +239,7 @@ setup_ui_dependencies() {
         log_info "node_modules already exists"
         
         # Quick validation - check if key packages exist
-        if [ -f "$PROJECT_ROOT/ui/node_modules/.package-lock.json" ] || \
+        if [ -f "$PROJECT_ROOT/ui/node_modules/vite/bin/vite.js" ] || \
            [ -f "$PROJECT_ROOT/ui/node_modules/react/package.json" ]; then
             log_info "Existing node_modules appears valid, reusing"
             mark_complete "ui_dependencies"
@@ -358,10 +369,16 @@ mark_complete "suricata_rules"
 }
 
 setup_model_files() {
-            if [ -f "$PROJECT_ROOT/new model/$file" ]; then
-                cp "$PROJECT_ROOT/new model/$file" "$PROJECT_ROOT/models/$file"
-            fi
-        done
+    if is_complete "model_files"; then
+        log_info "Model files already synchronized (skipping)"
+        return 0
+    fi
+
+    if [ -d "$PROJECT_ROOT/new model" ]; then
+        log_info "Copying model files from new model directory"
+        while IFS= read -r -d '' src; do
+            cp "$src" "$PROJECT_ROOT/models/$(basename "$src")"
+        done < <(find "$PROJECT_ROOT/new model" -maxdepth 1 -type f -print0)
     fi
 
     # Ensure other required V4 files are present
