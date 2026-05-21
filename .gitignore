@@ -133,3 +133,6 @@ data/alerts_fresh.db-shm
 config/suricata/suricata.yaml.active
 data/alerts_fresh.db-shm
 data/alerts_fresh.db-shm
+data/alerts_fresh.db-shm
+data/alerts_fresh.db-wal
+data/logs/heartbeat.jsonl

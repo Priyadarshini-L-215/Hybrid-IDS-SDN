@@ -13459,3 +13459,6 @@
 {"ts":"2026-05-21T17:53:10.012571Z","component":"ingestion","uptime_sec":290.04,"packets":1042,"flows":958,"errors":0,"redis_ok":true}
 {"ts":"2026-05-21T17:53:20.013320Z","component":"ingestion","uptime_sec":300.04,"packets":1074,"flows":982,"errors":0,"redis_ok":true}
 {"ts":"2026-05-21T17:53:30.013962Z","component":"ingestion","uptime_sec":310.04,"packets":1106,"flows":1011,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T17:53:40.015045Z","component":"ingestion","uptime_sec":320.04,"packets":1184,"flows":1093,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T17:53:50.016125Z","component":"ingestion","uptime_sec":330.04,"packets":1208,"flows":1110,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T17:54:00.017424Z","component":"ingestion","uptime_sec":340.04,"packets":1244,"flows":1146,"errors":0,"redis_ok":true}
