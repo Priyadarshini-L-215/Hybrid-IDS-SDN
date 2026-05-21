@@ -12,6 +12,7 @@ async def reset_firewall():
     ActiveFirewall._redis_client = None
     ActiveFirewall._sdn_client = None
     ActiveFirewall._decay_task = None
+    ActiveFirewall._kernel_sets_initialized = True
     yield
     await ActiveFirewall.close()
 

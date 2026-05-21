@@ -92,8 +92,16 @@ update_state() {
 ensure_sudo_access() {
     log_info "Checking sudo access..."
     if ! sudo -n -v 2>/dev/null; then
-        log_warn "Sudo access not available (non-interactive). Continuing in non-privileged mode..."
-        return 0
+        if [ -t 0 ]; then
+            log_info "Sudo credentials not cached. Prompting for sudo password..."
+            if ! sudo -v 2>/dev/null; then
+                log_warn "Sudo authentication failed or not interactive. Continuing in non-privileged mode..."
+                return 0
+            fi
+        else
+            log_warn "Sudo access not available (non-interactive). Continuing in non-privileged mode..."
+            return 0
+        fi
     fi
     keep_sudo_alive &
     SUDO_KEEP_ALIVE_PID=$!

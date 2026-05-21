@@ -35,6 +35,7 @@ class ActiveFirewall:
     _initialized = False
     _backend = "legacy" # Default to legacy
     _decay_task: Optional[asyncio.Task] = None
+    _kernel_sets_initialized = False
     
     # Redis Keys
     REDIS_REPUTATION_KEY = "sentinel_reputation"
@@ -66,8 +67,7 @@ class ActiveFirewall:
                 logger.info("Mitigation Backend set to LEGACY (ipset/iptables)")
             
             # ALWAYS setup kernel sets for fallback reliability
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, cls._setup_kernel_sets)
+            await cls._ensure_kernel_sets()
             
             # Initialize Redis connection for shared reputation
             try:
@@ -183,9 +183,19 @@ class ActiveFirewall:
                 if micro_check_v6.returncode != 0:
                     subprocess.run(["sudo", "ip6tables", "-I", target, "1", "-j", MICRO_CHAIN_V6], check=True)
                 
+            cls._kernel_sets_initialized = True
             logger.info("Kernel firewall rules synchronized (Dual Stack IPv4/IPv6)", chain=CHAIN_NAME, chain_v6=CHAIN_NAME_V6)
         except Exception as e:
+            cls._kernel_sets_initialized = False
             logger.error("Failed to setup kernel firewall", error=str(e))
+
+    @classmethod
+    async def _ensure_kernel_sets(cls):
+        """Ensures that kernel sets are initialized. Retries if not yet initialized."""
+        if not cls._kernel_sets_initialized:
+            logger.info("Kernel firewall rules not initialized. Retrying setup...")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, cls._setup_kernel_sets)
 
 
     @classmethod
@@ -370,6 +380,7 @@ class ActiveFirewall:
     @classmethod
     async def _legacy_block(cls, ip: str, ttl: int = 0):
         try:
+            await cls._ensure_kernel_sets()
             ip_obj = ipaddress.ip_address(ip)
             is_v6 = ip_obj.version == 6
             target_set = cls.SET_BLOCKS_V6 if is_v6 else cls.SET_BLOCKS
@@ -392,6 +403,7 @@ class ActiveFirewall:
             return False
         
         if not cls._initialized: await cls._initialize()
+        await cls._ensure_kernel_sets()
         cls._status_cache = {}
         cls._status_cache_time = 0
         try:
@@ -407,6 +419,7 @@ class ActiveFirewall:
     async def unblock(cls, ip: str):
         """Removes IP from both blocks and clears shared reputation."""
         if not cls._initialized: await cls._initialize()
+        await cls._ensure_kernel_sets()
         cls._status_cache = {}
         cls._status_cache_time = 0
         
@@ -440,6 +453,7 @@ class ActiveFirewall:
     async def is_blocked(cls, ip: str) -> bool:
         """Checks if an IP is currently in the block set (permanent or temporary)."""
         if not cls._initialized: await cls._initialize()
+        await cls._ensure_kernel_sets()
         try:
             ip_obj = ipaddress.ip_address(ip)
             is_v6 = ip_obj.version == 6
@@ -480,6 +494,7 @@ class ActiveFirewall:
     @classmethod
     async def get_detailed_status(cls) -> Dict[str, Any]:
         """Returns actual list of IPs with TTL-based caching."""
+        await cls._ensure_kernel_sets()
         async with cls._status_lock:
             now = time.time()
             if cls._status_cache and (now - cls._status_cache_time) < cls._status_cache_ttl:
@@ -602,6 +617,7 @@ class ActiveFirewall:
     @classmethod
     async def _legacy_micro_block(cls, ip: str, protocol: str, dport: int, ttl: int = 300):
         try:
+            await cls._ensure_kernel_sets()
             ip_obj = ipaddress.ip_address(ip)
             is_v6 = ip_obj.version == 6
             iptables_cmd = "ip6tables" if is_v6 else "iptables"
@@ -674,6 +690,7 @@ class ActiveFirewall:
     @classmethod
     async def _legacy_redirect_to_honeypot(cls, ip: str, ttl: int = 300):
         try:
+            await cls._ensure_kernel_sets()
             if ipaddress.ip_address(ip).version == 6:
                 logger.warning("Skipping IPv6 redirect (not yet supported)", ip=ip)
                 return
