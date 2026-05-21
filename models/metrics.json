@@ -1,12 +1,12 @@
 {
-  "accuracy": 0.9053254437869822,
-  "roc_auc": 0.9745794835347075,
-  "train_samples": 2027,
-  "test_samples": 507,
+  "accuracy": 1.0,
+  "roc_auc": 1.0,
+  "train_samples": 3109,
+  "test_samples": 778,
   "num_features": 49,
   "class_distribution": {
-    "normal": 523,
-    "attack": 2011
+    "normal": 2955,
+    "attack": 932
   },
   "note": "Retrained from DB data \u2014 separated simulated attacks using features key, augmented with synthetic contrast and local normal data"
 }

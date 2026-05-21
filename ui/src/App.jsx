@@ -454,6 +454,17 @@ function App() {
     }
   };
 
+  const toggleBanning = async (disabled) => {
+    try {
+      const response = await apiClient.post('/api/mitigation/toggle', { banning_disabled: disabled });
+      apiClient.toast(response.message || `IPS Banning ${disabled ? 'stopped' : 'resumed'} successfully`, 'info');
+      addLog(`Mitigation Policy: Banning ${disabled ? 'stopped (IDS mode)' : 'resumed (IPS mode)'}`);
+      refreshHealth();
+    } catch (e) {
+      apiClient.handleError(e, `Failed to update banning status`);
+    }
+  };
+
 
 
   const downloadPcap = (eventId) => {
@@ -623,7 +634,8 @@ function App() {
                 {[
                   { label: 'Neural Engine', status: health?.checks?.consumer_running, val: health === null ? 'LOADING' : (health?.checks?.consumer_running ? 'ACTIVE' : 'STOPPED') },
                   { label: 'Redis Stream', status: health?.checks?.redis_ok, val: health === null ? 'LOADING' : (health?.checks?.redis_ok ? 'SYNCED' : 'ERROR') },
-                  { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || (health === null ? 'LOADING' : 'READY') }
+                  { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || (health === null ? 'LOADING' : 'READY') },
+                  { label: 'IPS Banning', status: !health?.ipset?.banning_disabled, val: health === null ? 'LOADING' : (health?.ipset?.banning_disabled ? 'STOPPED' : 'ACTIVE') }
                 ].map(item => (
                   <div key={item.label} className="health-item">
                      <span className="health-label">{item.label}</span>
@@ -957,6 +969,64 @@ function App() {
                 </GlassCard>
 
                 <div className="content-stack">
+                   <GlassCard 
+                      title="IPS Banning Status" 
+                      icon={health?.ipset?.banning_disabled ? StopCircle : Play} 
+                      subtitle="Control dynamic automatic blocking policies"
+                      style={{
+                        border: health?.ipset?.banning_disabled 
+                          ? '1px dashed rgba(244, 63, 94, 0.4)' 
+                          : '1px solid rgba(16, 185, 129, 0.2)',
+                        background: health?.ipset?.banning_disabled 
+                          ? 'rgba(244, 63, 94, 0.02)' 
+                          : 'rgba(16, 185, 129, 0.01)'
+                      }}
+                   >
+                      <div className="content-stack">
+                         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                            <div 
+                              className={`badge-dot ${health?.ipset?.banning_disabled ? 'bg-danger' : 'bg-success'}`} 
+                              style={{ 
+                                width: '12px', 
+                                height: '12px', 
+                                background: health?.ipset?.banning_disabled ? 'var(--danger)' : 'var(--success)',
+                                boxShadow: health?.ipset?.banning_disabled 
+                                  ? '0 0 10px var(--danger)' 
+                                  : '0 0 10px var(--success)',
+                                animation: health?.ipset?.banning_disabled ? 'pulse 2s infinite' : 'none'
+                              }} 
+                            />
+                            <div>
+                               <div style={{ fontWeight: 900, fontSize: '0.85rem', color: health?.ipset?.banning_disabled ? 'var(--danger)' : 'var(--success)' }}>
+                                  {health?.ipset?.banning_disabled ? 'AUTOMATIC BANNING STOPPED' : 'AUTOMATIC BANNING ACTIVE'}
+                               </div>
+                               <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '4px', lineHeight: '1.4' }}>
+                                  {health?.ipset?.banning_disabled 
+                                     ? 'Threat vectors are detected and logged as alerts, but malicious IPs are NOT blocked dynamically.' 
+                                     : 'Machine-learning models and signatures will automatically block malicious IPs in real-time.'}
+                               </p>
+                            </div>
+                         </div>
+                         <div style={{ marginTop: '0.5rem' }}>
+                            <button 
+                              className={`btn ${health?.ipset?.banning_disabled ? 'btn-success' : 'btn-danger'}`} 
+                              onClick={() => toggleBanning(!health?.ipset?.banning_disabled)}
+                              style={{ width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}
+                            >
+                               {health?.ipset?.banning_disabled ? (
+                                  <>
+                                     <Play size={16} /> RESUME IPS BANNING
+                                  </>
+                               ) : (
+                                  <>
+                                     <StopCircle size={16} /> STOP IPS BANNING
+                                  </>
+                               )}
+                            </button>
+                         </div>
+                      </div>
+                   </GlassCard>
+
                   <GlassCard title="Manual Node Control" icon={Shield} subtitle="Directly restrict or authorize hosts">
                      <div className="content-stack">
                         <div>

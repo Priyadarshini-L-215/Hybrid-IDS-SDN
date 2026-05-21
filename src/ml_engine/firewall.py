@@ -259,6 +259,34 @@ class ActiveFirewall:
                 logger.error("Decay loop failed", error=str(e))
 
     @classmethod
+    async def is_banning_disabled(cls) -> bool:
+        """Checks if automatic banning is disabled via Redis key 'sentinel_banning_disabled'."""
+        if not cls._initialized: await cls._initialize()
+        if not cls._redis_client: return False
+        try:
+            loop = asyncio.get_running_loop()
+            val = await loop.run_in_executor(None, cls._redis_client.get, "sentinel_banning_disabled")
+            return val == "true"
+        except Exception as e:
+            logger.error("Failed to check if banning is disabled", error=str(e))
+            return False
+
+    @classmethod
+    async def set_banning_disabled(cls, disabled: bool) -> bool:
+        """Sets automatic banning state in Redis."""
+        if not cls._initialized: await cls._initialize()
+        if not cls._redis_client: return False
+        try:
+            loop = asyncio.get_running_loop()
+            val = "true" if disabled else "false"
+            await loop.run_in_executor(None, cls._redis_client.set, "sentinel_banning_disabled", val)
+            logger.info("Banning status updated dynamically", disabled=disabled)
+            return True
+        except Exception as e:
+            logger.error("Failed to set banning status", error=str(e))
+            return False
+
+    @classmethod
     async def process_incident(cls, src_ip: str, delta: float) -> str:
         """
         Updates IP reputation and triggers mitigation if thresholds reached.
@@ -280,14 +308,23 @@ class ActiveFirewall:
                 return "logged"
 
             if new_score >= REPUTATION_PERM_BLOCK:
+                if await cls.is_banning_disabled():
+                    logger.info("Mitigation Bypassed: permanent_block threshold reached but banning is disabled", ip=src_ip, score=new_score)
+                    return "logged"
                 await cls.block(src_ip, ttl=0)
                 PROM_MITIGATIONS_TOTAL.labels(action="permanent_block").inc()
                 return "permanent_block" if delta > 0 else "logged"
             elif new_score >= REPUTATION_TEMP_BLOCK:
+                if await cls.is_banning_disabled():
+                    logger.info("Mitigation Bypassed: temp_block threshold reached but banning is disabled", ip=src_ip, score=new_score)
+                    return "logged"
                 await cls.block(src_ip, ttl=BLOCK_TTL)
                 PROM_MITIGATIONS_TOTAL.labels(action="temp_block").inc()
                 return "temp_block" if delta > 0 else "logged"
             elif new_score >= REPUTATION_LIMIT:
+                if await cls.is_banning_disabled():
+                    logger.info("Mitigation Bypassed: rate_limit threshold reached but banning is disabled", ip=src_ip, score=new_score)
+                    return "logged"
                 await cls.rate_limit(src_ip)
                 PROM_MITIGATIONS_TOTAL.labels(action="rate_limit").inc()
                 return "rate_limit" if delta > 0 else "logged"
@@ -436,7 +473,8 @@ class ActiveFirewall:
             "backend": cls._backend,
             "permanent": len(detailed["permanent_ips"]),
             "temporary": len(detailed["temporary_ips"]),
-            "reputation_tracked": len(detailed["reputation"])
+            "reputation_tracked": len(detailed["reputation"]),
+            "banning_disabled": await cls.is_banning_disabled()
         }
 
     @classmethod

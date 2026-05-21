@@ -62,3 +62,14 @@ async def mark_false_positive(req: FalsePositiveRequest):
         "success": success,
         "message": f"IP {src_ip} unblocked and alert {alert_id} logged as False Positive"
     }
+
+class ToggleBanningRequest(BaseModel):
+    banning_disabled: bool = Field(..., description="True to stop automatic banning, False to resume")
+
+@router.post("/mitigation/toggle", dependencies=[Depends(require_api_key)])
+async def toggle_banning(req: ToggleBanningRequest):
+    success = await ActiveFirewall.set_banning_disabled(req.banning_disabled)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update banning status in Redis")
+    state_str = "stopped" if req.banning_disabled else "resumed"
+    return {"success": True, "message": f"IP banning {state_str} successfully", "banning_disabled": req.banning_disabled}

@@ -2,38 +2,38 @@
     "success": true,
     "metrics": {
         "normal": {
-            "precision": 0.9946539946539946,
-            "recall": 0.02625904639437967,
-            "f1-score": 0.051167267615962846,
+            "precision": 0.38805589771906723,
+            "recall": 0.7879752542399461,
+            "f1-score": 0.5200175933352307,
             "support": 127537.0,
-            "tn": 3349,
-            "fp": 124188
+            "tn": 100496,
+            "fp": 27041
         },
         "attack": {
-            "precision": 0.5613281525962558,
-            "recall": 0.9998867425910778,
-            "f1-score": 0.7190100219442119,
+            "precision": 0.01647632210664145,
+            "recall": 0.002850311457874536,
+            "f1-score": 0.004859889284641462,
             "support": 158930.0,
-            "fn": 18,
-            "tp": 158912
+            "fn": 158477,
+            "tp": 453
         },
-        "accuracy": 0.5664212631821466,
+        "accuracy": 0.3523931203245051,
         "macro avg": {
-            "precision": 0.7779910736251252,
-            "recall": 0.5130728944927287,
-            "f1-score": 0.38508864478008736,
+            "precision": 0.20226610991285435,
+            "recall": 0.3954127828489103,
+            "f1-score": 0.26243874130993605,
             "support": 286467.0
         },
         "weighted avg": {
-            "precision": 0.7542476788192337,
-            "recall": 0.5664212631821466,
-            "f1-score": 0.4216820178154226,
+            "precision": 0.18190600278498117,
+            "recall": 0.3523931203245051,
+            "f1-score": 0.2342115008193034,
             "support": 286467.0
         }
     },
     "summary": {
         "total_samples": 286467,
-        "accuracy": 0.5664212631821466,
+        "accuracy": 0.3523931203245051,
         "model_version": "v4.0.0-multi",
         "dataset": "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv"
     }
