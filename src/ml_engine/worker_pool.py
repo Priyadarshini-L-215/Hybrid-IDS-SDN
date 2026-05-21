@@ -1,4 +1,4 @@
-import json
+import orjson
 import time
 import asyncio
 import structlog
@@ -14,17 +14,6 @@ from common.fp_store import fp_store
 from ml_engine.baseline_updater import baseline_monitor, BaselineUpdater
 from ml_engine.deep_models import deep_manager
 import numpy as np
-
-class NPEncoder(json.JSONEncoder):
-    """Custom JSON Encoder for NumPy types (NumPy 2.0 compatible)."""
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NPEncoder, self).default(obj)
 
 logger = structlog.get_logger(__name__)
 

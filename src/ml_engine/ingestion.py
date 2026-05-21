@@ -1,5 +1,5 @@
 import asyncio
-import json
+import orjson
 import os
 import sys
 import time
@@ -45,8 +45,8 @@ async def emit_heartbeat():
         }
         try:
             heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(heartbeat_path, "a") as f:
-                f.write(json.dumps(heartbeat) + "\n")
+            with open(heartbeat_path, "ab") as f:
+                f.write(orjson.dumps(heartbeat) + b"\n")
         except Exception as e:
             logger.error("Failed to write heartbeat", error=str(e))
 
@@ -63,7 +63,10 @@ async def push_to_redis(data_list: list):
         pipe = rc.async_redis_client.pipeline()
         for item in data_list:
             # item is a pydantic model or dict
-            payload = item.model_dump_json() if hasattr(item, "model_dump_json") else json.dumps(item)
+            if hasattr(item, "model_dump_json"):
+                payload = item.model_dump_json()
+            else:
+                payload = orjson.dumps(item)
             pipe.xadd(REDIS_QUEUE_NAME, {"event": payload}, maxlen=10000, approximate=True)
         await pipe.execute()
         return True
@@ -119,7 +122,7 @@ async def handle_suricata_stream(reader, writer):
             if not _RUNNING: break
             
             try:
-                raw_data = json.loads(line)
+                raw_data = orjson.loads(line)
                 _STATS["packets_received"] += 1
                 
                 event = normalize_eve(raw_data)
@@ -140,7 +143,7 @@ async def handle_suricata_stream(reader, writer):
                         await push_to_redis([flushed])
                         _STATS["flows_aggregated"] += 1
                         
-            except json.JSONDecodeError:
+            except orjson.JSONDecodeError:
                 logger.debug("Skipping invalid JSON line")
                 continue
             except Exception as e:
@@ -171,7 +174,7 @@ async def main():
     SURICATA_SOCKET.parent.mkdir(parents=True, exist_ok=True)
 
     server = await asyncio.start_unix_server(handle_suricata_stream, path=str(SURICATA_SOCKET))
-    os.chmod(SURICATA_SOCKET, 0o777)
+    os.chmod(SURICATA_SOCKET, 0o660)
     
     # Start heartbeat task
     heartbeat_task = asyncio.create_task(emit_heartbeat())

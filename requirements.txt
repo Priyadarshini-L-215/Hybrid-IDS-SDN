@@ -29,3 +29,4 @@ maxminddb-geolite2
 requests
 psutil>=5.9.0
 aiosqlite>=0.20.0
+orjson>=3.10.0

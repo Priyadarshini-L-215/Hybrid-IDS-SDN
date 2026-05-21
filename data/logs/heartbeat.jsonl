@@ -12858,3 +12858,28 @@
 {"ts": "2026-05-21T02:45:26.521941Z", "component": "ingestion", "uptime_sec": 820.1, "packets": 1562, "flows": 1049, "errors": 0, "redis_ok": true}
 {"ts": "2026-05-21T13:24:19.651890Z", "component": "ingestion", "uptime_sec": 10.0, "packets": 2, "flows": 0, "errors": 0, "redis_ok": true}
 {"ts": "2026-05-21T13:24:29.652866Z", "component": "ingestion", "uptime_sec": 20.0, "packets": 49, "flows": 45, "errors": 0, "redis_ok": true}
+{"ts":"2026-05-21T14:24:52.333367Z","component":"ingestion","uptime_sec":10.0,"packets":7,"flows":5,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:25:02.334362Z","component":"ingestion","uptime_sec":20.0,"packets":63,"flows":45,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:25:12.335099Z","component":"ingestion","uptime_sec":30.0,"packets":68,"flows":61,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:29:31.224297Z","component":"ingestion","uptime_sec":10.0,"packets":4,"flows":3,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:29:41.225593Z","component":"ingestion","uptime_sec":20.0,"packets":13,"flows":10,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:29:51.226120Z","component":"ingestion","uptime_sec":30.0,"packets":19,"flows":12,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:30:01.227567Z","component":"ingestion","uptime_sec":40.01,"packets":23,"flows":15,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:30:11.229523Z","component":"ingestion","uptime_sec":50.01,"packets":37,"flows":25,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:30:21.236415Z","component":"ingestion","uptime_sec":60.01,"packets":42,"flows":25,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:30:32.585254Z","component":"ingestion","uptime_sec":71.36,"packets":44,"flows":25,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:31:35.503463Z","component":"ingestion","uptime_sec":10.0,"packets":48,"flows":41,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:40:27.517358Z","component":"ingestion","uptime_sec":10.0,"packets":2,"flows":0,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:40:37.518339Z","component":"ingestion","uptime_sec":20.0,"packets":20,"flows":17,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:40:47.520339Z","component":"ingestion","uptime_sec":30.01,"packets":32,"flows":25,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:40:57.521533Z","component":"ingestion","uptime_sec":40.01,"packets":38,"flows":26,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:41:07.522322Z","component":"ingestion","uptime_sec":50.01,"packets":131,"flows":109,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:41:17.523185Z","component":"ingestion","uptime_sec":60.01,"packets":235,"flows":218,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:41:27.524358Z","component":"ingestion","uptime_sec":70.01,"packets":260,"flows":240,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:41:37.525358Z","component":"ingestion","uptime_sec":80.01,"packets":295,"flows":268,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:41:47.526413Z","component":"ingestion","uptime_sec":90.01,"packets":312,"flows":285,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:41:57.527846Z","component":"ingestion","uptime_sec":100.01,"packets":326,"flows":294,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:42:07.529643Z","component":"ingestion","uptime_sec":110.02,"packets":350,"flows":314,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:42:17.531182Z","component":"ingestion","uptime_sec":120.02,"packets":390,"flows":349,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:42:27.532343Z","component":"ingestion","uptime_sec":130.02,"packets":402,"flows":353,"errors":0,"redis_ok":true}
+{"ts":"2026-05-21T14:42:37.533361Z","component":"ingestion","uptime_sec":140.02,"packets":426,"flows":381,"errors":0,"redis_ok":true}

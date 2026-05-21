@@ -41,11 +41,7 @@ outputs:
       enabled: yes
       filetype: regular
       community-id: yes
-<<<<<<< HEAD
-      filename: /home/priy/Hybrid-IDS-SDN/data/logs/eve.json
-=======
       filename: /home/preetham/Hybrid-IDS-SDN/data/logs/eve.json
->>>>>>> cba071e305197c5624048bdd8c46fa4281c45169
       types:
         - alert:
             metadata: yes
@@ -92,14 +88,10 @@ outputs:
       limit: 1000mb
       max-files: 2000
       mode: multi
-<<<<<<< HEAD
-      dir: /home/priy/Hybrid-IDS-SDN/data/pcaps
-=======
       dir: /home/preetham/Hybrid-IDS-SDN/data/pcaps
->>>>>>> cba071e305197c5624048bdd8c46fa4281c45169
 
 af-packet:
-  - interface: eth0
+  - interface: wlo1
     cluster-id: 98
     cluster-type: single
     defrag: yes
@@ -129,8 +121,4 @@ logging:
       enabled: yes
   - file:
       enabled: yes
-<<<<<<< HEAD
-      filename: /home/priy/Hybrid-IDS-SDN/data/logs/suricata.log
-=======
       filename: /home/preetham/Hybrid-IDS-SDN/data/logs/suricata.log
->>>>>>> cba071e305197c5624048bdd8c46fa4281c45169

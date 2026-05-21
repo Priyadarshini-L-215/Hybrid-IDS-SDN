@@ -89,13 +89,14 @@ class StatefulFeatureTracker:
         self._lock = asyncio.Lock()
         
         # Multi-level indices for O(1) lookups
-        self.idx_src = Counter()
-        self.idx_dst = Counter()
-        self.idx_src_srv = Counter()
-        self.idx_dst_srv = Counter()
-        self.idx_dst_dport = Counter()
-        self.idx_dst_sport = Counter()
-        self.idx_src_dst = Counter()
+        # Using dict instead of Counter for faster updates
+        self.idx_src = {}
+        self.idx_dst = {}
+        self.idx_src_srv = {}
+        self.idx_dst_srv = {}
+        self.idx_dst_dport = {}
+        self.idx_dst_sport = {}
+        self.idx_src_dst = {}
 
     async def update(self, event_meta):
         async with self._lock:
@@ -113,19 +114,21 @@ class StatefulFeatureTracker:
         srv = entry['service']
         dp, sp = entry['dst_port'], entry['src_port']
         
-        # Helper to update and prune
-        def _upd(idx, key, d):
-            idx[key] += d
-            if idx[key] <= 0:
-                del idx[key]
-
-        _upd(self.idx_src, s, delta)
-        _upd(self.idx_dst, d, delta)
-        _upd(self.idx_src_srv, (s, srv), delta)
-        _upd(self.idx_dst_srv, (d, srv), delta)
-        _upd(self.idx_dst_dport, (d, dp), delta)
-        _upd(self.idx_dst_sport, (d, sp), delta)
-        _upd(self.idx_src_dst, (s, d), delta)
+        # Inlined dict updates for performance: 7 index updates per packet
+        for idx, key in [
+            (self.idx_src, s),
+            (self.idx_dst, d),
+            (self.idx_src_srv, (s, srv)),
+            (self.idx_dst_srv, (d, srv)),
+            (self.idx_dst_dport, (d, dp)),
+            (self.idx_dst_sport, (d, sp)),
+            (self.idx_src_dst, (s, d))
+        ]:
+            val = idx.get(key, 0) + delta
+            if val <= 0:
+                if key in idx: del idx[key]
+            else:
+                idx[key] = val
 
     def get_ct_stats(self, src_ip, dst_ip, service, dst_port, src_port):
         """O(1) lookups instead of O(n) linear scan."""

@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import numpy as np
 import os
+import json
 
 # Set Keras backend BEFORE importing any ML modules
 if not os.environ.get("KERAS_BACKEND"):
@@ -14,12 +15,22 @@ if not os.environ.get("KERAS_BACKEND"):
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.config import setup_logging, WORKER_COUNT, REDIS_ALERT_STREAM
-from ml_engine.worker_pool import WorkerPool, NPEncoder
+from ml_engine.worker_pool import WorkerPool
+
+class NPEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NPEncoder, self).default(obj)
 from ml_engine.engine import MLEngine
 from ml_engine import redis_client as rc
 from common.database import batch_add_alerts
 from common.db_writer import alert_writer
-import json
+
 
 # Initialize structured logging
 setup_logging("consumer")

@@ -150,9 +150,15 @@ class VaeAnomalyDetector:
                 input_name_dec = self.decoder.get_inputs()[0].name
                 X_recon = self.decoder.run(None, {input_name_dec: z})[0]
             else:
-                encoder_output = self.encoder.predict(X_scaled_sliced, verbose=0)
-                z = encoder_output[0] if isinstance(encoder_output, list) else encoder_output
-                X_recon = self.decoder.predict(z, verbose=0)
+                # Direct call is 10x faster than .predict() for micro-batches
+                # We use training=False to ensure dropout/batchnorm are in inference mode
+                z_output = self.encoder(X_scaled_sliced, training=False)
+                # VAE encoders often return [z, z_mean, z_log_var], we want z
+                z = z_output[0] if isinstance(z_output, (list, tuple)) else z_output
+                
+                recon_output = self.decoder(z, training=False)
+                X_recon = recon_output.numpy() if hasattr(recon_output, "numpy") else recon_output
+                z = z.numpy() if hasattr(z, "numpy") else z
  
             mse = np.mean(np.power(X_scaled_sliced - X_recon, 2), axis=1)
             return z, mse

@@ -224,10 +224,10 @@ async def websocket_endpoint(websocket: WebSocket):
             # Keep connection alive and handle ping/pong
             msg = await websocket.receive_text()
             try:
-                import json
-                data = json.loads(msg)
+                import orjson
+                data = orjson.loads(msg)
                 if data.get('type') == 'ping':
-                    await websocket.send_text(json.dumps({'type': 'pong'}))
+                    await websocket.send_text(orjson.dumps({'type': 'pong'}).decode())
             except Exception:
                 pass
     except WebSocketDisconnect:

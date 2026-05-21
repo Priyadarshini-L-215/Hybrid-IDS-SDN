@@ -28,9 +28,9 @@ def mock_flow_event():
         }
     }
 
-def test_extract_features_basic(mock_flow_event):
+async def test_extract_features_basic(mock_flow_event):
     features = DEFAULT_FEATURES
-    vector = extract_features_from_eve(mock_flow_event, features)
+    vector = await extract_features_from_eve(mock_flow_event, features)
     
     assert vector is not None
     assert len(vector) == 49
@@ -49,7 +49,7 @@ def test_extract_features_basic(mock_flow_event):
     assert vector[3] == 1000.0 # total_fwd_bytes
     assert vector[4] == 500.0  # total_bwd_bytes
 
-def test_extract_features_zero_pkts():
+async def test_extract_features_zero_pkts():
     event = {
         "event_type": "flow",
         "proto": "UDP",
@@ -61,18 +61,18 @@ def test_extract_features_zero_pkts():
             "age": 5
         }
     }
-    vector = extract_features_from_eve(event, features=DEFAULT_FEATURES)
+    vector = await extract_features_from_eve(event, features=DEFAULT_FEATURES)
     assert vector is not None
     
     # dload = (bwd_bytes * 8) / max(age, 0.001) = (500 * 8) / 5 = 800.0
     idx_dload = DEFAULT_FEATURES.index("dload")
     assert vector[idx_dload] == 800.0
 
-def test_protocol_mapping():
+async def test_protocol_mapping():
     # Test known protocol
     # In V4, app_proto is encoded at the end
     event_http = {"event_type": "flow", "app_proto": "http", "flow": {}}
-    vector_http = extract_features_from_eve(event_http, features=DEFAULT_FEATURES)
+    vector_http = await extract_features_from_eve(event_http, features=DEFAULT_FEATURES)
     # app_proto is the last feature (index 48)
     # We don't know the exact encoding without the model, but it should be a float
     assert isinstance(vector_http[48], float)
@@ -83,17 +83,17 @@ def test_fallback_mechanism(tmp_path):
     features = load_feature_names(missing_path)
     assert features == DEFAULT_FEATURES
 
-def test_feature_list_mismatch():
+async def test_feature_list_mismatch():
     # Test with wrong number of features
     event = {"event_type": "flow", "flow": {}}
     # Pass a short list of features
     short_features = ["flow_duration", "total_fwd_packets"]
-    vector = extract_features_from_eve(event, short_features)
+    vector = await extract_features_from_eve(event, short_features)
     assert len(vector) == 2
     # validate_feature_vector(vector, expected_dim=49) should be False
     assert validate_feature_vector(vector, expected_dim=49) is False
 
-def test_tcp_window_handling():
+async def test_tcp_window_handling():
     # Test with tcp window in event
     event = {
         "event_type": "flow",
@@ -102,7 +102,7 @@ def test_tcp_window_handling():
         },
         "flow": {}
     }
-    vector = extract_features_from_eve(event, features=DEFAULT_FEATURES)
+    vector = await extract_features_from_eve(event, features=DEFAULT_FEATURES)
     
     idx_swin = DEFAULT_FEATURES.index("swin")
     idx_dwin = DEFAULT_FEATURES.index("dwin")

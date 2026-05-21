@@ -1,6 +1,6 @@
 import aiosqlite
 import sqlite3
-import json
+import orjson
 import structlog
 import asyncio
 import zlib
@@ -21,12 +21,12 @@ class DatabaseHandler:
         self._pruner_task = None
 
     @staticmethod
-    @functools.lru_cache(maxsize=100)
+    @functools.lru_cache(maxsize=500) # Increased cache size
     def _decompress_event(raw_data: bytes) -> dict:
         """Cached decompression and JSON parsing of forensic events."""
         try:
-            decompressed = zlib.decompress(raw_data).decode('utf-8')
-            return json.loads(decompressed)
+            decompressed = zlib.decompress(raw_data)
+            return orjson.loads(decompressed)
         except Exception:
             return {}
 
@@ -163,8 +163,11 @@ class DatabaseHandler:
     async def add_alert(self, alert_data: Dict[str, Any]):
         """Insert a new alert into the database."""
         try:
-            raw_event = json.dumps(alert_data.get('raw_event'))
-            compressed_raw = zlib.compress(raw_event.encode('utf-8'))
+            def _prepare_payload():
+                raw_json = orjson.dumps(alert_data.get('raw_event'))
+                return zlib.compress(raw_json)
+                
+            compressed_raw = await asyncio.to_thread(_prepare_payload)
             
             conn = await self._get_conn()
             await conn.execute('''
@@ -192,9 +195,9 @@ class DatabaseHandler:
                 1 if alert_data.get('is_mitigated') else 0,
                 alert_data.get('ja3_hash'),
                 alert_data.get('ja3_string'),
-                json.dumps(alert_data.get('shap_top3', [])),
+                orjson.dumps(alert_data.get('shap_top3', [])).decode(),
                 alert_data.get('xai_explanation', ''),
-                json.dumps(alert_data.get('enrichment', {})),
+                orjson.dumps(alert_data.get('enrichment', {})).decode(),
                 alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
                 alert_data.get('anomaly_score', 0.0),
                 alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
@@ -209,36 +212,41 @@ class DatabaseHandler:
         """Insert a batch of alerts in a single transaction."""
         if not alerts_data_list: return
         try:
-            params = []
-            for alert_data in alerts_data_list:
-                raw_json = json.dumps(alert_data.get('raw_event'))
-                compressed_raw = zlib.compress(raw_json.encode('utf-8'))
-                params.append((
-                    alert_data.get('event_id'),
-                    alert_data.get('timestamp'),
-                    alert_data.get('event_type'),
-                    alert_data.get('src_ip'),
-                    alert_data.get('src_port'),
-                    alert_data.get('dst_ip'),
-                    alert_data.get('dst_port'),
-                    alert_data.get('protocol'),
-                    alert_data.get('alert_sig'),
-                    alert_data.get('prediction'),
-                    alert_data.get('confidence'),
-                    alert_data.get('severity'),
-                    alert_data.get('category'),
-                    alert_data.get('mitigation'),
-                    1 if alert_data.get('is_mitigated') else 0,
-                    alert_data.get('ja3_hash'),
-                    alert_data.get('ja3_string'),
-                    json.dumps(alert_data.get('shap_top3', [])),
-                    alert_data.get('xai_explanation', ''),
-                    json.dumps(alert_data.get('enrichment', {})),
-                    alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
-                    alert_data.get('anomaly_score', 0.0),
-                    alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
-                    compressed_raw
-                ))
+            def _prepare_batch():
+                params = []
+                for alert_data in alerts_data_list:
+                    raw_json = orjson.dumps(alert_data.get('raw_event'))
+                    compressed_raw = zlib.compress(raw_json)
+                    params.append((
+                        alert_data.get('event_id'),
+                        alert_data.get('timestamp'),
+                        alert_data.get('event_type'),
+                        alert_data.get('src_ip'),
+                        alert_data.get('src_port'),
+                        alert_data.get('dst_ip'),
+                        alert_data.get('dst_port'),
+                        alert_data.get('protocol'),
+                        alert_data.get('alert_sig'),
+                        alert_data.get('prediction'),
+                        alert_data.get('confidence'),
+                        alert_data.get('severity'),
+                        alert_data.get('category'),
+                        alert_data.get('mitigation'),
+                        1 if alert_data.get('is_mitigated') else 0,
+                        alert_data.get('ja3_hash'),
+                        alert_data.get('ja3_string'),
+                        orjson.dumps(alert_data.get('shap_top3', [])).decode(),
+                        alert_data.get('xai_explanation', ''),
+                        orjson.dumps(alert_data.get('enrichment', {})).decode(),
+                        alert_data.get('mitre', {}).get('id') if isinstance(alert_data.get('mitre'), dict) else alert_data.get('mitre_id'),
+                        alert_data.get('anomaly_score', 0.0),
+                        alert_data.get('forensics', {}).get('correlation_id') if isinstance(alert_data.get('forensics'), dict) else alert_data.get('correlation_id'),
+                        compressed_raw
+                    ))
+                return params
+            
+            # Offload serialization and compression to background thread
+            params = await asyncio.to_thread(_prepare_batch)
             
             conn = await self._get_conn()
             await conn.executemany('''
@@ -279,7 +287,7 @@ class DatabaseHandler:
                 for field in ['shap_top3', 'enrichment']:
                     if alert.get(field):
                         try:
-                            alert[field] = json.loads(alert[field])
+                            alert[field] = orjson.loads(alert[field])
                         except Exception:
                             alert[field] = {} if field == 'enrichment' else []
                 alert.pop('raw_event', None)
@@ -331,7 +339,7 @@ class DatabaseHandler:
                 alert = dict(row)
                 for field in ['shap_top3', 'enrichment']:
                     if alert.get(field):
-                        try: alert[field] = json.loads(alert[field])
+                        try: alert[field] = orjson.loads(alert[field])
                         except Exception: alert[field] = {}
                 alert.pop('raw_event', None)
                 alerts.append(alert)
@@ -373,7 +381,7 @@ class DatabaseHandler:
             stats = {}
             for row in rows:
                 try:
-                    data = json.loads(row['enrichment'])
+                    data = orjson.loads(row['enrichment'])
                     cc = data.get("country_code")
                     if cc:
                         if cc not in stats:
@@ -447,7 +455,7 @@ class DatabaseHandler:
                 
                 for field in ['shap_top3', 'enrichment']:
                     if h.get(field):
-                        try: h[field] = json.loads(h[field])
+                        try: h[field] = orjson.loads(h[field])
                         except Exception: h[field] = {} if field == 'enrichment' else []
                 
                 h.pop('raw_event', None)
@@ -554,7 +562,7 @@ class DatabaseHandler:
                 alert["raw_event"] = self._decompress_event(alert["raw_event"])
             for field in ("shap_top3", "enrichment"):
                 if alert.get(field):
-                    try: alert[field] = json.loads(alert[field])
+                    try: alert[field] = orjson.loads(alert[field])
                     except Exception: alert[field] = {} if field == "enrichment" else []
             return alert
         except Exception as e:
