@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Target, X, AlertTriangle, ShieldCheck } from 'lucide-react';
@@ -61,7 +62,7 @@ const MitreMatrix = () => {
   const tacticStatus = useMemo(() => {
     const status = {};
     tactics.forEach(t => {
-      const hits = stats.filter(s => {
+      const hits = (stats || []).filter(s => {
         const mid = (s.mitre_id || '').toUpperCase();
         return mid === t.id || mid.startsWith(t.id) || mid.includes(t.id);
       });

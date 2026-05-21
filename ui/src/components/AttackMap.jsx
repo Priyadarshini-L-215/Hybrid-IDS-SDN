@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Globe, Crosshair, AlertCircle } from 'lucide-react';
@@ -74,14 +75,14 @@ const AttackMap = ({ alerts }) => {
   };
 
   const activeThreats = useMemo(() => {
-    return alerts
+    return (alerts || [])
       .filter(a => {
         const p = (a.prediction || '').toLowerCase();
         return p.includes('attack') || p.includes('anomaly');
       })
       .slice(0, 5)
-      .map(a => ({
-        id: a.event_id || Math.random().toString(),
+      .map((a, idx) => ({
+        id: a.event_id || `threat-fallback-${a.timestamp || idx}-${idx}`,
         src: getCoords(a.enrichment?.country_code),
         dest: [300, 200], // Center target
         color: 'var(--danger)',

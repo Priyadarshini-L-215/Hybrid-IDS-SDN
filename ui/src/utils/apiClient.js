@@ -176,10 +176,10 @@ class ApiClient {
     return this.retry(() =>
       this.fetchWithTimeout(url, {
         method: 'PUT',
-        headers: {
+        headers: this.getHeaders({
           'Content-Type': 'application/json',
           ...options.headers
-        },
+        }),
         body: JSON.stringify(body),
         ...options
       })

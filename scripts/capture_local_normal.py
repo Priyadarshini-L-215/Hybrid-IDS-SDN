@@ -33,7 +33,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+async def main():
     args = parse_args()
     db_path = DB_PATH
 
@@ -88,7 +88,7 @@ def main():
                 suricata_event = json.loads(decompressed)
                 
                 # Use the REAL feature extractor
-                features = extract_features_from_eve(suricata_event, feature_names)
+                features = await extract_features_from_eve(suricata_event, feature_names)
                 
                 if features is None:
                     skipped += 1
@@ -114,4 +114,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
+

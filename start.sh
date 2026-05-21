@@ -73,15 +73,27 @@ wait_for_condition() {
     return 1
 }
 
+update_state() {
+    local key=$1
+    local value=$2
+    local temp_file
+    temp_file=$(mktemp "$PROJECT_ROOT/.sentinel_state.XXXXXX")
+    if [ -f "$STATE_FILE" ]; then
+        grep -v "^${key}=" "$STATE_FILE" > "$temp_file" || true
+    fi
+    echo "${key}=${value}" >> "$temp_file"
+    mv "$temp_file" "$STATE_FILE"
+}
+
 # ============================================================================
 # SERVICE MANAGEMENT
 # ============================================================================
 
 ensure_sudo_access() {
     log_info "Checking sudo access..."
-    if ! sudo -v; then
-        log_error "Sudo access required for network sensors and mitigation"
-        exit 1
+    if ! sudo -n -v 2>/dev/null; then
+        log_warn "Sudo access not available (non-interactive). Continuing in non-privileged mode..."
+        return 0
     fi
     keep_sudo_alive &
     SUDO_KEEP_ALIVE_PID=$!
@@ -124,7 +136,7 @@ start_redis() {
 start_ingestion() {
     log_info "Starting Ingestion Bridge..."
     "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/ingestion.py" >> "$PROJECT_ROOT/data/logs/ingestion.log" 2>&1 &
-    echo "ingestion_pid=$!" >> "$STATE_FILE"
+    update_state "ingestion_pid" "$!"
 }
 
 start_suricata() {
@@ -149,13 +161,13 @@ start_suricata() {
     sleep 2
     local spid
     spid=$(pgrep -f "suricata -c .*suricata.yaml.active" | head -n 1 || true)
-    [ -n "$spid" ] && echo "suricata_pid=$spid" >> "$STATE_FILE"
+    [ -n "$spid" ] && update_state "suricata_pid" "$spid"
 }
 
 start_consumer() {
     log_info "Starting ML Consumer..."
     "$APP_PYTHON" "$PROJECT_ROOT/src/ml_engine/consumer.py" >> "$PROJECT_ROOT/data/logs/consumer.log" 2>&1 &
-    echo "consumer_pid=$!" >> "$STATE_FILE"
+    update_state "consumer_pid" "$!"
 }
 
 start_relay() {
@@ -165,7 +177,7 @@ start_relay() {
     
     "$PROJECT_ROOT/.venv/bin/python" -m uvicorn relay.app:app --host 0.0.0.0 --port 8000 --reload > "$PROJECT_ROOT/data/logs/relay.log" 2>&1 &
     local relay_pid=$!
-    echo "relay_pid=$relay_pid" >> "$STATE_FILE"
+    update_state "relay_pid" "$relay_pid"
 
     # Wait for Relay API to be healthy
     local RELAY_TIMEOUT=60
@@ -173,7 +185,7 @@ start_relay() {
     log_info "Waiting for Relay API (timeout: ${RELAY_TIMEOUT}s)..."
     while ! curl -s http://localhost:8000/api/health > /dev/null; do
         sleep 1
-        ((count++))
+        count=$((count + 1))
         if [ $count -ge $RELAY_TIMEOUT ]; then
             log_error "Relay API did not start within ${RELAY_TIMEOUT}s"
             cat "$PROJECT_ROOT/data/logs/relay.log" | tail -n 20
@@ -184,7 +196,7 @@ start_relay() {
 
     # Verify Suricata (give it more time if needed)
     local suricata_pid
-    suricata_pid=$(grep "suricata_pid=" "$STATE_FILE" | cut -d'=' -f2)
+    suricata_pid=$(grep "suricata_pid=" "$STATE_FILE" | cut -d'=' -f2 || true)
     if [ -n "$suricata_pid" ] && ! kill -0 "$suricata_pid" 2>/dev/null; then
         log_warn "Suricata PID $suricata_pid is not running. Checking if it's still initializing..."
         sleep 10
@@ -214,14 +226,19 @@ start_ui() {
 
     # Start Vite via node directly to bypass permission issues on NTFS/fuseblk
     VITE_PORT=3000 VITE_BACKEND_PORT=8000 node ./node_modules/vite/bin/vite.js --host 127.0.0.1 >> "$PROJECT_ROOT/data/logs/ui.log" 2>&1 &
-    echo "ui_pid=$!" >> "$STATE_FILE"
+    update_state "ui_pid" "$!"
     cd "$PROJECT_ROOT" || return 1
 }
 
 monitor_services() {
     log_info "Starting supervisor loop..."
     while true; do
+        local state_content=""
+        if [ -f "$STATE_FILE" ]; then
+            state_content=$(cat "$STATE_FILE" 2>/dev/null || true)
+        fi
         while IFS='=' read -r key pid; do
+            [ -z "$key" ] || [ -z "$pid" ] && continue
             if ! kill -0 "$pid" 2>/dev/null; then
                 log_warn "Service $key (PID $pid) died. Attempting restart..."
                 case "$key" in
@@ -231,7 +248,7 @@ monitor_services() {
                     ui_pid) start_ui ;;
                 esac
             fi
-        done < "$STATE_FILE"
+        done <<< "$state_content"
         sleep 10
     done
 }

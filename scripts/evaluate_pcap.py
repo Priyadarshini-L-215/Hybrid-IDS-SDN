@@ -11,7 +11,7 @@ sys.path.append(str(BASE_DIR / "src"))
 
 from common.feature_extractor import extract_features_from_eve, load_feature_names
 
-def evaluate_pcap(pcap_path):
+async def evaluate_pcap(pcap_path):
     print(f"=== Sentinel Core: PCAP Evaluation ({pcap_path}) ===")
     
     # 1. Setup paths
@@ -93,7 +93,7 @@ def evaluate_pcap(pcap_path):
             try:
                 event = json.loads(line)
                 if event.get('event_type') == 'flow':
-                    features = extract_features_from_eve(event, feature_order)
+                    features = await extract_features_from_eve(event, feature_order)
                     if features:
                         all_features.append(features)
                         flow_infos.append({
@@ -155,5 +155,7 @@ def evaluate_pcap(pcap_path):
     print("="*95)
 
 if __name__ == "__main__":
+    import asyncio
     pcap = sys.argv[1] if len(sys.argv) > 1 else "user/test.pcapng"
-    evaluate_pcap(pcap)
+    asyncio.run(evaluate_pcap(pcap))
+

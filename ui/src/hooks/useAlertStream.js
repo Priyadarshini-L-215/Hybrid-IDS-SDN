@@ -25,10 +25,10 @@ export const useAlertStream = () => {
   const reconnectAttempts = useRef(0);
   const maxReconnectAttempts = 5;
   const baseReconnectDelay = 1000;
-  let flushTimer = null;
-  let heartbeatTimer = null;
-  let pongTimeout = null;
-  let lastPongTime = useRef(Date.now());
+  const flushTimer = useRef(null);
+  const heartbeatTimer = useRef(null);
+  const pongTimeout = useRef(null);
+  const lastPongTime = useRef(0);
 
   // Smart buffer flush at ~20fps (50ms interval) instead of 60fps
   const flushBuffer = () => {
@@ -61,6 +61,7 @@ export const useAlertStream = () => {
 
   // Initialize WebSocket connection
   useEffect(() => {
+    lastPongTime.current = Date.now();
     const fetchInitialAlerts = async () => {
       try {
         const data = await apiClient.get('/api/alerts');
@@ -104,13 +105,13 @@ export const useAlertStream = () => {
           reconnectAttempts.current = 0;
 
           // Start heartbeat with pong timeout detection
-          if (heartbeatTimer) clearInterval(heartbeatTimer);
-          heartbeatTimer = setInterval(() => {
+          if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
+          heartbeatTimer.current = setInterval(() => {
             if (ws.current?.readyState === WebSocket.OPEN) {
               try {
                 // Set a timeout to detect if pong doesn't arrive
-                if (pongTimeout) clearTimeout(pongTimeout);
-                pongTimeout = setTimeout(() => {
+                if (pongTimeout.current) clearTimeout(pongTimeout.current);
+                pongTimeout.current = setTimeout(() => {
                   console.warn('[Alert Stream] Pong timeout - server not responding');
                   setError('Server heartbeat timeout');
                   ws.current?.close();
@@ -130,7 +131,7 @@ export const useAlertStream = () => {
             
             // Handle ping/pong for heartbeat monitoring
             if (message.type === 'pong') {
-              if (pongTimeout) clearTimeout(pongTimeout);
+              if (pongTimeout.current) clearTimeout(pongTimeout.current);
               lastPongTime.current = Date.now();
               return;
             }
@@ -168,7 +169,7 @@ export const useAlertStream = () => {
           setIsConnected(false);
           setStreamStatus('disconnected');
           
-          if (heartbeatTimer) clearInterval(heartbeatTimer);
+          if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
 
           // Attempt reconnection with exponential backoff
           if (reconnectAttempts.current < maxReconnectAttempts) {
@@ -192,12 +193,12 @@ export const useAlertStream = () => {
     connect();
 
     // Smart buffer flush at 20fps (50ms interval) instead of requestAnimationFrame
-    flushTimer = setInterval(flushBuffer, 50);
+    flushTimer.current = setInterval(flushBuffer, 50);
 
     return () => {
-      if (flushTimer) clearInterval(flushTimer);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (pongTimeout) clearTimeout(pongTimeout);
+      if (flushTimer.current) clearInterval(flushTimer.current);
+      if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
+      if (pongTimeout.current) clearTimeout(pongTimeout.current);
       if (ws.current) ws.current.close();
     };
   }, []);
@@ -248,8 +249,6 @@ export const useAlertStream = () => {
     updateAlert,
     streamStatus,
     error,
-    isConnected,
-    bufferSize: alertBuffer.current.length,
-    reconnectAttempts: reconnectAttempts.current
+    isConnected
   };
 };

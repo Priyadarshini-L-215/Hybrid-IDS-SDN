@@ -19,7 +19,7 @@ export const useStats = (alerts) => {
     normal: 0
   });
 
-  const [chartData, setChartData] = useState(
+  const [chartData, setChartData] = useState(() =>
     Array.from({ length: 20 }, (_, i) => {
       const d = new Date(Date.now() - (19 - i) * 2000);
       return {
@@ -105,11 +105,13 @@ export const useStats = (alerts) => {
     });
 
     if (newTotal > 0) {
-      setStats(prev => ({
-        processed_total: prev.processed_total + newTotal,
-        attacks: prev.attacks + newAttacks,
-        normal: prev.normal + (newTotal - newAttacks)
-      }));
+      setTimeout(() => {
+        setStats(prev => ({
+          processed_total: prev.processed_total + newTotal,
+          attacks: prev.attacks + newAttacks,
+          normal: prev.normal + (newTotal - newAttacks)
+        }));
+      }, 0);
     }
   }, [alerts]);
 

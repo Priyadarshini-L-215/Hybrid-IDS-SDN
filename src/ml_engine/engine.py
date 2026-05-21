@@ -474,7 +474,12 @@ class MLEngine:
                 if self.vae_detector and self.vae_detector.is_ready:
                     uncertain_mask = np.array(ml_scores_valid, dtype=np.float32) < ML_THRESHOLD_SUSPICIOUS
                     if uncertain_mask.any():
-                        X_uncertain = X[uncertain_mask]
+                        # VAE scaler was fitted on pipeline-scaled data, so we
+                        # must feed it pre-scaled features (not raw X).
+                        X_for_vae = X_scaled if X_scaled is not None else (
+                            self.scaler.transform(X) if self.scaler else X
+                        )
+                        X_uncertain = X_for_vae[uncertain_mask]
                         latents, mse_raw = self.vae_detector.get_latent_and_mse(X_uncertain)
                         
                         uncertain_positions = np.where(uncertain_mask)[0]

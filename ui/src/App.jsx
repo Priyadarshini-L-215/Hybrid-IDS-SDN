@@ -1,18 +1,19 @@
+/* eslint-disable no-unused-vars, no-useless-escape */
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Shield, Activity, Zap, Database, Terminal, Settings, 
+  Shield, Activity, Zap, Database, Terminal, 
   AlertTriangle, CheckCircle2, Server, Globe, Lock, Unlock, Home,
-  Cpu, RefreshCcw, Search, Filter, ArrowRight, Play, StopCircle, 
-  Clock, ExternalLink, Info, ChevronDown, FileText, Upload, 
-  Link, BarChart3, Network, Share2, Eye, Trash2, Bug, 
-  HardDrive, Target, Flame, ShieldCheck, Radio, Layers, 
-  Fingerprint, RotateCcw, Save, Key, X, MapPin, History, Download,
+  RefreshCcw, Search, Filter, ArrowRight, Play, StopCircle, 
+  Clock, ExternalLink, Info, ChevronDown, FileText, 
+  Link, Network, Share2, Trash2, Bug, 
+  HardDrive, Flame, ShieldCheck, Radio, Layers, 
+  Fingerprint, RotateCcw, Key, X, MapPin, History, Download,
   PieChart as PieChartIcon
 } from 'lucide-react';
 import { 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  AreaChart, Area, PieChart, Pie, Cell, BarChart, Bar
+  AreaChart, Area, PieChart, Pie, Cell
 } from 'recharts';
 
 // Custom hooks and utilities
@@ -22,7 +23,6 @@ import { useStats } from './hooks/useStats';
 import ErrorBoundary from './components/ErrorBoundary';
 import ShapPanel from './components/ShapPanel';
 import AttackMap from './components/AttackMap';
-import MitreMatrix from './components/MitreMatrix';
 import { apiClient } from './utils/apiClient';
 
 import './App.css';
@@ -246,11 +246,14 @@ const ObservationsDisplay = ({ count }) => {
 function App() {
   // ===== CUSTOM HOOKS (State Management) =====
   const { alerts, incidents, updateAlert, isConnected, bufferSize } = useAlertStream();
-  const { health, isHealthy, refresh: refreshHealth } = useHealthStatus();
+  const { health, setHealth, isHealthy, refresh: refreshHealth } = useHealthStatus();
   const { stats, chartData } = useStats(alerts);
 
   // ===== UI STATE ONLY =====
-  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('sentinel_active_tab') || 'overview');
+  const [activeTab, setActiveTab] = useState(() => {
+    const saved = localStorage.getItem('sentinel_active_tab');
+    return ['overview', 'mitigation'].includes(saved) ? saved : 'overview';
+  });
   const [viewMode, setViewMode] = useState('raw'); // 'raw' or 'incident'
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchResults, setSearchResults] = useState(null);
@@ -260,7 +263,7 @@ function App() {
   useEffect(() => {
     localStorage.setItem('sentinel_active_tab', activeTab);
   }, [activeTab]);
-  const [latency, setLatency] = useState(0);
+  const latency = (alerts.length > 0 && alerts[0].processing_time_ms) ? alerts[0].processing_time_ms : 0;
   const [expandedRow, setExpandedRow] = useState(null);
 
   /**
@@ -284,37 +287,6 @@ function App() {
       }
     }
   };
-
-  // Configuration
-  const [saveStatus, setSaveStatus] = useState(null);
-
-  // Simulation
-  const [scanTarget, setScanTarget] = useState('');
-  const [scanProfile, setScanProfile] = useState('quick');
-  const [simulating, setSimulating] = useState(false);
-  const [simOutput, setSimOutput] = useState('');
-  const simConsoleRef = useRef(null);
-
-  // Auto-scroll simulation console
-  useEffect(() => {
-    if (simConsoleRef.current) {
-      simConsoleRef.current.scrollTop = simConsoleRef.current.scrollHeight;
-    }
-  }, [simOutput]);
-
-  // Evaluation
-  const [evaluating, setEvaluating] = useState(false);
-  const [evalResult, setEvalResult] = useState(null);
-  const [evalLoading, setEvalLoading] = useState(false);
-
-  // Model Control (Settings)
-  const [models, setModels] = useState([]);
-  const [scalers, setScalers] = useState([]);
-  const [activeModel, setActiveModel] = useState('');
-  const [activeScaler, setActiveScaler] = useState('');
-  const [swapping, setSwapping] = useState(false);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [baselineStatus, setBaselineStatus] = useState(null);
 
   // Node Intel
   const [selectedIp, setSelectedIp] = useState(null);
@@ -439,88 +411,50 @@ function App() {
     }
   };
 
-  const runSimulation = async (type, payload = {}) => {
-    setSimulating(true);
-    setSimOutput(`> Starting ${type.toUpperCase()} simulation...\n`);
-    try {
-      const endpoint = type === 'nmap' ? '/api/simulation/nmap/scan' : '/api/simulation/attack/ddos';
-      const data = await apiClient.post(endpoint, { target: scanTarget, ...payload });
-      setSimOutput(prev => prev + (data.raw_output || data.message || data.error || 'Done.'));
-    } catch (e) { 
-      setSimOutput(prev => prev + `[ERROR] ${e.message}`);
-    } finally { 
-      setSimulating(false); 
-    }
-  };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setEvaluating(true);
-    setEvalResult(null);
-    try {
-      const result = await apiClient.uploadFile('/api/evaluate/dataset', file, {
-        formFields: { label_column: 'Label' }
-      });
-      setEvalResult(result);
-    } catch (e) { 
-      apiClient.handleError(e, 'Evaluation failed');
-    } finally { 
-      setEvaluating(false); 
-    }
-  };
 
   const blockAction = async (ip, action) => {
+    let previousHealth = null;
+    if (health) {
+      previousHealth = JSON.parse(JSON.stringify(health));
+      const ipsetDetailed = health.ipset_detailed || { permanent_ips: [], temporary_ips: [] };
+      let newPerm = [...(ipsetDetailed.permanent_ips || [])];
+      let newTemp = [...(ipsetDetailed.temporary_ips || [])];
+
+      if (action === 'unblock') {
+        newPerm = newPerm.filter(x => x !== ip);
+        newTemp = newTemp.filter(x => x !== ip);
+        addLog(`System: Initiating manual authorization / lift ban for ${ip}`);
+      } else if (action === 'block') {
+        if (!newPerm.includes(ip)) {
+          newPerm.push(ip);
+        }
+        addLog(`System: Initiating manual block for ${ip}`);
+      }
+
+      setHealth({
+        ...health,
+        ipset_detailed: {
+          ...ipsetDetailed,
+          permanent_ips: newPerm,
+          temporary_ips: newTemp
+        }
+      });
+    }
+
     try {
       await apiClient.post(`/api/mitigation/${action}`, { ip });
       refreshHealth(); // Refresh health status from hook
       if (selectedIp === ip) fetchNodeIntel(ip);
     } catch (e) { 
+      if (previousHealth) {
+        setHealth(previousHealth);
+      }
       apiClient.handleError(e, `Mitigation action failed`);
     }
   };
 
-  const fetchModels = async () => {
-    setModelsLoading(true);
-    try {
-      const [modelData, baselineData] = await Promise.all([
-        apiClient.get('/api/models'),
-        apiClient.get('/api/baseline/status')
-      ]);
-      
-      setModels(modelData.models || []);
-      setScalers(modelData.scalers || []);
-      setActiveModel(modelData.active_model || '');
-      setActiveScaler(modelData.active_scaler || '');
-      setBaselineStatus(baselineData);
-    } catch (e) { 
-      apiClient.handleError(e, 'Failed to fetch model metadata');
-    } finally {
-      setModelsLoading(false);
-    }
-  };
 
-  const swapModel = async () => {
-    setSwapping(true);
-    try {
-      const data = await apiClient.post('/api/models/active', {
-        model_file: activeModel,
-        scaler_file: activeScaler
-      });
-      if (data.success) {
-        setSaveStatus({ type: 'success', msg: 'Engine updated successfully' });
-        addLog('Engine: Model configuration updated');
-      } else {
-        setSaveStatus({ type: 'error', msg: data.error || 'Update failed' });
-      }
-    } catch (e) { 
-      setSaveStatus({ type: 'error', msg: e.message });
-      apiClient.handleError(e, 'Model swap failed');
-    } finally { 
-      setSwapping(false);
-      setTimeout(() => setSaveStatus(null), 3000);
-    }
-  };
 
   const downloadPcap = (eventId) => {
     window.open(`/api/pcap/download/${eventId || 'latest'}`, '_blank');
@@ -573,17 +507,8 @@ function App() {
   };
 
   // --- LIFECYCLE & INITIALIZATION ---
-  useEffect(() => {
-    // Fetch models on mount
-    fetchModels();
-  }, []);
 
-  // Update latency from first alert in stream
-  useEffect(() => {
-    if (alerts.length > 0 && alerts[0].processing_time_ms) {
-      setLatency(alerts[0].processing_time_ms);
-    }
-  }, [alerts]);
+  // Latency is derived directly from the alert stream
 
   return (
     <div className="dashboard-container">
@@ -602,10 +527,7 @@ function App() {
         <nav className="sidebar-nav">
           {[
             { id: 'overview', label: 'Command Hub', icon: Activity },
-            { id: 'mitigation', label: 'Policies', icon: ShieldCheck },
-            { id: 'lab', label: 'Simulation', icon: Target },
-            { id: 'eval', label: 'Evaluation', icon: Fingerprint },
-            { id: 'settings', label: 'Engine Config', icon: Settings }
+            { id: 'mitigation', label: 'Policies', icon: ShieldCheck }
           ].map(tab => (
             <div 
               key={tab.id} 
@@ -636,7 +558,7 @@ function App() {
             <div style={{ display: 'flex', flexDirection: 'column' }}>
               <span style={{ color: 'var(--text-muted)', fontWeight: 800, fontSize: '0.65rem', letterSpacing: '0.2em', textTransform: 'uppercase' }}>Current Operations</span>
               <h2 style={{ fontSize: '1.25rem', fontWeight: 900 }}>
-                {{ overview: 'Command Hub', mitigation: 'Policies', lab: 'Simulation', eval: 'Evaluation', settings: 'Engine Config' }[activeTab] || 'Dashboard'}
+                {{ overview: 'Command Hub', mitigation: 'Policies' }[activeTab] || 'Dashboard'}
               </h2>
             </div>
           </div>
@@ -663,7 +585,7 @@ function App() {
                 }}
               />
               {searchOpen && (
-                <div className="glass-panel" style={{ position: 'absolute', top: '120%', left: 0, right: 0, padding: '1rem', borderRadius: '16px', zHeight: 1000, maxHeight: '400px', overflowY: 'auto' }}>
+                <div className="glass-panel" style={{ position: 'absolute', top: '120%', left: 0, right: 0, padding: '1rem', borderRadius: '16px', zIndex: 1000, maxHeight: '400px', overflowY: 'auto' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
                     <span style={{ fontSize: '0.7rem', fontWeight: 900 }}>HISTORICAL RESULTS</span>
                     <X size={14} className="cursor-pointer" onClick={() => setSearchOpen(false)} />
@@ -726,20 +648,6 @@ function App() {
                   icon={Shield} 
                   color="var(--success)" 
                   isLoading={!health}
-                />
-                <StatCard 
-                  label="Detection Model" 
-                  value={baselineStatus?.baseline_active ? "VAE + Random Forest" : "RF (Default)"} 
-                  icon={Cpu} 
-                  color="var(--primary)" 
-                  isLoading={!baselineStatus}
-                />
-                <StatCard 
-                  label="Model Accuracy" 
-                  value={baselineStatus?.accuracy_pct ? `${baselineStatus.accuracy_pct.toFixed(2)}%` : "99.11%"} 
-                  icon={ShieldCheck} 
-                  color="var(--success)" 
-                  isLoading={!baselineStatus}
                 />
               </div>
 
@@ -971,7 +879,6 @@ function App() {
                      </div>
                   </GlassCard>
 
-                  <MitreMatrix />
                 </div>
               </div>
 
@@ -1101,184 +1008,7 @@ function App() {
             </ErrorBoundary>
           )}
 
-          {activeTab === 'lab' && (
-            <ErrorBoundary>
-            <motion.div key="lab" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
-                <GlassCard title="Simulation Lab" icon={Flame} subtitle="Traffic Generation & Vulnerability Scanning">
-                   <div className="content-stack">
-                      <div><label className="stat-label">Target IPv4 Address</label><input type="text" className="input-field" value={scanTarget} onChange={e => setScanTarget(e.target.value)} /></div>
-                      <div>
-                         <label className="stat-label">Scan Profiles</label>
-                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
-                            {['quick', 'ping', 'service', 'os_detect', 'aggressive', 'vuln'].map(p => (
-                              <button key={p} className={`btn btn-secondary btn-sm ${scanProfile === p ? 'btn-primary' : ''}`} onClick={() => setScanProfile(p)}>{p.toUpperCase()}</button>
-                            ))}
-                         </div>
-                         <button className="btn btn-primary" style={{ width: '100%', marginTop: '1rem' }} onClick={() => runSimulation('nmap', { profile: scanProfile })} disabled={simulating}>
-                            {simulating ? <RefreshCcw className="animate-spin" size={16} /> : <Search size={16} />} RUN SCAN
-                         </button>
-                      </div>
-                      <div style={{ paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
-                         <label className="stat-label">Threat Simulations</label>
-                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '8px' }}>
-                            <button className="btn btn-danger btn-sm" onClick={() => runSimulation('ddos')}>UDP FLOOD</button>
-                            <button className="btn btn-danger btn-sm" onClick={() => runSimulation('ddos', { type: 'slowloris' })}>HTTP EXHAUST</button>
-                         </div>
-                      </div>
-                   </div>
-                </GlassCard>
-                <GlassCard title="Execution Console" icon={Terminal} subtitle="Tool standard output (STDOUT/STDERR)">
-                   <div style={{ position: 'relative', overflow: 'hidden', borderRadius: '12px' }}>
-                     <div className="scanline-overlay" />
-                     <pre 
-                       ref={simConsoleRef} 
-                       className={`terminal-output ${simulating ? 'crt-flicker vibrate-attack' : ''}`} 
-                       style={{ height: '400px', overflowY: 'auto' }}
-                     >
-                       {simOutput || 'Awaiting simulation initialization...'}
-                     </pre>
-                   </div>
-                </GlassCard>
-              </div>
-            </motion.div>
-            </ErrorBoundary>
-          )}
 
-          {activeTab === 'eval' && (
-            <ErrorBoundary>
-            <motion.div key="eval" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '1.5rem' }}>
-                <GlassCard title="Model Evaluation" icon={Fingerprint} subtitle="Offline dataset validation">
-                   <div className="content-stack">
-                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Upload forensic CSV data to validate model performance against historical labels.</p>
-                      <div style={{ border: '2px dashed var(--border)', borderRadius: '20px', padding: '3rem', textAlign: 'center', background: 'rgba(255,255,255,0.01)' }}>
-                        <Upload size={32} className="text-muted" style={{ margin: '0 auto 1.5rem' }} />
-                        <label className="btn btn-primary" style={{ display: 'inline-flex', margin: '0 auto' }}>
-                          CHOOSE CSV DATASET
-                          <input type="file" hidden onChange={handleFileUpload} accept=".csv" />
-                        </label>
-                        {evaluating && <p style={{ marginTop: '1rem', fontSize: '0.7rem', color: 'var(--primary)' }} className="pulse-fast">ANALYZING FEATURES...</p>}
-                      </div>
-                   </div>
-                </GlassCard>
-                <GlassCard title="Validation Metrics" icon={BarChart3} subtitle="F1-Score, Accuracy, and Confusion Matrix">
-                   {evalResult ? (
-                     <div className="content-stack">
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
-                            <div className="stat-label">Engine Accuracy</div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 900, color: 'var(--primary)', fontFamily: 'var(--font-mono)' }}>{(evalResult.summary?.accuracy * 100).toFixed(1)}%</div>
-                          </div>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
-                            <div className="stat-label">Samples</div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 900, fontFamily: 'var(--font-mono)' }}>{evalResult.summary?.total_samples}</div>
-                          </div>
-                          <div className="glass" style={{ padding: '1rem', borderRadius: '16px', textAlign: 'center' }}>
-                            <div className="stat-label">Model Hash</div>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 800, marginTop: '8px', opacity: 0.5 }}>{evalResult.summary?.model_version || 'SHA-256-V4'}</div>
-                          </div>
-                        </div>
-
-                        <div className="confusion-matrix">
-                           <div className="cm-label-row" style={{ gridColumn: '2' }}>Pred. Normal</div>
-                           <div className="cm-label-row" style={{ gridColumn: '3' }}>Pred. Attack</div>
-                           
-                           <div className="cm-label-col">Actual Normal</div>
-                           <div className="cm-cell cm-cell-success">
-                              <span className="cm-value">{evalResult.metrics?.normal?.tn || 0}</span>
-                              <span className="cm-sublabel">True Negative</span>
-                           </div>
-                           <div className="cm-cell cm-cell-danger">
-                              <span className="cm-value">{evalResult.metrics?.normal?.fp || 0}</span>
-                              <span className="cm-sublabel">False Positive</span>
-                           </div>
-
-                           <div className="cm-label-col">Actual Attack</div>
-                           <div className="cm-cell cm-cell-danger">
-                              <span className="cm-value">{evalResult.metrics?.attack?.fn || 0}</span>
-                              <span className="cm-sublabel">False Negative</span>
-                           </div>
-                           <div className="cm-cell cm-cell-success">
-                              <span className="cm-value">{evalResult.metrics?.attack?.tp || 0}</span>
-                              <span className="cm-sublabel">True Positive</span>
-                           </div>
-                        </div>
-
-                        <div style={{ height: '200px', marginTop: '1rem' }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={Object.entries(evalResult.metrics || {}).filter(([k]) => ['attack', 'normal', 'suspicious'].includes(k)).map(([name, m]) => ({ name, f1: m.f1_score || m['f1-score'] }))}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
-                              <XAxis dataKey="name" stroke="var(--text-muted)" fontSize={10} />
-                              <YAxis stroke="var(--text-muted)" fontSize={10} />
-                              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid var(--border)', borderRadius: '8px' }} />
-                              <Bar dataKey="f1" fill="var(--primary)" radius={[6, 6, 0, 0]} />
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
-                     </div>
-                   ) : (
-                     <div style={{ height: '350px', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.1 }}>
-                        <BarChart3 size={64} />
-                     </div>
-                   )}
-                </GlassCard>
-              </div>
-            </motion.div>
-            </ErrorBoundary>
-          )}
-
-          {activeTab === 'settings' && (
-            <ErrorBoundary>
-            <motion.div key="settings" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-                <GlassCard title="Neural Engine Control" icon={Cpu} subtitle="Hot-swappable inference models and scalers">
-                   <div className="content-stack">
-                      {modelsLoading && <p style={{ fontSize: '0.75rem', color: 'var(--primary)' }} className="pulse-fast">LOADING MODELS...</p>}
-                      <div>
-                        <label className="stat-label">Active Neural Model</label>
-                        <select className="input-field" value={activeModel} onChange={e => setActiveModel(e.target.value)} disabled={modelsLoading}>
-                          {models.map(m => <option key={m} value={m}>{m}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="stat-label">Feature Scaler (.pkl)</label>
-                        <select className="input-field" value={activeScaler} onChange={e => setActiveScaler(e.target.value)} disabled={modelsLoading}>
-                          {scalers.map(s => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                      </div>
-                      <div style={{ marginTop: '1rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border)' }}>
-                        <button className="btn btn-primary" style={{ width: '100%' }} onClick={swapModel} disabled={swapping}>
-                          {swapping ? <RefreshCcw className="animate-spin" size={16} /> : <Save size={16} />} APPLY ENGINE CONFIG
-                        </button>
-                        {saveStatus && (
-                          <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '12px', background: saveStatus.type === 'success' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(244, 63, 94, 0.1)', color: saveStatus.type === 'success' ? 'var(--success)' : 'var(--danger)', fontSize: '0.75rem', fontWeight: 800, textAlign: 'center' }}>
-                            {saveStatus.msg}
-                          </div>
-                        )}
-                      </div>
-                   </div>
-                </GlassCard>
-                <GlassCard title="System Observability" icon={Eye} subtitle="Console logging and telemetry status">
-                   <div className="content-stack">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                        <span className="stat-label">Neural Consumer</span>
-                        <Badge variant={health?.checks?.consumer_running ? 'success' : 'danger'}>{health?.checks?.consumer_running ? 'RUNNING' : 'STOPPED'}</Badge>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                        <span className="stat-label">Redis Pipeline</span>
-                        <Badge variant={health?.checks?.redis_ok ? 'success' : 'danger'}>{health?.checks?.redis_ok ? 'HEALTHY' : 'ERROR'}</Badge>
-                      </div>
-                      <div style={{ padding: '1rem', borderRadius: '12px', background: 'rgba(56, 189, 248, 0.05)', border: '1px solid var(--primary-glow)' }}>
-                        <div style={{ display: 'flex', gap: '8px', color: 'var(--primary)', marginBottom: '8px' }}><Info size={14} /> <span style={{ fontSize: '0.65rem', fontWeight: 900 }}>SYSTEM STATUS</span></div>
-                        <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>The Sentinel engine is operating in V4 architecture with 49-feature extraction. Automated drift detection is active.</p>
-                      </div>
-                   </div>
-                </GlassCard>
-              </div>
-            </motion.div>
-            </ErrorBoundary>
-          )}
         </AnimatePresence>
 
         <footer style={{ marginTop: '4rem', padding: '1.5rem 0', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', opacity: 0.3, fontSize: '0.65rem', fontWeight: 800 }}>

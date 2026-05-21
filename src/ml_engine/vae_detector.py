@@ -119,6 +119,19 @@ class VaeAnomalyDetector:
     def is_ready(self) -> bool:
         return self._ready
 
+    @staticmethod
+    def _to_numpy(tensor) -> np.ndarray:
+        """Convert a framework tensor to a numpy array safely.
+        Handles PyTorch (detach), TensorFlow, JAX, and plain ndarrays."""
+        if isinstance(tensor, np.ndarray):
+            return tensor
+        # PyTorch tensors need detach() before numpy()
+        if hasattr(tensor, "detach"):
+            return tensor.detach().cpu().numpy()
+        if hasattr(tensor, "numpy"):
+            return tensor.numpy()
+        return np.asarray(tensor)
+
     def get_latent_and_mse(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute both latent vectors (z) and MSE reconstruction errors.
@@ -157,8 +170,8 @@ class VaeAnomalyDetector:
                 z = z_output[0] if isinstance(z_output, (list, tuple)) else z_output
                 
                 recon_output = self.decoder(z, training=False)
-                X_recon = recon_output.numpy() if hasattr(recon_output, "numpy") else recon_output
-                z = z.numpy() if hasattr(z, "numpy") else z
+                X_recon = self._to_numpy(recon_output)
+                z = self._to_numpy(z)
  
             mse = np.mean(np.power(X_scaled_sliced - X_recon, 2), axis=1)
             return z, mse

@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import process from 'node:process'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -23,12 +24,12 @@ export default defineConfig(({ mode }) => {
           ws: true,
           timeout: 30000,
           proxyTimeout: 30000,
-          configure: (proxy, _options) => {
-            proxy.on('error', (err, _req, _res) => {
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
               // Suppress harmless socket reset errors during HMR/Page Reloads
               const codes = ['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT'];
               if (codes.includes(err.code) || err.message.includes('ECONNABORTED')) {
-                return; 
+                return;
               }
               // Only log genuine errors that aren't socket aborts
               if (!err.message.includes('socket hang up')) {

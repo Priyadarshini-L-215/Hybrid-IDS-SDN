@@ -24,8 +24,6 @@ export const useHealthStatus = () => {
 
   const fetchStatus = async (isPolling = false) => {
     try {
-      if (!isPolling) setIsLoading(true);
-      
       const data = await apiClient.get('/api/pipeline/status', {
         timeout: 10000 // 10s timeout
       });
@@ -44,33 +42,39 @@ export const useHealthStatus = () => {
       }
 
       setError(null);
-      if (!isPolling) setIsLoading(false);
     } catch (e) {
       setError(`Health check failed: ${e.message}`);
       setIsHealthy(false);
+    } finally {
       if (!isPolling) setIsLoading(false);
     }
   };
 
   // Initial fetch and setup polling
   useEffect(() => {
-    fetchStatus(false); // Initial load is not polling
+    // Defer initial status fetch to prevent cascading renders during mount
+    const timer = setTimeout(() => {
+      fetchStatus(false);
+    }, 0);
 
     // Poll every 3 seconds
     pollTimerRef.current = setInterval(() => fetchStatus(true), 3000);
 
     return () => {
+      clearTimeout(timer);
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
   }, []);
 
   // Manual refresh function
   const refresh = () => {
+    setIsLoading(true);
     fetchStatus(false);
   };
 
   return {
     health,
+    setHealth,
     isHealthy,
     lastUpdate,
     isLoading,

@@ -11,7 +11,7 @@ sys.path.append(str(BASE_DIR / "src"))
 
 from common.feature_extractor import extract_features_from_eve, load_feature_names
 
-def pcap_to_csv(pcap_path, label, output_csv="data/dataset.csv", append=True):
+async def pcap_to_csv(pcap_path, label, output_csv="data/dataset.csv", append=True):
     print(f"=== Converting PCAP to Training CSV ({label}) ===")
     
     pcap_path = Path(pcap_path).absolute()
@@ -55,7 +55,7 @@ def pcap_to_csv(pcap_path, label, output_csv="data/dataset.csv", append=True):
             try:
                 event = json.loads(line)
                 if event.get('event_type') == 'flow':
-                    features = extract_features_from_eve(event, feature_order)
+                    features = await extract_features_from_eve(event, feature_order)
                     if features:
                         all_features.append(features)
             except Exception:
@@ -79,7 +79,9 @@ def pcap_to_csv(pcap_path, label, output_csv="data/dataset.csv", append=True):
     return True
 
 if __name__ == "__main__":
+    import asyncio
     if len(sys.argv) < 3:
         print("Usage: python3 pcap_to_csv.py <pcap> <label>")
     else:
-        pcap_to_csv(sys.argv[1], sys.argv[2])
+        asyncio.run(pcap_to_csv(sys.argv[1], sys.argv[2]))
+
