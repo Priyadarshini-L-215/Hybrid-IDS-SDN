@@ -13,6 +13,7 @@ torch==2.11.0
 keras==3.14.0
 h5py==3.16.0
 pyyaml
+cryptography>=42.0.0
 prometheus-client
 aiosqlite
 python-multipart

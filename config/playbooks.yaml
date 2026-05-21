@@ -1,0 +1,49 @@
+# Sentinel SOAR Playbook Definitions V5
+# Defines dynamic closed-loop mitigation actions mapped to threat taxonomies and MITRE ATT&CK codes.
+
+playbooks:
+  # Playbook 1: DDoS / Flood Mitigations
+  ddos_mitigation:
+    trigger:
+      mitre_tactic: "Impact"
+      mitre_technique: "T1498" # Network Denial of Service
+      min_confidence: 80.0
+    actions:
+      - name: "Active Micro-Mitigation"
+        type: "micro_block"
+        params:
+          ttl: 300
+          fallback: "temp_block"
+      - name: "Log Alert Forensics"
+        type: "log_forensics"
+
+  # Playbook 2: Scanning & Reconnaissance Redirection
+  recon_deception:
+    trigger:
+      mitre_tactic: "Discovery"
+      mitre_technique: "T1595" # Active Scanning
+      min_confidence: 70.0
+    actions:
+      - name: "Redirect to Honeypot"
+        type: "honeypot_redirect"
+        params:
+          ttl: 600
+      - name: "Dynamic Reputation Penalty"
+        type: "penalize_reputation"
+        params:
+          penalty: 25.0
+
+  # Playbook 3: Zero-Day Anomaly Rate Limiting
+  zeroday_anomaly:
+    trigger:
+      classification: "anomaly"
+      min_confidence: 60.0
+    actions:
+      - name: "Rate Limit Offender"
+        type: "rate_limit"
+      - name: "Redirect Decoy"
+        type: "honeypot_redirect"
+        params:
+          ttl: 120
+      - name: "Elevated Logging & Forensic Audit"
+        type: "elevated_logging"

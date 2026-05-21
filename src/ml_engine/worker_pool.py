@@ -46,7 +46,6 @@ class WorkerPool:
         self.broadcast_func = broadcast_func
         
         # De-duplication Engine (Sliding Window)
-        import threading
         self.dedup_cache = {} # Key: (src, dst, pred), Value: {last_emit, count}
         self.dedup_lock = None
         
@@ -58,14 +57,14 @@ class WorkerPool:
         self.error_count = 0
         self.start_time = time.time()
         
-        # Initialize Drift Detector & Baseline Updater
-        self.drift_detector = DriftDetector(on_drift=self._on_drift_detected)
-        self.baseline_updater = BaselineUpdater(self.ml_engine, baseline_monitor)
-        self.normal_mse_buffer = [] # Buffer for auto-refresh
-        
         # SOTA: Federated Threat Broker
         from ml_engine.federated_broker import FederatedThreatBroker
         self.federated_broker = FederatedThreatBroker(node_id="sentinel-node-1")
+        
+        self.drift_detector = DriftDetector(on_drift=self._on_drift_detected)
+        # Pass the broker reference so baseline refreshes reuse the established key-pair
+        self.baseline_updater = BaselineUpdater(self.ml_engine, baseline_monitor, broker=self.federated_broker)
+        self.normal_mse_buffer = []  # Buffer of real feature vectors for auto-refresh
         
         # Persistent GeoIP Reader
         self.geoip_reader = None
@@ -174,6 +173,8 @@ class WorkerPool:
                 
                 # Mock packet sequence extraction for Transformer
                 # (sizes, iats)
+                # WARNING: This is synthetic data. In production, wire real
+                # sliding-window packet sequences from the ingestion pipeline.
                 dummy_sequence = np.random.rand(1, 10, 4)
                 
                 def run_inference():
@@ -221,11 +222,12 @@ class WorkerPool:
                     for m_id, data in messages:
                         try:
                             batch_msgs.append(json.loads(data["event"]))
-                        except Exception:
+                        except Exception as e:
+                            logger.error("Failed to parse PEL message", msg_id=m_id, error=str(e))
                             await rc.async_redis_client.xack(REDIS_QUEUE_NAME, group_name, m_id)
                     
                     if batch_msgs:
-                        results = self.ml_engine.predict_batch(batch_msgs)
+                        results = await self.ml_engine.predict_batch(batch_msgs)
                         # Minimal processing for recovery (just broadcast/ACK)
                         for i, res in enumerate(results):
                             alert = build_alert_payload(batch_msgs[i], res)
@@ -294,7 +296,7 @@ class WorkerPool:
 
                 # 2. Process Batch via ML Engine
                 t_batch_start = time.time()
-                results = self.ml_engine.predict_batch(batch_msgs)
+                results = await self.ml_engine.predict_batch(batch_msgs)
                 t_batch_end = time.time()
                 batch_lat = (t_batch_end - t_batch_start) * 1000 / (len(results) or 1)
                 
@@ -453,10 +455,11 @@ class WorkerPool:
         src_ip = alert.get("src_ip")
         if not src_ip: return
         
+        prediction = res.get("prediction", "normal")
+        final_score = res.get("final_score", 0.0)
+
         # Calculate reputation delta from decision engine
-        delta = self.ml_engine.decision_engine.get_reputation_delta(
-            res["prediction"], res["final_score"]
-        )
+        delta = self.ml_engine.decision_engine.get_reputation_delta(prediction, final_score)
         
         # Trigger firewall
         action = await ActiveFirewall.process_incident(src_ip, delta)
@@ -471,21 +474,23 @@ class WorkerPool:
             if SDN_ENABLED:
                 alert["sdn_action"] = "drop" if "block" in action else "limit"
                 
-            logger.warning("IPS Mitigation Triggered", ip=src_ip, action=action, score=res["final_score"])
+            logger.warning("IPS Mitigation Triggered", ip=src_ip, action=action, score=final_score)
             
             # Send external alert for critical mitigations
-            if res["final_score"] > 0.95 or action == "permanent_block":
+            if final_score > 0.95 or action == "permanent_block":
                 await self._send_external_alert(alert)
 
     async def _send_external_alert(self, alert: dict):
         """Mocks sending an alert to an external Slack webhook."""
+        mitre = alert.get("mitre") or {}
+        enrichment = alert.get("enrichment") or {}
         payload = {
             "text": f"🚨 *CRITICAL THREAT DETECTED*\n"
-                    f"*Type:* {alert['prediction']}\n"
-                    f"*Source:* {alert['src_ip']} ({alert['enrichment'].get('location', 'Unknown')})\n"
-                    f"*Confidence:* {alert['confidence']}%\n"
+                    f"*Type:* {alert.get('prediction', 'unknown')}\n"
+                    f"*Source:* {alert.get('src_ip', 'unknown')} ({enrichment.get('location', 'Unknown')})\n"
+                    f"*Confidence:* {alert.get('confidence', 0.0)}%\n"
                     f"*Action:* {alert.get('mitigation', 'LOG ONLY')}\n"
-                    f"*MITRE:* {alert['mitre'].get('id')} - {alert['mitre'].get('technique')}"
+                    f"*MITRE:* {mitre.get('id', 'N/A')} - {mitre.get('technique', 'N/A')}"
         }
         # Mocking the HTTP call
         logger.info("EXTERNAL ALERT SENT (MOCK)", target="Slack", payload=payload)
@@ -496,12 +501,26 @@ class WorkerPool:
         src_ip = alert.get("src_ip", "")
         if not src_ip: return
 
-        if src_ip.startswith(("192.168.", "10.", "127.", "172.")):
+        if src_ip.startswith(("192.168.", "10.", "127.")):
             alert["enrichment"] = {
                 "location": "Internal / Localhost",
                 "country": "LOCAL",
                 "asn": "AS0 (Internal)"
             }
+        elif src_ip.startswith("172."):
+            # Accurately detect only RFC 1918 range 172.16.0.0 - 172.31.255.255
+            try:
+                import ipaddress as _iplib
+                addr = _iplib.ip_address(src_ip)
+                if addr.is_private:
+                    alert["enrichment"] = {
+                        "location": "Internal / Localhost",
+                        "country": "LOCAL",
+                        "asn": "AS0 (Internal)"
+                    }
+                    return
+            except ValueError:
+                pass
         else:
             try:
                 record = None

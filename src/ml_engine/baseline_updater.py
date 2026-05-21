@@ -62,9 +62,10 @@ class BaselineUpdater:
     In a full implementation, this would trigger a retraining job.
     For this V4 upgrade, it performs 'adaptive thresholding' and signals for retraining.
     """
-    def __init__(self, ml_engine, drift_monitor: DriftMonitor):
+    def __init__(self, ml_engine, drift_monitor: DriftMonitor, broker=None):
         self.ml_engine = ml_engine
         self.monitor = drift_monitor
+        self.broker = broker  # Optional: FederatedThreatBroker instance from WorkerPool
         self.is_updating = False
 
     async def run_update(self, recent_normal_samples: np.ndarray):
@@ -72,6 +73,13 @@ class BaselineUpdater:
         Adaptive refresh: Adjusts the VAE threshold based on recent local 'normal' traffic.
         """
         if self.is_updating: return
+        
+        # SOTA Zero-Trust: If baseline is frozen, abort update immediately to prevent poisoning
+        scorer = getattr(self.ml_engine, "anomaly_scorer", None)
+        if scorer and getattr(scorer, "_baseline_frozen", False):
+            logger.warning("Baseline auto-refresh skipped: updates are FROZEN due to active threat lockout.")
+            return
+
         self.is_updating = True
         
         try:
@@ -104,8 +112,11 @@ class BaselineUpdater:
             
             # SOTA Federated Sync: Broadcast the threshold update to peers
             try:
-                from ml_engine.federated_broker import FederatedThreatBroker
-                broker = FederatedThreatBroker(node_id="sentinel-node-1")
+                # Reuse existing broker if passed in; avoid creating a new key-pair per refresh
+                broker = self.broker
+                if broker is None:
+                    from ml_engine.federated_broker import FederatedThreatBroker
+                    broker = FederatedThreatBroker(node_id="sentinel-node-1")
                 asyncio.create_task(broker.broadcast_vae_threshold(new_threshold))
             except Exception as broadcast_err:
                 logger.debug("Failed to broadcast federated threshold update", error=str(broadcast_err))

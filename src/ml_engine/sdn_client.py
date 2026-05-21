@@ -81,6 +81,42 @@ class SDNClient:
             logger.error("SDN: Get flows failed", error=str(e))
         return {"blocked_ips": [], "status": "offline"}
 
+    async def block_shape(self, ip: str, protocol: str, dport: int, ttl: int = 300) -> bool:
+        """Install DROP flow rule for a specific source IP, protocol, and destination port shape."""
+        try:
+            client = self._async_client or httpx.AsyncClient(timeout=5.0)
+            resp = await client.post(
+                f"{self.api_url}/block_shape", 
+                json={"ip": ip, "protocol": protocol, "dport": dport, "ttl": ttl}
+            )
+            if not self._async_client:
+                await client.aclose()
+            if resp.status_code == 200:
+                logger.info("SDN: Blocked protocol shape", ip=ip, proto=protocol, dport=dport, ttl=ttl)
+                return True
+            logger.error("SDN: Block shape failed", status=resp.status_code, body=resp.text)
+        except Exception as e:
+            logger.error("SDN: Block shape connection error", error=str(e))
+        return False
+
+    async def redirect_to_honeypot(self, ip: str, honeypot_ip: str, ttl: int = 300) -> bool:
+        """Redirects all traffic from a source IP to a dynamic honeypot decoy."""
+        try:
+            client = self._async_client or httpx.AsyncClient(timeout=5.0)
+            resp = await client.post(
+                f"{self.api_url}/redirect", 
+                json={"ip": ip, "honeypot_ip": honeypot_ip, "ttl": ttl}
+            )
+            if not self._async_client:
+                await client.aclose()
+            if resp.status_code == 200:
+                logger.info("SDN: Redirected IP to Honeypot decoy", ip=ip, honeypot=honeypot_ip, ttl=ttl)
+                return True
+            logger.error("SDN: Honeypot redirect failed", status=resp.status_code, body=resp.text)
+        except Exception as e:
+            logger.error("SDN: Honeypot redirect connection error", error=str(e))
+        return False
+
     async def close(self):
         if self._async_client:
             await self._async_client.aclose()

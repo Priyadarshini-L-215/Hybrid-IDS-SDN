@@ -13,7 +13,8 @@ from common.config import (
     REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK,
     BLOCK_TTL, RATE_LIMIT_PER_SEC, get_protected_ips,
     REDIS_HOST, REDIS_PORT, REDIS_DB,
-    SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, SDN_FALLBACK_TO_IPSET
+    SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, SDN_FALLBACK_TO_IPSET,
+    SDN_HONEYPOT_IP
 )
 from ml_engine.sdn_client import SDNClient
 from common.metrics import PROM_REPUTATION, PROM_BLOCKED, PROM_TEMP_BLOCKED, PROM_MITIGATIONS_TOTAL
@@ -136,11 +137,20 @@ class ActiveFirewall:
             ], check=True)
             subprocess.run(["sudo", "iptables", "-A", CHAIN_NAME, "-m", "set", "--match-set", cls.SET_LIMITED, "src", "-j", "DROP"], check=True)
 
+            # 2b. Ensure SENTINEL_MICRO chain exists for fine-grained blocks
+            MICRO_CHAIN = "SENTINEL_MICRO"
+            subprocess.run(["sudo", "iptables", "-N", MICRO_CHAIN], check=False)
+
             # 3. Hook into INPUT/FORWARD
             for target in ["INPUT", "FORWARD"]:
+                # Hook SENTINEL_IPS
                 hook_check = subprocess.run(["sudo", "iptables", "-C", target, "-j", CHAIN_NAME], capture_output=True)
                 if hook_check.returncode != 0:
                     subprocess.run(["sudo", "iptables", "-I", target, "1", "-j", CHAIN_NAME], check=True)
+                # Hook SENTINEL_MICRO (before standard IPS chain)
+                micro_check = subprocess.run(["sudo", "iptables", "-C", target, "-j", MICRO_CHAIN], capture_output=True)
+                if micro_check.returncode != 0:
+                    subprocess.run(["sudo", "iptables", "-I", target, "1", "-j", MICRO_CHAIN], check=True)
                 
             logger.info("Kernel firewall rules synchronized", chain=CHAIN_NAME)
         except Exception as e:
@@ -303,7 +313,9 @@ class ActiveFirewall:
     async def rate_limit(cls, ip: str):
         """Adds IP to rate-limited set."""
         try:
-            ipaddress.ip_address(ip)
+            if ipaddress.ip_address(ip).version == 6:
+                logger.warning("Skipping IPv6 rate limit (not yet supported by legacy backend)", ip=ip)
+                return False
         except ValueError:
             logger.error("Invalid IP address format", ip=ip)
             return False
@@ -329,13 +341,15 @@ class ActiveFirewall:
         
         try:
             try:
-                if ipaddress.ip_address(ip).version == 6:
+                ip_obj = ipaddress.ip_address(ip)
+                if ip_obj.version == 6:
                     if cls._redis_client:
                         loop = asyncio.get_running_loop()
                         await loop.run_in_executor(None, cls._redis_client.hdel, cls.REDIS_REPUTATION_KEY, ip)
                     return
             except ValueError:
-                pass
+                logger.error("Invalid IP address format during unblock", ip=ip)
+                return
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, subprocess.run, ["sudo", "ipset", "del", cls.SET_BLOCKS, ip, "-!"], False)
@@ -456,3 +470,139 @@ class ActiveFirewall:
             cls._status_cache = result
             cls._status_cache_time = now
             return result
+
+    @classmethod
+    async def micro_block(cls, ip: str, protocol: str, dport: int, ttl: int = 300) -> bool:
+        """Adds a fine-grained block (IP, protocol, port) to the SENTINEL_MICRO chain."""
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            logger.error("Invalid IP address format for microblock", ip=ip)
+            return False
+
+        if not cls._initialized: await cls._initialize()
+
+        success = False
+        if cls._backend == "sdn" and cls._sdn_client:
+            try:
+                success = await cls._sdn_client.block_shape(ip, protocol, dport, ttl)
+            except Exception as e:
+                logger.error("SDN micro block failed", error=str(e))
+                if SDN_FALLBACK_TO_IPSET:
+                    logger.warning("Falling back to legacy micro block", ip=ip)
+                    await cls._legacy_micro_block(ip, protocol, dport, ttl)
+                    success = True
+        else:
+            await cls._legacy_micro_block(ip, protocol, dport, ttl)
+            success = True
+
+        return success
+
+    @classmethod
+    async def _legacy_micro_block(cls, ip: str, protocol: str, dport: int, ttl: int = 300):
+        try:
+            if ipaddress.ip_address(ip).version == 6:
+                logger.warning("Skipping IPv6 microblock (not yet supported)", ip=ip)
+                return
+
+            loop = asyncio.get_running_loop()
+            proto = protocol.lower()
+            # Install dynamic drop rule
+            await loop.run_in_executor(
+                None, 
+                lambda: subprocess.run(
+                    ["sudo", "iptables", "-A", "SENTINEL_MICRO", "-s", ip, "-p", proto, "--dport", str(dport), "-j", "DROP"], 
+                    check=True
+                )
+            )
+            logger.warning("Legacy Micro-Block applied", ip=ip, proto=proto, port=dport, ttl=ttl)
+
+            # Schedule asynchronous background deletion
+            if ttl > 0:
+                async def cleanup():
+                    await asyncio.sleep(ttl)
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            None,
+                            lambda: subprocess.run(
+                                ["sudo", "iptables", "-D", "SENTINEL_MICRO", "-s", ip, "-p", proto, "--dport", str(dport), "-j", "DROP"],
+                                check=False
+                            )
+                        )
+                        logger.info("Legacy Micro-Block expired and deleted", ip=ip, proto=proto, port=dport)
+                    except Exception as err:
+                        logger.error("Failed to delete expired legacy micro-block rule", error=str(err))
+                
+                asyncio.create_task(cleanup())
+
+        except Exception as e:
+            logger.error("Legacy micro block failed", ip=ip, error=str(e))
+
+    @classmethod
+    async def redirect_to_honeypot(cls, ip: str, ttl: int = 300) -> bool:
+        """Redirects all traffic from a source IP to the honeypot decoy IP."""
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            logger.error("Invalid IP address format for honeypot redirect", ip=ip)
+            return False
+
+        if not cls._initialized: await cls._initialize()
+
+        success = False
+        if cls._backend == "sdn" and cls._sdn_client:
+            try:
+                success = await cls._sdn_client.redirect_to_honeypot(ip, SDN_HONEYPOT_IP, ttl)
+            except Exception as e:
+                logger.error("SDN honeypot redirect failed", error=str(e))
+                if SDN_FALLBACK_TO_IPSET:
+                    logger.warning("Falling back to legacy honeypot redirect", ip=ip)
+                    await cls._legacy_redirect_to_honeypot(ip, ttl)
+                    success = True
+        else:
+            await cls._legacy_redirect_to_honeypot(ip, ttl)
+            success = True
+
+        return success
+
+    @classmethod
+    async def _legacy_redirect_to_honeypot(cls, ip: str, ttl: int = 300):
+        try:
+            if ipaddress.ip_address(ip).version == 6:
+                logger.warning("Skipping IPv6 redirect (not yet supported)", ip=ip)
+                return
+
+            loop = asyncio.get_running_loop()
+            
+            # Setup dynamic DNAT rule in the PREROUTING chain of the nat table
+            await loop.run_in_executor(
+                None, 
+                lambda: subprocess.run(
+                    ["sudo", "iptables", "-t", "nat", "-A", "PREROUTING", "-s", ip, "-j", "DNAT", "--to-destination", SDN_HONEYPOT_IP], 
+                    check=True
+                )
+            )
+            logger.warning("Legacy Honeypot DNAT Redirection applied", ip=ip, destination=SDN_HONEYPOT_IP, ttl=ttl)
+
+            # Schedule asynchronous background deletion
+            if ttl > 0:
+                async def cleanup():
+                    await asyncio.sleep(ttl)
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            None,
+                            lambda: subprocess.run(
+                                ["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-s", ip, "-j", "DNAT", "--to-destination", SDN_HONEYPOT_IP],
+                                check=False
+                            )
+                        )
+                        logger.info("Legacy Honeypot DNAT Redirection expired and deleted", ip=ip)
+                    except Exception as err:
+                        logger.error("Failed to delete expired legacy DNAT redirection rule", error=str(err))
+                
+                asyncio.create_task(cleanup())
+
+        except Exception as e:
+            logger.error("Legacy honeypot redirect failed", ip=ip, error=str(e))

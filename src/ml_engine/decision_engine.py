@@ -16,7 +16,8 @@ class DecisionEngine:
     
     def __init__(self, 
                  weights: Optional[Dict[str, float]] = None, 
-                 thresholds: Optional[Dict[str, float]] = None):
+                 thresholds: Optional[Dict[str, float]] = None,
+                 feature_names: Optional[List[str]] = None):
         
         # Use config defaults if not provided
         self.weights = weights or {
@@ -32,12 +33,19 @@ class DecisionEngine:
             "anomaly": ML_THRESHOLD_ANOMALY
         }
         
+        self.feature_names = feature_names
+        
         from ml_engine.adversarial_guard import AdversarialGuard
         self.adversarial_guard = AdversarialGuard()
         
+        from common.soar_engine import SOAREngine
+        self.soar_engine = SOAREngine()
+        self.anomaly_scorer = None
+        
         logger.info("Decision Engine initialized", 
                     weights=self.weights, 
-                    thresholds=self.thresholds)
+                    thresholds=self.thresholds,
+                    has_feature_names=feature_names is not None)
 
     def decide(self, 
                sig_present: bool, 
@@ -94,7 +102,7 @@ class DecisionEngine:
         if event and self.adversarial_guard:
             feat_vec = prediction.get("_feature_vector") if prediction else None
             evasion_score, evasion_reasons = self.adversarial_guard.detect_evasion(
-                event, features=feat_vec
+                event, features=feat_vec, feature_names=self.feature_names
             )
             if prediction:
                 prediction["adversarial_score"] = evasion_score
@@ -122,6 +130,41 @@ class DecisionEngine:
                      decision=classification,
                      top_features=prediction.get("shap_top3", []) if prediction else [])
                      
+        # Trigger SOAR playbook execution asynchronously for non-normal events
+        if classification != "normal" and event:
+            # SOTA Zero-Trust: Freeze baseline updates immediately during active threats
+            if hasattr(self, "anomaly_scorer") and self.anomaly_scorer:
+                self.anomaly_scorer.freeze_baseline()
+
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                mitre_info = event.get("mitre")
+                # Get the mitre info if signature alert
+                if not mitre_info and sig_present:
+                    # Construct mock MITRE info from event alert signature or features
+                    # mapping to DDoS (T1498) or Scanning (T1595)
+                    alert_sig = event.get("alert_sig", "").lower()
+                    if "ddos" in alert_sig or "flood" in alert_sig:
+                        mitre_info = {"tactic": "Impact", "technique": "T1498"}
+                    elif "scan" in alert_sig or "recon" in alert_sig:
+                        mitre_info = {"tactic": "Discovery", "technique": "T1595"}
+                
+                shap_top3 = prediction.get("shap_top3", []) if prediction else []
+                
+                loop.create_task(self.soar_engine.execute_playbook(
+                    classification=classification,
+                    confidence=final_score * 100.0,
+                    mitre_info=mitre_info,
+                    shap_features=shap_top3,
+                    event=event
+                ))
+            except RuntimeError:
+                # No running event loop (e.g. running in synchronous tests)
+                pass
+            except Exception as soar_err:
+                logger.error("Failed to trigger SOAR playbook", error=str(soar_err))
+
         return classification, final_score
 
 

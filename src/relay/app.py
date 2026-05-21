@@ -107,12 +107,12 @@ async def lifespan(app: FastAPI):
     try:
         from ml_engine.cti_client import close_cti_client
         await close_cti_client()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to close CTI client during shutdown", error=str(e))
     try:
         await ActiveFirewall.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to close firewall during shutdown", error=str(e))
     logger.info("Relay shutting down")
 
 app = FastAPI(

@@ -38,8 +38,7 @@ class DriftDetector:
         if RIVER_AVAILABLE:
             # ADWIN (Adaptive Windowing) detects change in mean/variance
             self._detector = river_drift.ADWIN(delta=0.01)
-
-            logger.info("ADWIN drift detector initialized", delta=0.002)
+            logger.info("ADWIN drift detector initialized", delta=0.01)
 
     async def update(self, score: float) -> bool:
         """

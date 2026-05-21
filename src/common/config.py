@@ -167,7 +167,7 @@ FEATURES_PATH = MODELS_DIR / "features.json"
 # Threshold moved into refresh_config() for better precedence handling
 
 # --- SYSTEM SETTINGS ---
-WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))
+WORKER_COUNT = int(os.environ.get("WORKER_COUNT", get_cfg("system.worker_count", 4)))
 POLL_INTERVAL_SEC = 0.1
 HEARTBEAT_INTERVAL_SEC = 10
 ALERT_CACHE_SIZE = 100

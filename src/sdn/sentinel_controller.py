@@ -83,6 +83,37 @@ class SentinelRestController(ControllerBase):
         flows = self.sentinel_app.get_flow_stats()
         return Response(content_type='application/json', body=json.dumps(flows))
 
+    @route('sentinel', url + '/block_shape', methods=['POST'])
+    def block_shape(self, req, **kwargs):
+        try:
+            data = json.loads(req.body)
+            ip = data.get('ip')
+            protocol = data.get('protocol', 'TCP')
+            dport = data.get('dport')
+            ttl = data.get('ttl', 300)
+            if not ip or not dport:
+                return Response(status=400, body='Missing ip or dport parameter')
+            
+            self.sentinel_app.add_block_shape_flow(ip, protocol, int(dport), ttl)
+            return Response(status=200, body=f'Blocked shape: {ip} - {protocol} - {dport}')
+        except Exception as e:
+            return Response(status=500, body=str(e))
+
+    @route('sentinel', url + '/redirect', methods=['POST'])
+    def redirect_ip(self, req, **kwargs):
+        try:
+            data = json.loads(req.body)
+            ip = data.get('ip')
+            honeypot_ip = data.get('honeypot_ip')
+            ttl = data.get('ttl', 300)
+            if not ip or not honeypot_ip:
+                return Response(status=400, body='Missing ip or honeypot_ip parameter')
+            
+            self.sentinel_app.add_redirect_flow(ip, honeypot_ip, ttl)
+            return Response(status=200, body=f'Redirected {ip} to honeypot {honeypot_ip}')
+        except Exception as e:
+            return Response(status=500, body=str(e))
+
 # --- RYU APPLICATION ---
 
 class SentinelController(app_manager.RyuApp):
@@ -189,6 +220,37 @@ class SentinelController(app_manager.RyuApp):
             "blocked_ips": list(self.block_list),
             "status": "active"
         }
+
+    def add_block_shape_flow(self, ip, protocol, dport, ttl=300):
+        """Installs a DROP flow rule for a specific protocol shape (src IP, protocol, dst port)."""
+        self.logger.info(f"Sentinel Controller: Pushing DROP shape flow for {ip} - {protocol} - {dport} (TTL: {ttl})")
+        
+        proto_num = 6 if protocol.upper() == 'TCP' else (17 if protocol.upper() == 'UDP' else 6)
+        
+        for dpid, datapath in self.datapaths.items():
+            parser = datapath.ofproto_parser
+            if proto_num == 6:
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ip, ip_proto=proto_num, tcp_dst=dport)
+            else:
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ip, ip_proto=proto_num, udp_dst=dport)
+            # actions=[] means DROP
+            self.add_flow(datapath, 200, match, [], hard_timeout=ttl)
+            self.logger.info(f" -> Flow shape installed on dpid {dpid}")
+
+    def add_redirect_flow(self, ip, honeypot_ip, ttl=300):
+        """Installs a DNAT redirection flow rule to redirect traffic matching source IP to the honeypot."""
+        self.logger.info(f"Sentinel Controller: Pushing REDIRECT flow for {ip} to {honeypot_ip} (TTL: {ttl})")
+        
+        for dpid, datapath in self.datapaths.items():
+            parser = datapath.ofproto_parser
+            ofproto = datapath.ofproto
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ip)
+            actions = [
+                parser.OFPActionSetField(ipv4_dst=honeypot_ip),
+                parser.OFPActionOutput(ofproto.OFPP_FLOOD)
+            ]
+            self.add_flow(datapath, 200, match, actions, hard_timeout=ttl)
+            self.logger.info(f" -> Redirect flow installed on dpid {dpid}")
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):

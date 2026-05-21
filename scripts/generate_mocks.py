@@ -15,6 +15,7 @@ def generate_mocks(models_dir):
     rf_path = os.path.join(models_dir, "rf_model.pkl")
     if not os.path.exists(rf_path) or os.path.getsize(rf_path) < 100:
         model = RandomForestClassifier(n_estimators=5, max_depth=3).fit(X, y)
+        model.is_mock = True
         joblib.dump(model, rf_path)
         print(f"Generated functional mock RF: {rf_path}")
 
@@ -22,6 +23,7 @@ def generate_mocks(models_dir):
     scaler_path = os.path.join(models_dir, "scaler.pkl")
     if not os.path.exists(scaler_path) or os.path.getsize(scaler_path) < 100:
         scaler = MinMaxScaler().fit(X)
+        scaler.is_mock = True
         joblib.dump(scaler, scaler_path)
         print(f"Generated functional mock Scaler: {scaler_path}")
 
@@ -29,6 +31,7 @@ def generate_mocks(models_dir):
     vae_scaler_path = os.path.join(models_dir, "vae_scaler.pkl")
     if not os.path.exists(vae_scaler_path) or os.path.getsize(vae_scaler_path) < 100:
         scaler = MinMaxScaler().fit(X)
+        scaler.is_mock = True
         joblib.dump(scaler, vae_scaler_path)
         print(f"Generated functional mock VAE Scaler: {vae_scaler_path}")
 

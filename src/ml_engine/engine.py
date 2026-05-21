@@ -64,6 +64,7 @@ class MLEngine:
             percentile=ANOMALY_PERCENTILE, 
             min_samples=ANOMALY_MIN_SAMPLES
         )
+        self.decision_engine.anomaly_scorer = self.anomaly_scorer
         self.shap_explainer = None
         self.vae_detector = None  # Stage 3: Keras VAE anomaly detector
         self.vae_threshold = AUTOENCODER_THRESHOLD
@@ -122,8 +123,10 @@ class MLEngine:
                     "attack": ML_THRESHOLD_ATTACK,
                     "suspicious": ML_THRESHOLD_SUSPICIOUS,
                     "anomaly": get_cfg("detection.decision_engine.thresholds.anomaly", 0.6)
-                }
+                },
+                feature_names=self.feature_order
             )
+            self.decision_engine.anomaly_scorer = self.anomaly_scorer
             
             # Update Anomaly Scorer
             if hasattr(self, 'anomaly_scorer'):
@@ -153,6 +156,10 @@ class MLEngine:
                 logger.info("Feature order locked", count=len(self.feature_order))
             else:
                 self.feature_order = load_feature_names()
+                
+            # Sync feature names to decision engine
+            if self.decision_engine:
+                self.decision_engine.feature_names = self.feature_order
                 
             # 2. Load Scaler
             from common.config import ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, MODELS_DIR
@@ -362,7 +369,7 @@ class MLEngine:
             "vae_threshold": self.vae_threshold,
         }
 
-    def predict_batch(self, events: Union[List[Dict[str, Any]], np.ndarray]) -> Union[List[Dict[str, Any]], np.ndarray]:
+    async def predict_batch(self, events: Union[List[Dict[str, Any]], np.ndarray]) -> Union[List[Dict[str, Any]], np.ndarray]:
         """
         Processes a batch of raw Suricata events or a pre-processed numpy array.
         Returns a list of result dicts or a numpy array of scores.
@@ -380,7 +387,7 @@ class MLEngine:
         
         # 1. Feature Extraction
         t_extract_start = time.time()
-        features_list = extract_features_batch(events, self.feature_order)
+        features_list = await extract_features_batch(events, self.feature_order)
         extract_ms = (time.time() - t_extract_start) * 1000
 
         # Validate feature dimensionality before inference.
@@ -469,15 +476,16 @@ class MLEngine:
                     if uncertain_mask.any():
                         X_uncertain = X[uncertain_mask]
                         latents, mse_raw = self.vae_detector.get_latent_and_mse(X_uncertain)
-                        self.anomaly_scorer.update_latent_stats(latents)
                         
                         uncertain_positions = np.where(uncertain_mask)[0]
                         for pos_idx, pos in enumerate(uncertain_positions):
                             proto = events[valid_indices[pos]].get("proto") or "TCP"
+                            src_ip = events[valid_indices[pos]].get("src_ip")
                             score = self.anomaly_scorer.score(
                                 mse=float(mse_raw[pos_idx]), 
                                 latent_vector=latents[pos_idx],
-                                protocol=proto
+                                protocol=proto,
+                                src_ip=src_ip
                             )
                             batch_anomaly_scores[pos] = score
                     valid_anomaly_scores = batch_anomaly_scores
@@ -543,6 +551,14 @@ class MLEngine:
         # 3. Final Decision & Assembly
         t_decide_start = time.time()
         batch_count = len(events)
+
+        def safe_score(v):
+            try:
+                f = float(v)
+                return round(f, 4) if np.isfinite(f) else 0.0
+            except (ValueError, TypeError, NameError):
+                return 0.0
+
         for i, event in enumerate(events):
             sig_present = (event.get("event_type") == "alert")
             
@@ -556,13 +572,6 @@ class MLEngine:
             # Use None as default for CTI if not provided (Decision Engine handles None)
             cti_score = None
             
-            def safe_score(v):
-                try:
-                    f = float(v)
-                    return round(f, 4) if np.isfinite(f) else 0.0
-                except (ValueError, TypeError, NameError):
-                    return 0.0
-
             res = {
                 "prediction": "unknown",
                 "ml_score": safe_score(ml_scores[i]),

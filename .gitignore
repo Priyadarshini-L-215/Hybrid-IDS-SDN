@@ -37,11 +37,16 @@ ui/dist/
 # --- Machine Learning Models ---
 # Binary models ignored by default. Use Git LFS for large files.
 models/*.pkl
+!models/rf_model.pkl
+!models/scaler.pkl
+!models/vae_scaler.pkl
 models/*.joblib
 models/*.pth
 models/*.h5
 models/*.onnx
 models/autoencoder.onnx.data
+!models/vae_encoder.keras
+!models/vae_decoder.keras
 models/backup*/
 models/metrics.json
 models/retrain_*.txt
@@ -108,9 +113,24 @@ desktop.ini
 .env.*.local
 
 # --- Documentation & User Files ---
+# Ignore all subdirectory READMEs, keep root README.md
+**/README.md
+!README.md
+
 *.md.bak
 *.tmp
 *.docx
 *.pcap
 *.pcapng
 user/test.pcapng
+src/ml_engine/README.md
+src/relay/README.md
+.gitignore
+ui/public/README.md
+ui/src/README.md
+.gitignore
+src/common/README.md
+.gitignore
+.gitignore
+GEMINI.md
+src/sdn/README.md

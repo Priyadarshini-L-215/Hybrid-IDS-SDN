@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import logging
+import asyncio
 
 # Add src to path
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -10,7 +11,7 @@ from ml_engine.engine import MLEngine
 
 logging.basicConfig(level=logging.INFO)
 
-def verify():
+async def verify():
     print("Initializing MLEngine with the new model...")
     try:
         engine = MLEngine()
@@ -25,7 +26,7 @@ def verify():
             # We need to provide features that match the order
             # The extract_features_batch will handle the mapping if we provide a raw event
             # But here we just want to see if the session runs
-            results = engine.predict_batch([dummy_event])
+            results = await engine.predict_batch([dummy_event])
             print(f"Prediction test results: {results}")
         else:
             print("FAILURE: ML Engine is NOT ready. Check logs.")
@@ -35,4 +36,4 @@ def verify():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    verify()
+    asyncio.run(verify())

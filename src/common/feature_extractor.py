@@ -80,12 +80,13 @@ def event_cache(maxsize=128):
 
 # --- STATEFUL TRACKING ---
 from collections import deque, Counter
+import asyncio
 
 # --- STATEFUL TRACKING ---
 class StatefulFeatureTracker:
     def __init__(self, window_size=10000): # Increased default window size as per plan
         self.window = deque(maxlen=window_size)
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         
         # Multi-level indices for O(1) lookups
         self.idx_src = Counter()
@@ -96,8 +97,8 @@ class StatefulFeatureTracker:
         self.idx_dst_sport = Counter()
         self.idx_src_dst = Counter()
 
-    def update(self, event_meta):
-        with self._lock:
+    async def update(self, event_meta):
+        async with self._lock:
             # If we're at max capacity, we need to decrement indices for the element being evicted
             if len(self.window) == self.window.maxlen:
                 old = self.window[0] # peek oldest
@@ -213,7 +214,7 @@ def get_proto_encoder():
     return _LE_PROTO
 
 @event_cache(maxsize=256)
-def extract_features_from_eve(event: dict, features: list = None) -> list | None:
+async def extract_features_from_eve(event: dict, features: list = None) -> list | None:
     if event.get('event_type') not in ['flow', 'alert']:
         return None
     
@@ -252,7 +253,7 @@ def extract_features_from_eve(event: dict, features: list = None) -> list | None
     src_port = int(event.get('src_port', 0))
     protocol = event.get('protocol', 'TCP').lower()
     
-    tracker.update({
+    await tracker.update({
         'src_ip': src_ip, 
         'dst_ip': dst_ip, 
         'service': service, 
@@ -349,12 +350,12 @@ def validate_feature_vector(vector: list, expected_dim: int = None) -> bool:
         return False
     return True
 
-def extract_features_batch(events: list[dict], features: list = None) -> list[list | None]:
+async def extract_features_batch(events: list[dict], features: list = None) -> list[list | None]:
     if features is None: features = load_feature_names()
     expected_dim = len(features)
     vectors = []
     for event in events:
-        vec = extract_features_from_eve(event, features)
+        vec = await extract_features_from_eve(event, features)
         if vec and len(vec) < expected_dim:
             vec.extend([0.0] * (expected_dim - len(vec)))
         vectors.append(vec)
