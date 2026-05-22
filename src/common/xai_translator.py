@@ -65,19 +65,28 @@ FEATURE_DESCRIPTIONS = {
     "trans_depth": "HTTP request depth"
 }
 
-def translate_shap_to_text(shap_top3: List[Dict[str, Any]], prediction: str) -> str:
+def translate_shap_to_text(shap_top3: List[Dict[str, Any]], prediction: str, sig_present: bool = False) -> str:
     """
     Translates a list of SHAP feature impact dictionaries into a readable sentence.
     
     Args:
         shap_top3: List of dicts e.g., [{"feature": "sbytes", "impact": 1.5}, ...]
         prediction: The final classification (e.g., 'attack', 'anomaly', 'normal')
+        sig_present: Whether the alert was triggered by a signature
         
     Returns:
         A human-readable explanation string.
     """
     if not shap_top3:
-        return "No behavioral explanation available."
+        pred_lower = prediction.lower()
+        if pred_lower == "normal":
+            return "Traffic conforms to baseline patterns. No anomalies detected."
+        elif sig_present:
+            return "Flagged by rule-based signatures. Explainable AI is not active for signature-only detections."
+        elif pred_lower in ["anomaly", "zero-day anomaly"]:
+            return "Flagged as a zero-day anomaly by the VAE detector. Latent reconstruction error exceeded safety thresholds."
+        else:
+            return "Machine learning model flagged this event. Feature importance details are temporarily unavailable."
         
     # Filter out features with near-zero impact (handle both dict and string format for tests)
     significant_features = []
@@ -89,6 +98,11 @@ def translate_shap_to_text(shap_top3: List[Dict[str, Any]], prediction: str) -> 
             significant_features.append({"feature": f, "impact": 1.0})
     
     if not significant_features:
+        pred_lower = prediction.lower()
+        if pred_lower == "normal":
+            return "Traffic conforms to baseline patterns. No anomalies detected."
+        elif sig_present:
+            return "Flagged by rule-based signatures. Explainable AI is not active for signature-only detections."
         return "The machine learning model did not identify any strongly anomalous features."
         
     # Get the top 1 or 2 features for the summary

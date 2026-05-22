@@ -1,7 +1,7 @@
 /* eslint-disable no-unused-vars */
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Info, AlertCircle, BarChart3, Activity } from 'lucide-react';
+import { Info, AlertCircle, BarChart3, Activity, ShieldCheck, Brain, Terminal } from 'lucide-react';
 
 const ShapPanel = ({ alert }) => {
   if (!alert) return null;
@@ -9,6 +9,8 @@ const ShapPanel = ({ alert }) => {
   const shapTop3 = alert.shap_top3 || [];
   const stageScores = alert.forensics?.stage_scores || {};
   const anomalyScore = alert.anomaly_score || 0;
+  const prediction = (alert.prediction || 'normal').toLowerCase();
+  const sigPresent = alert.sig_present || false;
 
   // Helper to get color based on value
   const getShapColor = (val) => {
@@ -85,9 +87,75 @@ const ShapPanel = ({ alert }) => {
             </div>
           );
         } else {
+          // Render a custom premium explanation card based on the classification and signature state
+          let cardConfig = {
+            icon: <Info size={24} style={{ color: 'var(--text-secondary)' }} />,
+            bgGlow: 'rgba(255, 255, 255, 0.015)',
+            borderColor: 'rgba(255, 255, 255, 0.04)',
+            title: "Explainability Unavailable",
+            desc: "Detailed machine learning feature contribution metrics are not available for this alert."
+          };
+
+          if (prediction === 'normal') {
+            cardConfig = {
+              icon: <ShieldCheck size={26} style={{ color: 'var(--success)', filter: 'drop-shadow(0 0 4px var(--success-glow))' }} />,
+              bgGlow: 'rgba(0, 255, 159, 0.05)',
+              borderColor: 'rgba(0, 255, 159, 0.15)',
+              title: "Verified Benign Flow",
+              desc: "This network flow aligns with normal baseline behaviors. Deep packet and timing metrics are within expected operational bounds."
+            };
+          } else if (sigPresent) {
+            cardConfig = {
+              icon: <Terminal size={24} style={{ color: 'var(--primary)', filter: 'drop-shadow(0 0 4px var(--primary-glow))' }} />,
+              bgGlow: 'rgba(0, 229, 255, 0.05)',
+              borderColor: 'rgba(0, 229, 255, 0.15)',
+              title: "Signature-Based Alert",
+              desc: "This alert was triggered by a pre-defined IDS signature. Explanations (SHAP) are calculated exclusively for behavior-based ML classifications."
+            };
+          } else if (prediction === 'anomaly' || prediction === 'zero-day anomaly') {
+            cardConfig = {
+              icon: <Brain size={24} style={{ color: 'var(--warning)', filter: 'drop-shadow(0 0 4px var(--warning-glow))' }} />,
+              bgGlow: 'rgba(255, 170, 0, 0.05)',
+              borderColor: 'rgba(255, 170, 0, 0.15)',
+              title: "Zero-Day Behavioral Anomaly",
+              desc: "Flagged by the Variational Autoencoder (VAE) based on multi-dimensional reconstruction error. High-dimensional anomalies do not map directly to tree-based SHAP values."
+            };
+          }
+
           return (
-            <div className="empty-state-small" style={{ marginBottom: '2rem' }}>
-              No SHAP data available for this event.
+            <div style={{
+              background: cardConfig.bgGlow,
+              border: `1px solid ${cardConfig.borderColor}`,
+              padding: '1.25rem',
+              borderRadius: '12px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              textAlign: 'center',
+              gap: '0.75rem',
+              marginBottom: '2rem',
+              boxShadow: 'inset 0 1px 4px rgba(255,255,255,0.02)',
+              backdropFilter: 'blur(8px)'
+            }}>
+              <div style={{
+                width: '48px',
+                height: '48px',
+                borderRadius: '50%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(255, 255, 255, 0.02)',
+                border: '1px solid rgba(255,255,255,0.05)',
+                marginBottom: '0.25rem'
+              }}>
+                {cardConfig.icon}
+              </div>
+              <h5 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 700, color: '#fff', letterSpacing: '0.02em' }}>
+                {cardConfig.title}
+              </h5>
+              <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.4, maxWidth: '280px' }}>
+                {cardConfig.desc}
+              </p>
             </div>
           );
         }

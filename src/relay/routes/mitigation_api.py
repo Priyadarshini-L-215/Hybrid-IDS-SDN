@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, IPvAnyAddress
 import structlog
@@ -22,6 +23,9 @@ async def unblock_ip(req: IPRequest):
     ip = str(req.ip)
     logger.info("Manual unblock requested", ip=ip)
     await ActiveFirewall.unblock(ip)
+    if ActiveFirewall._redis_client:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, ActiveFirewall._redis_client.srem, "sentinel_final_blocks", ip)
     return {"success": True, "message": f"IP {ip} unblocked"}
 
 @router.post("/mitigation/block", dependencies=[Depends(require_api_key)])
@@ -29,7 +33,40 @@ async def block_ip(req: IPRequest):
     ip = str(req.ip)
     logger.info("Manual block requested", ip=ip)
     await ActiveFirewall.block(ip)
+    if ActiveFirewall._redis_client:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, ActiveFirewall._redis_client.sadd, "sentinel_final_blocks", ip)
     return {"success": True, "message": f"IP {ip} blocked"}
+
+@router.post("/mitigation/block-final", dependencies=[Depends(require_api_key)])
+async def block_ip_final(req: IPRequest):
+    ip = str(req.ip)
+    logger.info("Manual final block requested", ip=ip)
+    await ActiveFirewall.block(ip, ttl=0)
+    if ActiveFirewall._redis_client:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, ActiveFirewall._redis_client.sadd, "sentinel_final_blocks", ip)
+    return {"success": True, "message": f"IP {ip} blocked permanently by operator"}
+
+@router.post("/mitigation/whitelist", dependencies=[Depends(require_api_key)])
+async def whitelist_ip(req: IPRequest):
+    ip = str(req.ip)
+    logger.info("Manual whitelist requested", ip=ip)
+    await ActiveFirewall.unblock(ip)
+    if ActiveFirewall._redis_client:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, ActiveFirewall._redis_client.sadd, "sentinel_whitelisted_ips", ip)
+        await loop.run_in_executor(None, ActiveFirewall._redis_client.srem, "sentinel_final_blocks", ip)
+    return {"success": True, "message": f"IP {ip} added to dynamic whitelist"}
+
+@router.post("/mitigation/unwhitelist", dependencies=[Depends(require_api_key)])
+async def unwhitelist_ip(req: IPRequest):
+    ip = str(req.ip)
+    logger.info("Manual remove from whitelist requested", ip=ip)
+    if ActiveFirewall._redis_client:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, ActiveFirewall._redis_client.srem, "sentinel_whitelisted_ips", ip)
+    return {"success": True, "message": f"IP {ip} removed from dynamic whitelist"}
 
 @router.post("/feedback/false-positive", dependencies=[Depends(require_api_key)])
 async def mark_false_positive(req: FalsePositiveRequest):

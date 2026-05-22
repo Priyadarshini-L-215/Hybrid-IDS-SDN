@@ -260,8 +260,14 @@ class ActiveFirewall:
                     )
                 )
                 for ip in rehabilitated_ips:
-                    logger.info("IP rehabilitated via atomic decay", ip=ip)
-                    await cls.unblock(ip)
+                    is_final = False
+                    if cls._redis_client:
+                        is_final = await loop.run_in_executor(None, cls._redis_client.sismember, "sentinel_final_blocks", ip)
+                    if is_final:
+                        logger.info("IP rehabilitation skipped (manually finalized block)", ip=ip)
+                    else:
+                        logger.info("IP rehabilitated via atomic decay", ip=ip)
+                        await cls.unblock(ip)
                     
             except asyncio.CancelledError:
                 break
@@ -306,6 +312,13 @@ class ActiveFirewall:
         
         if src_ip in cls._protected_ips:
             return "skipped"
+
+        if cls._redis_client:
+            loop = asyncio.get_running_loop()
+            is_whitelisted = await loop.run_in_executor(None, cls._redis_client.sismember, "sentinel_whitelisted_ips", src_ip)
+            if is_whitelisted:
+                logger.info("Incident Processing Bypassed: IP is dynamically whitelisted", ip=src_ip)
+                return "skipped"
 
         if not cls._redis_client: return "logged"
         
@@ -354,6 +367,13 @@ class ActiveFirewall:
             return False
         
         if not cls._initialized: await cls._initialize()
+        if cls._redis_client:
+            loop = asyncio.get_running_loop()
+            is_whitelisted = await loop.run_in_executor(None, cls._redis_client.sismember, "sentinel_whitelisted_ips", ip)
+            if is_whitelisted:
+                logger.info("Mitigation Block Bypassed: IP is dynamically whitelisted", ip=ip)
+                return False
+
         cls._status_cache = {}
         cls._status_cache_time = 0
         
@@ -403,6 +423,13 @@ class ActiveFirewall:
             return False
         
         if not cls._initialized: await cls._initialize()
+        if cls._redis_client:
+            loop = asyncio.get_running_loop()
+            is_whitelisted = await loop.run_in_executor(None, cls._redis_client.sismember, "sentinel_whitelisted_ips", ip)
+            if is_whitelisted:
+                logger.info("Mitigation Rate Limit Bypassed: IP is dynamically whitelisted", ip=ip)
+                return False
+
         await cls._ensure_kernel_sets()
         cls._status_cache = {}
         cls._status_cache_time = 0
@@ -503,14 +530,24 @@ class ActiveFirewall:
             perm = []
             temp = []
             reputation = {}
+            final_blocked = []
+            whitelisted = []
             
             if cls._redis_client:
                 try:
                     loop = asyncio.get_running_loop()
                     reputation = await loop.run_in_executor(None, cls._redis_client.hgetall, cls.REDIS_REPUTATION_KEY)
                     reputation = {k: float(v) for k, v in reputation.items()}
+                    
+                    # Fetch dynamic whitelist
+                    wl_set = await loop.run_in_executor(None, cls._redis_client.smembers, "sentinel_whitelisted_ips")
+                    whitelisted = sorted([str(i) for i in wl_set]) if wl_set else []
+
+                    # Fetch operator finalized blocks
+                    fb_set = await loop.run_in_executor(None, cls._redis_client.smembers, "sentinel_final_blocks")
+                    final_blocked = sorted([str(i) for i in fb_set]) if fb_set else []
                 except Exception as e:
-                    logger.error("Failed to fetch shared reputation", error=str(e))
+                    logger.error("Failed to fetch Redis blocks/whitelist", error=str(e))
 
             if cls._backend == "sdn" and cls._sdn_client:
                 try:
@@ -567,17 +604,19 @@ class ActiveFirewall:
             temp.extend(sets_data[3]["temp"])
             
             # Deduplicate and sort
-            perm = sorted(list(set(perm)))
+            perm = sorted(list(set(perm) - set(final_blocked)))
             temp = sorted(list(set(temp)))
             
             result = {
                 "permanent_ips": perm,
                 "temporary_ips": temp,
-                "reputation": reputation
+                "reputation": reputation,
+                "final_blocked_ips": final_blocked,
+                "whitelisted_ips": whitelisted
             }
             
             # Update Prometheus Gauges
-            PROM_BLOCKED.set(len(perm))
+            PROM_BLOCKED.set(len(perm) + len(final_blocked))
             PROM_TEMP_BLOCKED.set(len(temp))
             PROM_REPUTATION.set(len(reputation))
             

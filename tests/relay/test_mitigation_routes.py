@@ -93,3 +93,56 @@ async def test_mark_false_positive_unknown_alert(client, mock_firewall):
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_block_ip_final_calls_firewall_and_redis(client, mock_firewall):
+    """POST /api/mitigation/block-final should delegate block(ttl=0) and add to Redis."""
+    from unittest.mock import MagicMock
+    mock_redis = MagicMock()
+    with patch("ml_engine.firewall.ActiveFirewall._redis_client", mock_redis):
+        response = await client.post(
+            "/api/mitigation/block-final",
+            json={"ip": "192.168.1.60"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "192.168.1.60" in data["message"]
+        mock_firewall["block"].assert_awaited_once_with("192.168.1.60", ttl=0)
+        mock_redis.sadd.assert_called_once_with("sentinel_final_blocks", "192.168.1.60")
+
+
+@pytest.mark.asyncio
+async def test_whitelist_ip_calls_firewall_and_redis(client, mock_firewall):
+    """POST /api/mitigation/whitelist should unblock and update Redis."""
+    from unittest.mock import MagicMock
+    mock_redis = MagicMock()
+    with patch("ml_engine.firewall.ActiveFirewall._redis_client", mock_redis):
+        response = await client.post(
+            "/api/mitigation/whitelist",
+            json={"ip": "192.168.1.70"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        mock_firewall["unblock"].assert_awaited_once_with("192.168.1.70")
+        mock_redis.sadd.assert_called_once_with("sentinel_whitelisted_ips", "192.168.1.70")
+        mock_redis.srem.assert_called_once_with("sentinel_final_blocks", "192.168.1.70")
+
+
+@pytest.mark.asyncio
+async def test_unwhitelist_ip_calls_redis(client):
+    """POST /api/mitigation/unwhitelist should remove from Redis whitelist."""
+    from unittest.mock import MagicMock
+    mock_redis = MagicMock()
+    with patch("ml_engine.firewall.ActiveFirewall._redis_client", mock_redis):
+        response = await client.post(
+            "/api/mitigation/unwhitelist",
+            json={"ip": "192.168.1.70"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        mock_redis.srem.assert_called_once_with("sentinel_whitelisted_ips", "192.168.1.70")
+

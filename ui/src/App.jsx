@@ -296,6 +296,7 @@ function App() {
 
   // Manual Mitigation
   const [manualIp, setManualIp] = useState('');
+  const [whitelistIpInput, setWhitelistIpInput] = useState('');
 
   // Search & Filtering
   const [filterQuery, setFilterQuery] = useState('');
@@ -417,19 +418,40 @@ function App() {
     let previousHealth = null;
     if (health) {
       previousHealth = JSON.parse(JSON.stringify(health));
-      const ipsetDetailed = health.ipset_detailed || { permanent_ips: [], temporary_ips: [] };
+      const ipsetDetailed = health.ipset_detailed || { permanent_ips: [], temporary_ips: [], final_blocked_ips: [], whitelisted_ips: [] };
       let newPerm = [...(ipsetDetailed.permanent_ips || [])];
       let newTemp = [...(ipsetDetailed.temporary_ips || [])];
+      let newFinal = [...(ipsetDetailed.final_blocked_ips || [])];
+      let newWhite = [...(ipsetDetailed.whitelisted_ips || [])];
 
       if (action === 'unblock') {
         newPerm = newPerm.filter(x => x !== ip);
         newTemp = newTemp.filter(x => x !== ip);
+        newFinal = newFinal.filter(x => x !== ip);
         addLog(`System: Initiating manual authorization / lift ban for ${ip}`);
       } else if (action === 'block') {
         if (!newPerm.includes(ip)) {
           newPerm.push(ip);
         }
         addLog(`System: Initiating manual block for ${ip}`);
+      } else if (action === 'block-final') {
+        newPerm = newPerm.filter(x => x !== ip);
+        newTemp = newTemp.filter(x => x !== ip);
+        if (!newFinal.includes(ip)) {
+          newFinal.push(ip);
+        }
+        addLog(`System: Initiating operator finalized block for ${ip}`);
+      } else if (action === 'whitelist') {
+        newPerm = newPerm.filter(x => x !== ip);
+        newTemp = newTemp.filter(x => x !== ip);
+        newFinal = newFinal.filter(x => x !== ip);
+        if (!newWhite.includes(ip)) {
+          newWhite.push(ip);
+        }
+        addLog(`System: Initiating manual whitelist for ${ip}`);
+      } else if (action === 'unwhitelist') {
+        newWhite = newWhite.filter(x => x !== ip);
+        addLog(`System: Initiating manual remove from whitelist for ${ip}`);
       }
 
       setHealth({
@@ -437,7 +459,9 @@ function App() {
         ipset_detailed: {
           ...ipsetDetailed,
           permanent_ips: newPerm,
-          temporary_ips: newTemp
+          temporary_ips: newTemp,
+          final_blocked_ips: newFinal,
+          whitelisted_ips: newWhite
         }
       });
     }
@@ -465,11 +489,6 @@ function App() {
     }
   };
 
-
-
-  const downloadPcap = (eventId) => {
-    window.open(`/api/pcap/download/${eventId || 'latest'}`, '_blank');
-  };
 
   const exportAlerts = async () => {
     try {
@@ -773,8 +792,7 @@ function App() {
                                               </div>
                                             </div>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                              <button className="btn btn-primary btn-sm" onClick={(e) => { e.stopPropagation(); downloadPcap(alert.id || alert.event_id); }}><FileText size={14} /> PCAP</button>
-                                               <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }}><Fingerprint size={14} /> DEEP FORENSICS</button>
+                                              <button className="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }}><Fingerprint size={14} /> DEEP FORENSICS</button>
                                               <button className="btn btn-danger btn-sm" onClick={(e) => { e.stopPropagation(); blockAction(alert.src_ip, 'block'); }}>BLOCK IP</button>
                                             </div>
                                          </div>
@@ -917,56 +935,102 @@ function App() {
             <ErrorBoundary>
             <motion.div key="mitigation" className="content-stack" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-                <GlassCard title="Active Blocklist" icon={ShieldCheck} subtitle="Nodes currently restricted by IPS">
-                   <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
-                      <div className="content-stack">
-                        <div>
-                          <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--danger)' }}>Permanent Blocks ({health?.ipset_detailed?.permanent_ips?.length || 0})</div>
-                          {(!health?.ipset_detailed?.permanent_ips || health.ipset_detailed.permanent_ips.length === 0) ? (
-                            <div className="empty-state-small">No permanent blocks active.</div>
+                <div className="content-stack">
+                  <GlassCard title="Active Blocklist" icon={ShieldCheck} subtitle="Nodes currently restricted by IPS">
+                     <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                        <div className="content-stack">
+                          <div>
+                            <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--danger)' }}>Permanent Blocks ({health?.ipset_detailed?.permanent_ips?.length || 0})</div>
+                            {(!health?.ipset_detailed?.permanent_ips || health.ipset_detailed.permanent_ips.length === 0) ? (
+                              <div className="empty-state-small">No permanent blocks active.</div>
+                            ) : (
+                              health.ipset_detailed.permanent_ips.map(ip => (
+                                <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
+                                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                      <Lock size={14} className="text-danger" />
+                                      <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
+                                   </div>
+                                   <div style={{ display: 'flex', gap: '8px' }}>
+                                     <button 
+                                        className="btn-glass btn-sm" 
+                                        onClick={() => blockAction(ip, 'block-final')}
+                                        style={{ color: 'var(--danger)' }}
+                                     >
+                                        Block Finally
+                                     </button>
+                                     <button 
+                                        className="btn-glass btn-sm" 
+                                        onClick={() => blockAction(ip, 'unblock')}
+                                        style={{ color: 'var(--primary)' }}
+                                     >
+                                        Authorize
+                                     </button>
+                                   </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          <div style={{ marginTop: '1.5rem' }}>
+                            <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--warning)' }}>Temporary Bans ({health?.ipset_detailed?.temporary_ips?.length || 0})</div>
+                            {(!health?.ipset_detailed?.temporary_ips || health.ipset_detailed.temporary_ips.length === 0) ? (
+                              <div className="empty-state-small">No temporary bans active.</div>
+                            ) : (
+                              health.ipset_detailed.temporary_ips.map(ip => (
+                                <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
+                                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                      <History size={14} className="text-warning" />
+                                      <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
+                                   </div>
+                                   <div style={{ display: 'flex', gap: '8px' }}>
+                                     <button 
+                                        className="btn-glass btn-sm" 
+                                        onClick={() => blockAction(ip, 'block-final')}
+                                        style={{ color: 'var(--danger)' }}
+                                     >
+                                        Block Finally
+                                     </button>
+                                     <button 
+                                        className="btn-glass btn-sm" 
+                                        onClick={() => blockAction(ip, 'unblock')}
+                                     >
+                                        Lift Ban
+                                     </button>
+                                   </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                     </div>
+                  </GlassCard>
+
+                  <GlassCard title="Operator Final Blocks" icon={Lock} subtitle="IPs blocked permanently by operators">
+                     <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                        <div className="content-stack">
+                          {(!health?.ipset_detailed?.final_blocked_ips || health.ipset_detailed.final_blocked_ips.length === 0) ? (
+                            <div className="empty-state-small">No operator finalized blocks active.</div>
                           ) : (
-                            health.ipset_detailed.permanent_ips.map(ip => (
+                            health.ipset_detailed.final_blocked_ips.map(ip => (
                               <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
                                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                                    <Lock size={14} className="text-danger" />
-                                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{ip}</span>
+                                    <Lock size={14} className="text-danger" style={{ filter: 'drop-shadow(0 0 3px var(--danger))' }} />
+                                    <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
                                  </div>
                                  <button 
                                     className="btn-glass btn-sm" 
                                     onClick={() => blockAction(ip, 'unblock')}
                                     style={{ color: 'var(--primary)' }}
                                  >
-                                    Authorize
+                                    Authorize (Unblock)
                                  </button>
                               </div>
                             ))
                           )}
                         </div>
-
-                        <div style={{ marginTop: '1.5rem' }}>
-                          <div className="stat-label" style={{ marginBottom: '1rem', color: 'var(--warning)' }}>Temporary Bans ({health?.ipset_detailed?.temporary_ips?.length || 0})</div>
-                          {(!health?.ipset_detailed?.temporary_ips || health.ipset_detailed.temporary_ips.length === 0) ? (
-                            <div className="empty-state-small">No temporary bans active.</div>
-                          ) : (
-                            health.ipset_detailed.temporary_ips.map(ip => (
-                              <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
-                                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                                    <History size={14} className="text-warning" />
-                                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{ip}</span>
-                                 </div>
-                                 <button 
-                                    className="btn-glass btn-sm" 
-                                    onClick={() => blockAction(ip, 'unblock')}
-                                 >
-                                    Lift Ban
-                                 </button>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                   </div>
-                </GlassCard>
+                     </div>
+                  </GlassCard>
+                </div>
 
                 <div className="content-stack">
                    <GlassCard 
@@ -1058,17 +1122,73 @@ function App() {
                      </div>
                   </GlassCard>
 
-                  <GlassCard title="Security Exceptions" icon={CheckCircle2} subtitle="Trusted local infrastructure">
+                  <GlassCard title="Operator Whitelist & Exceptions" icon={CheckCircle2} subtitle="Trusted infrastructure and custom exceptions">
                      <div className="content-stack">
                         <div style={{ padding: '1rem', borderRadius: '12px', background: 'rgba(16, 185, 129, 0.05)', border: '1px solid rgba(16, 185, 129, 0.1)' }}>
                            <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                             Internal Sentinel nodes and loopback addresses are automatically protected from mitigation policies to prevent self-denial.
+                             Whitelisted IPs are exempt from all dynamic blocks, rate limits, and incident processing. Internal Sentinel nodes are automatically protected.
                            </p>
                         </div>
-                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                           {['127.0.0.1', '10.0.2.15', '192.168.1.1'].map(ip => (
-                             <Badge key={ip} variant="success">{ip}</Badge>
-                           ))}
+
+                        {/* Static Protected IPs */}
+                        <div>
+                          <div className="stat-label" style={{ marginBottom: '0.5rem', fontSize: '0.7rem' }}>System Protected IPs (Protected from all bans)</div>
+                          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                             {['127.0.0.1', '10.0.2.15', '192.168.1.1'].map(ip => (
+                               <Badge key={ip} variant="success">{ip}</Badge>
+                             ))}
+                          </div>
+                        </div>
+
+                        {/* Dynamic Whitelist Form */}
+                        <div style={{ marginTop: '1rem' }}>
+                          <div className="stat-label" style={{ marginBottom: '0.5rem', fontSize: '0.7rem' }}>Custom Operator Whitelist</div>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <input 
+                              type="text" 
+                              className="input-field" 
+                              placeholder="Add IP to whitelist... e.g. 192.168.1.100" 
+                              value={whitelistIpInput}
+                              onChange={e => setWhitelistIpInput(e.target.value)}
+                              style={{ flex: 1 }}
+                            />
+                            <button 
+                              className="btn btn-success" 
+                              onClick={() => {
+                                if (whitelistIpInput) {
+                                  blockAction(whitelistIpInput, 'whitelist');
+                                  setWhitelistIpInput('');
+                                }
+                              }}
+                              disabled={!whitelistIpInput}
+                              style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                            >
+                              <CheckCircle2 size={14} /> Whitelist IP
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Dynamic Whitelisted IPs List */}
+                        <div style={{ maxHeight: '150px', overflowY: 'auto', marginTop: '0.5rem' }}>
+                          {(!health?.ipset_detailed?.whitelisted_ips || health.ipset_detailed.whitelisted_ips.length === 0) ? (
+                            <div className="empty-state-small">No custom whitelisted IPs.</div>
+                          ) : (
+                            health.ipset_detailed.whitelisted_ips.map(ip => (
+                              <div key={ip} className="leaderboard-row" style={{ marginBottom: '0.5rem' }}>
+                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <CheckCircle2 size={12} className="text-success" />
+                                    <CompactIP ip={ip} onClick={() => fetchNodeIntel(ip)} />
+                                 </div>
+                                 <button 
+                                    className="btn-glass btn-sm" 
+                                    onClick={() => blockAction(ip, 'unwhitelist')}
+                                    style={{ color: 'var(--danger)' }}
+                                 >
+                                    Remove
+                                 </button>
+                              </div>
+                            ))
+                          )}
                         </div>
                      </div>
                   </GlassCard>
@@ -1266,13 +1386,34 @@ function App() {
                     </>
                   )}
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
-                    {nodeIntel.is_mitigated ? (
-                      <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => blockAction(selectedIp, 'unblock')}><Unlock size={16} /> WHITELIST</button>
+                  <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                      {nodeIntel.is_mitigated ? (
+                        <>
+                          <button className="btn btn-secondary" onClick={() => blockAction(selectedIp, 'unblock')}>
+                            <Unlock size={14} /> LIFT BAN
+                          </button>
+                          {!health?.ipset_detailed?.final_blocked_ips?.includes(selectedIp) && (
+                            <button className="btn btn-danger" onClick={() => blockAction(selectedIp, 'block-final')}>
+                              <Lock size={14} /> FINAL BLOCK
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <button className="btn btn-danger" style={{ gridColumn: 'span 2' }} onClick={() => blockAction(selectedIp, 'block')}>
+                          <Shield size={14} /> BLOCK HOST
+                        </button>
+                      )}
+                    </div>
+                    {health?.ipset_detailed?.whitelisted_ips?.includes(selectedIp) ? (
+                      <button className="btn btn-warning" onClick={() => blockAction(selectedIp, 'unwhitelist')}>
+                        <Unlock size={14} /> REMOVE FROM WHITELIST
+                      </button>
                     ) : (
-                      <button className="btn btn-danger" style={{ width: '100%' }} onClick={() => blockAction(selectedIp, 'block')}><Shield size={16} /> BLOCK HOST</button>
+                      <button className="btn btn-success" onClick={() => blockAction(selectedIp, 'whitelist')}>
+                        <CheckCircle2 size={14} /> ADD TO WHITELIST
+                      </button>
                     )}
-                    <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => downloadPcap(nodeIntel.alert_id || 'latest')}><Download size={16} /> PCAP SNIPPET</button>
                   </div>
                 </div>
               ) : <div style={{ textAlign: 'center', padding: '3rem', opacity: 0.5 }}><History size={48} style={{ margin: '0 auto 1rem' }} /><p>Error retrieving forensic data.</p></div>}
