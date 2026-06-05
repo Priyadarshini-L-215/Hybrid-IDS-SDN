@@ -146,3 +146,26 @@ async def test_unwhitelist_ip_calls_redis(client):
         assert data["success"] is True
         mock_redis.srem.assert_called_once_with("sentinel_whitelisted_ips", "192.168.1.70")
 
+
+@pytest.mark.asyncio
+async def test_baseline_freeze_and_unfreeze(client):
+    """POST /api/baseline/freeze and /api/baseline/unfreeze should trigger scorer freeze/unfreeze."""
+    from unittest.mock import MagicMock
+    mock_scorer = MagicMock()
+    mock_engine = MagicMock()
+    mock_engine.anomaly_scorer = mock_scorer
+
+    with patch("relay.app.get_ml_engine", return_value=mock_engine):
+        # Test Freeze
+        res_freeze = await client.post("/api/baseline/freeze")
+        assert res_freeze.status_code == 200
+        assert res_freeze.json()["success"] is True
+        mock_scorer.freeze_baseline.assert_called_once()
+
+        # Test Unfreeze
+        res_unfreeze = await client.post("/api/baseline/unfreeze")
+        assert res_unfreeze.status_code == 200
+        assert res_unfreeze.json()["success"] is True
+        mock_scorer.unfreeze_baseline.assert_called_once()
+
+

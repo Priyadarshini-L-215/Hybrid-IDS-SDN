@@ -482,6 +482,15 @@ h1 {
   background: linear-gradient(90deg, rgba(255, 170, 0, 0.05) 0%, transparent 100%);
 }
 
+.alert-row-sdn {
+  border-left: 3px solid var(--secondary);
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.03) 0%, transparent 100%);
+}
+
+.alert-row-sdn:hover {
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.06) 0%, transparent 100%);
+}
+
 .ip-address {
   font-family: var(--font-mono);
   font-weight: 700;
@@ -536,6 +545,13 @@ h1 {
   color: var(--primary); 
   border-color: rgba(0, 229, 255, 0.25); 
   box-shadow: 0 0 10px rgba(0, 229, 255, 0.05);
+}
+
+.badge-secondary {
+  background: rgba(168, 85, 247, 0.08); 
+  color: var(--secondary); 
+  border-color: rgba(168, 85, 247, 0.25); 
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.05);
 }
 
 .badge-muted { 

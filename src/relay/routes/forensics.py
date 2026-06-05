@@ -1,7 +1,8 @@
 import asyncio
 import aiofiles
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
+from relay.middleware.auth import require_api_key
 import structlog
 import json
 import time
@@ -106,3 +107,54 @@ async def get_ip_forensics_details(ip_address: str):
     except Exception as e:
         logger.error("Failed to fetch IP forensics", ip=ip_address, error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+class CustomAlertRequest(BaseModel):
+    event_id: str
+    timestamp: str
+    event_type: str
+    src_ip: str
+    src_port: int
+    dst_ip: str
+    dst_port: int
+    protocol: str
+    alert_sig: str
+    prediction: str
+    confidence: float
+    severity: int
+    category: str
+    mitigation: str
+    is_mitigated: int
+
+@router.post("/alert/external", dependencies=[Depends(require_api_key)])
+async def inject_external_alert(alert: CustomAlertRequest):
+    try:
+        from common.database import db
+        from ml_engine import redis_client as rc
+        from common.config import REDIS_ALERT_STREAM
+        
+        # 1. Build alert data matching the database insertion schema
+        alert_data = alert.model_dump()
+        alert_data["shap_top3"] = []
+        alert_data["xai_explanation"] = ""
+        alert_data["enrichment"] = {}
+        alert_data["mitre_id"] = None
+        alert_data["anomaly_score"] = 0.0
+        alert_data["correlation_id"] = None
+        alert_data["raw_event"] = {}
+        
+        # 2. Add to database
+        await db.add_alert(alert_data)
+        
+        # 3. Broadcast to Redis Stream for UI WebSockets
+        if rc.async_redis_client:
+            payload = alert_data.copy()
+            payload.pop("raw_event", None)
+            alert_json = json.dumps(payload)
+            await rc.async_redis_client.xadd(REDIS_ALERT_STREAM, {"alert": alert_json})
+            await rc.async_redis_client.xtrim(REDIS_ALERT_STREAM, maxlen=1000)
+            
+        logger.info("External alert ingested", alert_id=alert.event_id, sig=alert.alert_sig)
+        return {"status": "success", "message": "External alert ingested successfully"}
+    except Exception as e:
+        logger.error("Failed to ingest external alert", error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error ingesting alert")

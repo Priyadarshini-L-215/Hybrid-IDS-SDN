@@ -110,3 +110,21 @@ async def toggle_banning(req: ToggleBanningRequest):
         raise HTTPException(status_code=500, detail="Failed to update banning status in Redis")
     state_str = "stopped" if req.banning_disabled else "resumed"
     return {"success": True, "message": f"IP banning {state_str} successfully", "banning_disabled": req.banning_disabled}
+
+@router.post("/baseline/freeze", dependencies=[Depends(require_api_key)])
+async def freeze_baseline_route():
+    from relay.app import get_ml_engine
+    ml_engine = get_ml_engine()
+    if not ml_engine or not ml_engine.anomaly_scorer:
+        raise HTTPException(status_code=503, detail="ML Engine / Anomaly Scorer not active")
+    ml_engine.anomaly_scorer.freeze_baseline()
+    return {"success": True, "message": "Zero-Trust ML: Baseline updates manually FROZEN"}
+
+@router.post("/baseline/unfreeze", dependencies=[Depends(require_api_key)])
+async def unfreeze_baseline_route():
+    from relay.app import get_ml_engine
+    ml_engine = get_ml_engine()
+    if not ml_engine or not ml_engine.anomaly_scorer:
+        raise HTTPException(status_code=503, detail="ML Engine / Anomaly Scorer not active")
+    ml_engine.anomaly_scorer.unfreeze_baseline()
+    return {"success": True, "message": "Zero-Trust ML: Baseline updates manually UNFROZEN"}

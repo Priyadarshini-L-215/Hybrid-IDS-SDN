@@ -2,6 +2,9 @@
 # Implements L2 Learning Switch + REST API for Flow Mitigation
 
 import json
+import time
+import requests
+import uuid
 
 try:
     from ryu.base import app_manager
@@ -145,6 +148,10 @@ class SentinelController(app_manager.RyuApp):
         self.quarantine_list = {} # ip -> vlan_id
         self.datapaths = {} # dpid -> datapath object
         
+        # SDN Shield Rate Limiting
+        self.packet_in_rates = {} # key: (dpid, in_port), value: list of timestamps
+        self.RATE_THRESHOLD = 100 # packet-ins per second
+        
         # Register REST API
         wsgi = kwargs['wsgi']
         wsgi.register(SentinelRestController, {sentinel_instance_name: self})
@@ -201,6 +208,49 @@ class SentinelController(app_manager.RyuApp):
                 if ip in self.quarantine_list:
                     self.logger.info(f"Sentinel Controller: Quarantine flow for {ip} expired. Removing from quarantine_list.")
                     self.quarantine_list.pop(ip, None)
+
+    def notify_sentinel_of_attack(self, dpid, in_port, src_mac, rate):
+        """Sends an HTTP POST alert to Sentinel's external alert API."""
+        try:
+            from datetime import datetime, timezone
+            import os
+            
+            # Retrieve Sentinel environment settings or fallback to default
+            api_port = os.environ.get("SENTINEL_API_PORT", "3000")
+            api_key = os.environ.get("SENTINEL_API_KEY", "")
+            
+            url = f"http://127.0.0.1:{api_port}/api/forensics/alert/external"
+            headers = {
+                "X-Sentinel-Key": api_key,
+                "Content-Type": "application/json"
+            }
+            
+            alert_payload = {
+                "event_id": f"sdn-shield-{uuid.uuid4()}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_type": "alert",
+                "src_ip": f"MAC-{src_mac}",
+                "src_port": int(in_port),
+                "dst_ip": f"DPID-{dpid}",
+                "dst_port": 0,
+                "protocol": "SDN",
+                "alert_sig": "SDN Control Plane Saturation Flood",
+                "prediction": "attack",
+                "confidence": 1.0,
+                "severity": 3,
+                "category": "Denial of Service",
+                "mitigation": f"Blocked Switch Port {in_port} on Switch {dpid}",
+                "is_mitigated": 1
+            }
+            
+            # Using standard blocking post (safe for eventlet green thread)
+            response = requests.post(url, json=alert_payload, headers=headers, timeout=2.0)
+            if response.status_code == 200:
+                self.logger.info(f"Sentinel Controller: Successfully sent control plane alert to API.")
+            else:
+                self.logger.error(f"Sentinel Controller: Failed to send alert to API, status code: {response.status_code}")
+        except Exception as e:
+            self.logger.error(f"Sentinel Controller: Exception sending control plane alert to API: {e}")
 
     def add_block_flow(self, ip, ttl=0):
         """Installs a DROP flow for the specified source IP on all connected switches."""
@@ -319,6 +369,29 @@ class SentinelController(app_manager.RyuApp):
         src = eth.src
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
+
+        # --- SDN Control Plane Saturation Protection ---
+        now = time.time()
+        port_key = (dpid, in_port)
+        
+        # Initialize/cleanup rate history for this port (1-second window)
+        self.packet_in_rates.setdefault(port_key, [])
+        self.packet_in_rates[port_key] = [t for t in self.packet_in_rates[port_key] if now - t < 1.0]
+        self.packet_in_rates[port_key].append(now)
+        
+        if len(self.packet_in_rates[port_key]) > self.RATE_THRESHOLD:
+            self.logger.critical(
+                f"[SDN SHIELD] Control plane flooding detected on DPID {dpid}, Port {in_port}! "
+                f"Rate: {len(self.packet_in_rates[port_key])} Packet-Ins/sec. Mitigating..."
+            )
+            # 1. Install hard drop flow at the switch for this input port to protect the controller channel
+            # Priority 300 to override learn forwarding (1) and block flows (200)
+            match = parser.OFPMatch(in_port=in_port)
+            self.add_flow(datapath, 300, match, [], hard_timeout=60) # Block port for 60 seconds
+            
+            # 2. Report alert to Sentinel ML Engine / UI
+            self.notify_sentinel_of_attack(dpid, in_port, src, len(self.packet_in_rates[port_key]))
+            return
 
         # 1. Check Block List (Source IP)
         from ryu.lib.packet import ipv4

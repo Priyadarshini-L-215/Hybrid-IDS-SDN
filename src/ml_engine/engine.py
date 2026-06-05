@@ -367,6 +367,7 @@ class MLEngine:
             "model_version": self.meta.get("model_version", "unknown"),
             "vae_enabled": self.vae_detector is not None,
             "vae_threshold": self.vae_threshold,
+            "baseline_frozen": self.anomaly_scorer._baseline_frozen if self.anomaly_scorer else False,
         }
 
     async def predict_batch(self, events: Union[List[Dict[str, Any]], np.ndarray]) -> Union[List[Dict[str, Any]], np.ndarray]:

@@ -568,6 +568,18 @@ function App() {
     }
   };
 
+  const toggleBaselineFreeze = async (freeze) => {
+    try {
+      const endpoint = freeze ? '/api/baseline/freeze' : '/api/baseline/unfreeze';
+      const response = await apiClient.post(endpoint);
+      apiClient.toast(response.message || `Baseline updates ${freeze ? 'frozen' : 'unfrozen'} successfully`, 'info');
+      addLog(`Zero-Trust ML: Baseline updates ${freeze ? 'FROZEN' : 'UNFROZEN'}`);
+      refreshHealth();
+    } catch (e) {
+      apiClient.handleError(e, `Failed to update baseline status`);
+    }
+  };
+
 
   const exportAlerts = async () => {
     try {
@@ -725,6 +737,12 @@ function App() {
               <span className="metric-label">Queue Depth</span>
               <span className="metric-value">{health?.queue_depth || 0}</span>
             </div>
+            <div className="metric-item">
+              <span className="metric-label">Zero-Trust Baseline</span>
+              <span className="metric-value" style={{ color: health?.ml_engine?.baseline_frozen ? 'var(--danger)' : 'var(--success)' }}>
+                {health === null ? 'LOADING' : (health?.ml_engine?.baseline_frozen ? 'FROZEN' : 'ACTIVE')}
+              </span>
+            </div>
             <div className="status-hover-wrapper" style={{ cursor: 'pointer' }}>
               <Badge variant={isConnected ? 'success' : 'danger'}>{isConnected ? 'SYSTEM READY' : 'OFFLINE'}</Badge>
               <div className="engine-tooltip glass">
@@ -733,7 +751,8 @@ function App() {
                   { label: 'Neural Engine', status: health?.checks?.consumer_running, val: health === null ? 'LOADING' : (health?.checks?.consumer_running ? 'ACTIVE' : 'STOPPED') },
                   { label: 'Redis Stream', status: health?.checks?.redis_ok, val: health === null ? 'LOADING' : (health?.checks?.redis_ok ? 'SYNCED' : 'ERROR') },
                   { label: 'IPS Backend', status: true, val: health?.ipset?.backend?.toUpperCase() || (health === null ? 'LOADING' : 'READY') },
-                  { label: 'IPS Banning', status: !health?.ipset?.banning_disabled, val: health === null ? 'LOADING' : (health?.ipset?.banning_disabled ? 'STOPPED' : 'ACTIVE') }
+                  { label: 'IPS Banning', status: !health?.ipset?.banning_disabled, val: health === null ? 'LOADING' : (health?.ipset?.banning_disabled ? 'STOPPED' : 'ACTIVE') },
+                  { label: 'Zero-Trust Baseline', status: !health?.ml_engine?.baseline_frozen, val: health === null ? 'LOADING' : (health?.ml_engine?.baseline_frozen ? 'FROZEN' : 'ACTIVE') }
                 ].map(item => (
                   <div key={item.label} className="health-item">
                      <span className="health-label">{item.label}</span>
@@ -811,6 +830,7 @@ function App() {
                               const isSuspicious = prediction.includes('suspicious');
                               const confidence = typeof alert.confidence === 'number' ? alert.confidence : 0;
                               const isExpanded = expandedRow === alert.event_id;
+                              const isSDN = alert.protocol === 'SDN' || alert.alert_sig === 'SDN Control Plane Saturation Flood';
                               
                               return (
                                 <React.Fragment key={alert.event_id}>
@@ -819,7 +839,7 @@ function App() {
                                     animate={{ opacity: 1, y: 0 }}
                                     transition={{ duration: 0.3 }}
                                     onClick={() => toggleExpandRow(alert)}
-                                    className={`alert-row ${isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : ''}`}
+                                    className={`alert-row ${isSDN ? 'alert-row-sdn' : (isAttack ? 'alert-row-danger' : isSuspicious ? 'alert-row-warning' : '')}`}
                                   >
                                     <td className="text-muted" style={{ fontSize: '0.65rem', fontWeight: 800 }}>{new Date(alert.timestamp).toLocaleTimeString()}</td>
                                     <td style={{ minWidth: '180px' }}>
@@ -837,9 +857,21 @@ function App() {
                                       </div>
                                     </td>
                                     <td>
-                                      <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
-                                        <HighlightText text={alert.prediction} highlight={highlightQuery} />
-                                      </Badge>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                        <Badge variant={isSDN ? 'secondary' : (isAttack ? 'danger' : isSuspicious ? 'warning' : 'success')}>
+                                          <HighlightText text={isSDN ? 'SDN SHIELD' : alert.prediction} highlight={highlightQuery} />
+                                        </Badge>
+                                        {alert.alert_sig && !isSDN && (
+                                          <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>
+                                            <HighlightText text={alert.alert_sig} highlight={highlightQuery} />
+                                          </span>
+                                        )}
+                                        {isSDN && alert.alert_sig && (
+                                          <span style={{ fontSize: '0.6rem', color: 'var(--secondary)', fontWeight: 800, letterSpacing: '0.02em' }}>
+                                            <HighlightText text={alert.alert_sig} highlight={highlightQuery} />
+                                          </span>
+                                        )}
+                                      </div>
                                     </td>
                                     <td>
                                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1192,6 +1224,64 @@ function App() {
                                ) : (
                                   <>
                                      <StopCircle size={16} /> STOP IPS BANNING
+                                  </>
+                               )}
+                            </button>
+                         </div>
+                      </div>
+                   </GlassCard>
+
+                   <GlassCard 
+                      title="Zero-Trust Baseline Updates" 
+                      icon={Layers} 
+                      subtitle="VAE anomaly detector self-calibration and online learning"
+                      style={{
+                        border: health?.ml_engine?.baseline_frozen 
+                          ? '1px dashed rgba(255, 0, 85, 0.4)' 
+                          : '1px solid rgba(0, 255, 159, 0.2)',
+                        background: health?.ml_engine?.baseline_frozen 
+                          ? 'rgba(255, 0, 85, 0.02)' 
+                          : 'rgba(16, 185, 129, 0.01)'
+                      }}
+                   >
+                      <div className="content-stack">
+                         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                            <div 
+                              className={`badge-dot ${health?.ml_engine?.baseline_frozen ? 'bg-danger' : 'bg-success'}`} 
+                              style={{ 
+                                width: '12px', 
+                                height: '12px', 
+                                background: health?.ml_engine?.baseline_frozen ? 'var(--danger)' : 'var(--success)',
+                                boxShadow: health?.ml_engine?.baseline_frozen 
+                                  ? '0 0 10px var(--danger)' 
+                                  : '0 0 10px var(--success)',
+                                animation: health?.ml_engine?.baseline_frozen ? 'pulse 2s infinite' : 'none'
+                              }} 
+                            />
+                            <div>
+                               <div style={{ fontWeight: 900, fontSize: '0.85rem', color: health?.ml_engine?.baseline_frozen ? 'var(--danger)' : 'var(--success)' }}>
+                                  {health?.ml_engine?.baseline_frozen ? 'BASELINE UPDATES FROZEN' : 'BASELINE UPDATES ACTIVE'}
+                               </div>
+                               <p style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', marginTop: '4px', lineHeight: '1.4' }}>
+                                  {health?.ml_engine?.baseline_frozen 
+                                     ? 'Online learning is suspended. Latent space baseline profiles will not ingest new flow statistics to prevent adversarial contamination.' 
+                                     : 'Online learning is active. Normal flow statistics are continuously analyzed and safely buffered to update calibration baselines.'}
+                               </p>
+                            </div>
+                         </div>
+                         <div style={{ marginTop: '0.5rem' }}>
+                            <button 
+                              className={`btn ${health?.ml_engine?.baseline_frozen ? 'btn-success' : 'btn-danger'}`} 
+                              onClick={() => toggleBaselineFreeze(!health?.ml_engine?.baseline_frozen)}
+                              style={{ width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}
+                            >
+                               {health?.ml_engine?.baseline_frozen ? (
+                                  <>
+                                     <Play size={16} /> RESUME BASELINE LEARNING
+                                  </>
+                               ) : (
+                                  <>
+                                     <StopCircle size={16} /> FREEZE BASELINE (LOCKOUT)
                                   </>
                                )}
                             </button>
