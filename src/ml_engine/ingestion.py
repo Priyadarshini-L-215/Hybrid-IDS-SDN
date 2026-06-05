@@ -125,6 +125,72 @@ async def handle_suricata_stream(reader, writer):
                 raw_data = orjson.loads(line)
                 _STATS["packets_received"] += 1
                 
+                # Cache protocol-specific metadata to Redis for correlation
+                etype = raw_data.get("event_type")
+                if etype == "dns":
+                    dns_data = raw_data.get("dns", {})
+                    rrname = dns_data.get("rrname")
+                    if rrname:
+                        resolved_ips = []
+                        rdata = dns_data.get("rdata")
+                        if rdata:
+                            if isinstance(rdata, list):
+                                resolved_ips.extend(rdata)
+                            elif isinstance(rdata, str):
+                                resolved_ips.append(rdata)
+                        
+                        for ans in dns_data.get("answers", []):
+                            ans_rdata = ans.get("rdata")
+                            if ans_rdata:
+                                resolved_ips.append(ans_rdata)
+                        
+                        if rc.async_redis_client and resolved_ips:
+                            for rip in set(resolved_ips):
+                                try:
+                                    await rc.async_redis_client.setex(f"sentinel_dns_resolve:{rip}", 300, rrname)
+                                except Exception as e:
+                                    logger.error("Failed to cache DNS resolve", ip=rip, domain=rrname, error=str(e))
+                                    
+                elif etype == "http":
+                    http_data = raw_data.get("http", {})
+                    src_ip = raw_data.get("src_ip")
+                    dst_ip = raw_data.get("dest_ip") or raw_data.get("dst_ip")
+                    dst_port = raw_data.get("dest_port") or raw_data.get("dst_port")
+                    if src_ip and dst_ip and dst_port and http_data:
+                        details = {
+                            "hostname": http_data.get("hostname"),
+                            "url": http_data.get("url"),
+                            "user_agent": http_data.get("http_user_agent"),
+                            "method": http_data.get("http_method")
+                        }
+                        if rc.async_redis_client:
+                            try:
+                                http_key = f"sentinel_http_cache:{src_ip}:{dst_ip}:{dst_port}"
+                                await rc.async_redis_client.setex(http_key, 120, orjson.dumps(details))
+                            except Exception as e:
+                                logger.error("Failed to cache HTTP log", key=http_key, error=str(e))
+                                
+                elif etype == "tls":
+                    tls_data = raw_data.get("tls", {})
+                    src_ip = raw_data.get("src_ip")
+                    dst_ip = raw_data.get("dest_ip") or raw_data.get("dst_ip")
+                    dst_port = raw_data.get("dest_port") or raw_data.get("dst_port")
+                    if src_ip and dst_ip and dst_port and tls_data:
+                        details = {
+                            "subject": tls_data.get("subject"),
+                            "issuer": tls_data.get("issuerdn"),
+                            "serial": tls_data.get("serial"),
+                            "fingerprint": tls_data.get("fingerprint"),
+                            "ja3_hash": tls_data.get("ja3", {}).get("hash"),
+                            "ja3_string": tls_data.get("ja3", {}).get("string")
+                        }
+                        if rc.async_redis_client:
+                            try:
+                                tls_key = f"sentinel_tls_cache:{src_ip}:{dst_ip}:{dst_port}"
+                                await rc.async_redis_client.setex(tls_key, 120, orjson.dumps(details))
+                            except Exception as e:
+                                logger.error("Failed to cache TLS log", key=tls_key, error=str(e))
+                                
                 event = normalize_eve(raw_data)
                 
                 # Filter: Only process events with valid source IPs to avoid 0.0.0.0 junk

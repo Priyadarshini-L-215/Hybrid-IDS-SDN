@@ -124,10 +124,22 @@ class DeepInferenceManager:
 
         # Time the inference to prove async latency preservation
         start = time.time()
-        score = self.transformer.predict(sequence_data, verbose=0)[0][0]
+        score_tensor = self.transformer(sequence_data, training=False)
+        
+        # Convert tensor/array to standard float safely
+        if hasattr(score_tensor, "detach"):
+            score = float(score_tensor.detach().cpu().item())
+        elif hasattr(score_tensor, "numpy"):
+            val = score_tensor.numpy()
+            score = float(val.item() if hasattr(val, "item") else val[0][0])
+        elif hasattr(score_tensor, "item"):
+            score = float(score_tensor.item())
+        else:
+            score = float(np.asarray(score_tensor).item())
+            
         duration = (time.time() - start) * 1000
         logger.debug(f"Transformer inference completed in {duration:.2f}ms. Score: {score:.4f}")
-        return float(score)
+        return score
 
 # Singleton instance
 deep_manager = DeepInferenceManager()

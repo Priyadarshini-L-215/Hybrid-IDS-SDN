@@ -14,9 +14,10 @@ from common.config import (
     BLOCK_TTL, RATE_LIMIT_PER_SEC, get_protected_ips,
     REDIS_HOST, REDIS_PORT, REDIS_DB,
     SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, SDN_FALLBACK_TO_IPSET,
-    SDN_HONEYPOT_IP
+    SDN_HONEYPOT_IP, EBPF_ENABLED, EBPF_INTERFACE
 )
 from ml_engine.sdn_client import SDNClient
+from ml_engine.ebpf_mitigation import EBPFMitigationManager
 from common.metrics import PROM_REPUTATION, PROM_BLOCKED, PROM_TEMP_BLOCKED, PROM_MITIGATIONS_TOTAL
 
 logger = structlog.get_logger(__name__)
@@ -32,6 +33,7 @@ class ActiveFirewall:
     _protected_ips: Set[str] = set()
     _redis_client: Optional[redis.Redis] = None
     _sdn_client: Optional[SDNClient] = None
+    _ebpf_manager: Optional[EBPFMitigationManager] = None
     _initialized = False
     _backend = "legacy" # Default to legacy
     _decay_task: Optional[asyncio.Task] = None
@@ -66,6 +68,16 @@ class ActiveFirewall:
                 cls._backend = "legacy"
                 logger.info("Mitigation Backend set to LEGACY (ipset/iptables)")
             
+            # Setup eBPF manager if enabled
+            if EBPF_ENABLED:
+                cls._ebpf_manager = EBPFMitigationManager(interface=EBPF_INTERFACE)
+                loop = asyncio.get_running_loop()
+                success = await loop.run_in_executor(None, cls._ebpf_manager.load_xdp)
+                if success:
+                    logger.info("eBPF/XDP mitigation backend enabled", interface=EBPF_INTERFACE)
+                else:
+                    logger.warning("eBPF/XDP mitigation backend failed to load, falling back to standard mechanisms")
+            
             # ALWAYS setup kernel sets for fallback reliability
             await cls._ensure_kernel_sets()
             
@@ -98,6 +110,15 @@ class ActiveFirewall:
                 except asyncio.CancelledError:
                     pass
                 cls._decay_task = None
+
+            if cls._ebpf_manager is not None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, cls._ebpf_manager.unload_xdp)
+                except Exception as e:
+                    logger.warning("Failed to unload eBPF XDP program cleanly", error=str(e))
+                finally:
+                    cls._ebpf_manager = None
 
             if cls._sdn_client is None:
                 return
@@ -334,23 +355,32 @@ class ActiveFirewall:
                 if await cls.is_banning_disabled():
                     logger.info("Mitigation Bypassed: permanent_block threshold reached but banning is disabled", ip=src_ip, score=new_score)
                     return "logged"
-                await cls.block(src_ip, ttl=0)
-                PROM_MITIGATIONS_TOTAL.labels(action="permanent_block").inc()
-                return "permanent_block" if delta > 0 else "logged"
+                success = await cls.block(src_ip, ttl=0)
+                if success:
+                    PROM_MITIGATIONS_TOTAL.labels(action="permanent_block").inc()
+                    return "permanent_block" if delta > 0 else "logged"
+                else:
+                    return "logged"
             elif new_score >= REPUTATION_TEMP_BLOCK:
                 if await cls.is_banning_disabled():
                     logger.info("Mitigation Bypassed: temp_block threshold reached but banning is disabled", ip=src_ip, score=new_score)
                     return "logged"
-                await cls.block(src_ip, ttl=BLOCK_TTL)
-                PROM_MITIGATIONS_TOTAL.labels(action="temp_block").inc()
-                return "temp_block" if delta > 0 else "logged"
+                success = await cls.block(src_ip, ttl=BLOCK_TTL)
+                if success:
+                    PROM_MITIGATIONS_TOTAL.labels(action="temp_block").inc()
+                    return "temp_block" if delta > 0 else "logged"
+                else:
+                    return "logged"
             elif new_score >= REPUTATION_LIMIT:
                 if await cls.is_banning_disabled():
                     logger.info("Mitigation Bypassed: rate_limit threshold reached but banning is disabled", ip=src_ip, score=new_score)
                     return "logged"
-                await cls.rate_limit(src_ip)
-                PROM_MITIGATIONS_TOTAL.labels(action="rate_limit").inc()
-                return "rate_limit" if delta > 0 else "logged"
+                success = await cls.rate_limit(src_ip)
+                if success:
+                    PROM_MITIGATIONS_TOTAL.labels(action="rate_limit").inc()
+                    return "rate_limit" if delta > 0 else "logged"
+                else:
+                    return "logged"
             
             return "logged"
         except Exception as e:
@@ -358,7 +388,7 @@ class ActiveFirewall:
             return "logged"
 
     @classmethod
-    async def block(cls, ip: str, ttl: int = 0):
+    async def block(cls, ip: str, ttl: int = 0) -> bool:
         """Adds IP to block set or installs SDN flow."""
         try:
             ipaddress.ip_address(ip)
@@ -378,18 +408,31 @@ class ActiveFirewall:
         cls._status_cache_time = 0
         
         success = False
+        
+        # 1. Apply eBPF block if enabled
+        if EBPF_ENABLED and cls._ebpf_manager:
+            loop = asyncio.get_running_loop()
+            ebpf_success = await loop.run_in_executor(None, cls._ebpf_manager.block_ip, ip)
+            if ebpf_success:
+                success = True
+
+        # 2. Apply backend block
         if cls._backend == "sdn" and cls._sdn_client:
             try:
-                success = await cls._sdn_client.block(ip, ttl)
+                sdn_success = await cls._sdn_client.block(ip, ttl)
+                if sdn_success:
+                    success = True
             except Exception as e:
                 logger.error("SDN block failed", error=str(e))
                 if SDN_FALLBACK_TO_IPSET:
                     logger.warning("Falling back to ipset for block", ip=ip)
-                    await cls._legacy_block(ip, ttl)
-                    success = True
+                    legacy_success = await cls._legacy_block(ip, ttl)
+                    if legacy_success:
+                        success = True
         else:
-            await cls._legacy_block(ip, ttl)
-            success = True
+            legacy_success = await cls._legacy_block(ip, ttl)
+            if legacy_success:
+                success = True
             
         if success and ttl == 0 and cls._redis_client:
             loop = asyncio.get_running_loop()
@@ -398,7 +441,7 @@ class ActiveFirewall:
         return success
 
     @classmethod
-    async def _legacy_block(cls, ip: str, ttl: int = 0):
+    async def _legacy_block(cls, ip: str, ttl: int = 0) -> bool:
         try:
             await cls._ensure_kernel_sets()
             ip_obj = ipaddress.ip_address(ip)
@@ -408,8 +451,10 @@ class ActiveFirewall:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: subprocess.run(["sudo", "ipset", "add", target_set, ip, "timeout", str(ttl), "-!"], check=True))
             logger.warning(f"Legacy {'IPv6 ' if is_v6 else ''}Block (ipset)", ip=ip, ttl=ttl)
+            return True
         except Exception as e:
             logger.error("Legacy block failed", ip=ip, error=str(e))
+            return False
 
     @classmethod
     async def rate_limit(cls, ip: str):
@@ -450,6 +495,14 @@ class ActiveFirewall:
         cls._status_cache = {}
         cls._status_cache_time = 0
         
+        # Remove from eBPF map if enabled
+        if EBPF_ENABLED and cls._ebpf_manager:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, cls._ebpf_manager.unblock_ip, ip)
+            except Exception as e:
+                logger.error("eBPF unblock failed", error=str(e))
+        
         if cls._backend == "sdn" and cls._sdn_client:
             try:
                 await cls._sdn_client.unblock(ip)
@@ -480,6 +533,13 @@ class ActiveFirewall:
     async def is_blocked(cls, ip: str) -> bool:
         """Checks if an IP is currently in the block set (permanent or temporary)."""
         if not cls._initialized: await cls._initialize()
+        
+        # Check eBPF map if enabled
+        if EBPF_ENABLED and cls._ebpf_manager:
+            loop = asyncio.get_running_loop()
+            if await loop.run_in_executor(None, cls._ebpf_manager.is_blocked, ip):
+                return True
+
         await cls._ensure_kernel_sets()
         try:
             ip_obj = ipaddress.ip_address(ip)
@@ -645,16 +705,14 @@ class ActiveFirewall:
                 logger.error("SDN micro block failed", error=str(e))
                 if SDN_FALLBACK_TO_IPSET:
                     logger.warning("Falling back to legacy micro block", ip=ip)
-                    await cls._legacy_micro_block(ip, protocol, dport, ttl)
-                    success = True
+                    success = await cls._legacy_micro_block(ip, protocol, dport, ttl)
         else:
-            await cls._legacy_micro_block(ip, protocol, dport, ttl)
-            success = True
+            success = await cls._legacy_micro_block(ip, protocol, dport, ttl)
 
         return success
 
     @classmethod
-    async def _legacy_micro_block(cls, ip: str, protocol: str, dport: int, ttl: int = 300):
+    async def _legacy_micro_block(cls, ip: str, protocol: str, dport: int, ttl: int = 300) -> bool:
         try:
             await cls._ensure_kernel_sets()
             ip_obj = ipaddress.ip_address(ip)
@@ -692,10 +750,10 @@ class ActiveFirewall:
                         logger.error("Failed to delete expired legacy micro-block rule", error=str(err))
                 
                 asyncio.create_task(cleanup())
-
-
+            return True
         except Exception as e:
             logger.error("Legacy micro block failed", ip=ip, error=str(e))
+            return False
 
     @classmethod
     async def redirect_to_honeypot(cls, ip: str, ttl: int = 300) -> bool:
@@ -718,21 +776,19 @@ class ActiveFirewall:
                 logger.error("SDN honeypot redirect failed", error=str(e))
                 if SDN_FALLBACK_TO_IPSET:
                     logger.warning("Falling back to legacy honeypot redirect", ip=ip)
-                    await cls._legacy_redirect_to_honeypot(ip, ttl)
-                    success = True
+                    success = await cls._legacy_redirect_to_honeypot(ip, ttl)
         else:
-            await cls._legacy_redirect_to_honeypot(ip, ttl)
-            success = True
+            success = await cls._legacy_redirect_to_honeypot(ip, ttl)
 
         return success
 
     @classmethod
-    async def _legacy_redirect_to_honeypot(cls, ip: str, ttl: int = 300):
+    async def _legacy_redirect_to_honeypot(cls, ip: str, ttl: int = 300) -> bool:
         try:
             await cls._ensure_kernel_sets()
             if ipaddress.ip_address(ip).version == 6:
                 logger.warning("Skipping IPv6 redirect (not yet supported)", ip=ip)
-                return
+                return False
 
             loop = asyncio.get_running_loop()
             
@@ -764,6 +820,31 @@ class ActiveFirewall:
                         logger.error("Failed to delete expired legacy DNAT redirection rule", error=str(err))
                 
                 asyncio.create_task(cleanup())
-
+            return True
         except Exception as e:
             logger.error("Legacy honeypot redirect failed", ip=ip, error=str(e))
+            return False
+
+    @classmethod
+    async def quarantine_host(cls, ip: str, vlan_id: Optional[int] = None, ttl: int = 300) -> bool:
+        """Quarantines a host into a VLAN isolation sandbox using SDN."""
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            logger.error("Invalid IP address format for quarantine", ip=ip)
+            return False
+
+        if not cls._initialized: await cls._initialize()
+        cls._status_cache = {}
+        cls._status_cache_time = 0
+
+        success = False
+        if cls._backend == "sdn" and cls._sdn_client:
+            try:
+                success = await cls._sdn_client.quarantine_host(ip, vlan_id, ttl)
+            except Exception as e:
+                logger.error("SDN quarantine steering failed", error=str(e))
+        else:
+            logger.warning("Quarantine steering requested but SDN backend is not active.", ip=ip)
+
+        return success

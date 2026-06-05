@@ -68,6 +68,8 @@ class WorkerPool:
             
         # Tier 2: Deep Inference Queue
         self.deep_queue = asyncio.Queue()
+        import httpx
+        self.http_client = httpx.AsyncClient(timeout=2.0)
 
     async def _get_fallback_geoip(self, ip: str) -> Optional[dict]:
         """Fetch GeoIP data from a public API as a fallback."""
@@ -77,32 +79,22 @@ class WorkerPool:
             addr = _ip.ip_address(ip)
             if not addr.is_global:
                 return None  # Skip private/loopback/link-local/multicast
-            # Reassign ip to the validated and normalized string representation
-            # This prevents SSRF via malformed strings that bypass initial checks
-            # but behave maliciously in urllib
             ip = str(addr)
         except ValueError:
             return None
 
         if ip in self.geoip_fallback_cache:
             return self.geoip_fallback_cache[ip]
-            
-        def fetch():
-            import urllib.request
-            import json
-            try:
-                with urllib.request.urlopen(f"http://ip-api.com/json/{ip}", timeout=2) as response:
-                    if response.status == 200:
-                        return json.loads(response.read().decode())
-            except Exception:
-                return None
-            return None
 
-        loop = asyncio.get_running_loop()
-        record = await loop.run_in_executor(None, fetch)
-        if record and record.get("status") == "success":
-            self.geoip_fallback_cache[ip] = record
-            return record
+        try:
+            response = await self.http_client.get(f"http://ip-api.com/json/{ip}")
+            if response.status_code == 200:
+                record = response.json()
+                if record and record.get("status") == "success":
+                    self.geoip_fallback_cache[ip] = record
+                    return record
+        except Exception as e:
+            logger.debug("Failed to fetch fallback GeoIP", ip=ip, error=str(e))
         return None
 
     async def start(self):
@@ -558,6 +550,46 @@ class WorkerPool:
         cti_data = await cti.get_ip_reputation(src_ip)
         alert["enrichment"]["cti"] = cti_data
 
+        # Protocol Correlation Lookups from Redis
+        if rc.async_redis_client:
+            try:
+                dst_ip = alert.get("dst_ip")
+                dst_port = alert.get("dst_port")
+                
+                # 1. DNS Resolution Lookup
+                if dst_ip:
+                    resolved_domain = await rc.async_redis_client.get(f"sentinel_dns_resolve:{dst_ip}")
+                    if resolved_domain:
+                        alert["enrichment"]["resolved_domain"] = resolved_domain.decode()
+                
+                # Check source IP if destination was not resolved (e.g. inbound traffic)
+                if src_ip and not alert["enrichment"].get("resolved_domain"):
+                    resolved_domain_src = await rc.async_redis_client.get(f"sentinel_dns_resolve:{src_ip}")
+                    if resolved_domain_src:
+                        alert["enrichment"]["resolved_domain_src"] = resolved_domain_src.decode()
+                
+                # 2. HTTP Correlation
+                if dst_ip and dst_port:
+                    http_key = f"sentinel_http_cache:{src_ip}:{dst_ip}:{dst_port}"
+                    http_data = await rc.async_redis_client.get(http_key)
+                    if http_data:
+                        alert["enrichment"]["http_details"] = orjson.loads(http_data)
+                
+                # 3. TLS Certificate Metadata Correlation
+                if dst_ip and dst_port:
+                    tls_key = f"sentinel_tls_cache:{src_ip}:{dst_ip}:{dst_port}"
+                    tls_data = await rc.async_redis_client.get(tls_key)
+                    if tls_data:
+                        tls_details = orjson.loads(tls_data)
+                        alert["enrichment"]["tls_details"] = tls_details
+                        # Populate top-level JA3 fields if missing from raw event
+                        if not alert.get("ja3_hash") and tls_details.get("ja3_hash"):
+                            alert["ja3_hash"] = tls_details["ja3_hash"]
+                        if not alert.get("ja3_string") and tls_details.get("ja3_string"):
+                            alert["ja3_string"] = tls_details["ja3_string"]
+            except Exception as e:
+                logger.error("Failed to perform protocol correlation lookup", error=str(e))
+
     async def stop(self):
         self.running = False
         for t in self.worker_tasks:
@@ -571,6 +603,8 @@ class WorkerPool:
 
         from ml_engine.cti_client import close_cti_client
         await close_cti_client()
+        if hasattr(self, "http_client") and self.http_client:
+            await self.http_client.aclose()
         logger.info("Worker pool stopped")
 
     def get_status(self):

@@ -1,4 +1,5 @@
 import asyncio
+import aiofiles
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import structlog
@@ -37,10 +38,10 @@ async def submit_feedback(feedback: AlertFeedback):
         }
         
         # Ensure log dir exists
-        FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(FEEDBACK_LOG.parent.mkdir, parents=True, exist_ok=True)
         
-        with open(FEEDBACK_LOG, "a") as f:
-            f.write(json.dumps(feedback_entry) + "\n")
+        async with aiofiles.open(FEEDBACK_LOG, "a") as f:
+            await f.write(json.dumps(feedback_entry) + "\n")
             
         logger.info("Analyst feedback recorded", alert_id=feedback.alert_id, correction=feedback.correction)
         return {"status": "success", "message": "Feedback recorded for retraining pipeline"}

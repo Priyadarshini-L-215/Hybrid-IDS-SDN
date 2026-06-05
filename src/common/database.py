@@ -151,14 +151,18 @@ class DatabaseHandler:
                 try:
                     await conn.execute(m)
                 except sqlite3.OperationalError as e:
-                    if "duplicate column name" not in str(e).lower():
-                        logger.debug("Migration already applied or failed", sql=m, error=str(e))
+                    if "duplicate column name" in str(e).lower():
+                        logger.debug("Migration already applied (column exists)", sql=m)
+                    else:
+                        logger.error("Migration failed with critical error", sql=m, error=str(e))
+                        raise
 
             await conn.commit()
         except Exception as e:
             logger.error("Failed to initialize database", error=str(e))
             if conn:
                 await conn.rollback()
+            raise
 
     async def add_alert(self, alert_data: Dict[str, Any]):
         """Insert a new alert into the database."""

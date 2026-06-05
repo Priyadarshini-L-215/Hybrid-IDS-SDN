@@ -28,10 +28,13 @@ class AsyncAlertWriter:
 
     async def stop(self):
         """Gracefully stops the worker and flushes remaining alerts."""
+        if not self._running:
+            return
+        # Wait for the worker to finish processing the current queue while it is still running
+        await self.queue.join()
+        
         self._running = False
         if self._worker_task:
-            # Wait for the worker to finish processing the current queue
-            await self.queue.join()
             self._worker_task.cancel()
             try:
                 await self._worker_task

@@ -42,6 +42,80 @@ const toLowerText = (value) => String(value ?? '').toLowerCase();
 const containsText = (value, query) => toLowerText(value).includes(toLowerText(query));
 const toUpperText = (value, fallback = '') => (value == null ? fallback : String(value).toUpperCase());
 
+const parseQueryDSL = (query) => {
+  if (!query) return () => true;
+  const tokens = query.match(/("[^"]+"|[^\s"]+)+/g) || [];
+  const rules = [];
+  
+  tokens.forEach(token => {
+    const match = token.match(/^([a-zA-Z_]+)([:><=]+)(.+)$/);
+    if (match) {
+      const [, key, op, val] = match;
+      const cleanVal = val.replace(/^"|"$/g, '').toLowerCase();
+      const cleanKey = key.toLowerCase();
+      
+      rules.push((item) => {
+        let itemVal = '';
+        if (cleanKey === 'src' || cleanKey === 'src_ip') itemVal = item.src_ip;
+        else if (cleanKey === 'dst' || cleanKey === 'dst_ip') itemVal = item.dst_ip;
+        else if (cleanKey === 'proto' || cleanKey === 'protocol') itemVal = item.protocol;
+        else if (cleanKey === 'sig' || cleanKey === 'signature') itemVal = item.alert_sig;
+        else if (cleanKey === 'pred' || cleanKey === 'prediction') itemVal = item.prediction;
+        else if (cleanKey === 'mit' || cleanKey === 'mitigation') itemVal = item.mitigation;
+        else if (cleanKey === 'cat' || cleanKey === 'category') itemVal = item.category;
+        else if (cleanKey === 'score' || cleanKey === 'confidence' || cleanKey === 'conf') {
+          const scoreVal = parseFloat(cleanVal);
+          const itemScore = parseFloat(item.confidence || 0);
+          if (isNaN(scoreVal)) return false;
+          if (op === '>') return itemScore > scoreVal;
+          if (op === '>=') return itemScore >= scoreVal;
+          if (op === '<') return itemScore < scoreVal;
+          if (op === '<=') return itemScore <= scoreVal;
+          return itemScore === scoreVal;
+        } else if (cleanKey === 'sev' || cleanKey === 'severity') {
+          const sevVal = parseInt(cleanVal, 10);
+          const itemSev = parseInt(item.severity || 0, 10);
+          if (isNaN(sevVal)) return false;
+          if (op === '>') return itemSev > sevVal;
+          if (op === '>=') return itemSev >= sevVal;
+          if (op === '<') return itemSev < sevVal;
+          if (op === '<=') return itemSev <= sevVal;
+          return itemSev === sevVal;
+        } else {
+          return false;
+        }
+        
+        const strItemVal = String(itemVal || '').toLowerCase();
+        if (op === ':') {
+          return strItemVal.includes(cleanVal);
+        }
+        return false;
+      });
+    } else {
+      const cleanToken = token.replace(/^"|"$/g, '').toLowerCase();
+      rules.push((item) => {
+        return String(item.src_ip || '').toLowerCase().includes(cleanToken) ||
+               String(item.dst_ip || '').toLowerCase().includes(cleanToken) ||
+               String(item.prediction || '').toLowerCase().includes(cleanToken) ||
+               String(item.protocol || '').toLowerCase().includes(cleanToken) ||
+               String(item.alert_sig || '').toLowerCase().includes(cleanToken) ||
+               String(item.category || '').toLowerCase().includes(cleanToken);
+      });
+    }
+  });
+  
+  return (item) => rules.every(rule => rule(item));
+};
+
+const getHighlightTerm = (query) => {
+  if (!query) return '';
+  const match = query.match(/[:><=]+("[^"]+"|[^\s"]+)/);
+  if (match) {
+    return match[1].replace(/^"|"$/g, '');
+  }
+  return query;
+};
+
 const getFlagEmoji = (countryCode) => {
   if (!countryCode || countryCode === 'Unknown') return '🌐';
   const codePoints = countryCode
@@ -375,20 +449,25 @@ function App() {
       .slice(0, 5);
   }, [alerts]);
 
+  const highlightQuery = useMemo(() => getHighlightTerm(filterQuery), [filterQuery]);
+
   const filteredAlerts = useMemo(() => {
-    return alerts.filter(a => {
-      const matchesQuery = !filterQuery || 
-        containsText(a.src_ip, filterQuery) || 
-        containsText(a.prediction, filterQuery) ||
-        containsText(a.protocol, filterQuery);
-      
-      const matchesLevel = filterLevel === 'ALL' || 
-        (filterLevel === 'ATTACKS' && (containsText(a.prediction, 'attack') || containsText(a.prediction, 'anomaly'))) ||
-        (filterLevel === 'SUSPICIOUS' && containsText(a.prediction, 'suspicious')) ||
-        (filterLevel === 'NORMAL' && containsText(a.prediction, 'normal'));
+    try {
+      const evaluator = parseQueryDSL(filterQuery);
+      return alerts.filter(a => {
+        const matchesQuery = evaluator(a);
         
-      return matchesQuery && matchesLevel;
-    });
+        const matchesLevel = filterLevel === 'ALL' || 
+          (filterLevel === 'ATTACKS' && (containsText(a.prediction, 'attack') || containsText(a.prediction, 'anomaly'))) ||
+          (filterLevel === 'SUSPICIOUS' && containsText(a.prediction, 'suspicious')) ||
+          (filterLevel === 'NORMAL' && containsText(a.prediction, 'normal'));
+          
+        return matchesQuery && matchesLevel;
+      });
+    } catch (e) {
+      console.error("Query DSL parsing error:", e);
+      return alerts;
+    }
   }, [alerts, filterQuery, filterLevel]);
 
   const lastStatsRef = useRef({ processed: 0, attacks: 0 });
@@ -714,7 +793,7 @@ function App() {
                       <input 
                         type="text" 
                         className="filter-input" 
-                        placeholder="Filter by Source IP, Classification, or Protocol..." 
+                        placeholder="Filter alerts (e.g. src:192.168.1.1 proto:TCP score>80)..." 
                         value={filterQuery}
                         onChange={(e) => setFilterQuery(e.target.value)}
                       />
@@ -751,7 +830,7 @@ function App() {
                                             ip={alert.src_ip} 
                                             type={alert.event_type}
                                             onClick={(e) => { e.stopPropagation(); fetchNodeIntel(alert.src_ip); }} 
-                                            highlight={filterQuery}
+                                            highlight={highlightQuery}
                                           />
                                           <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>{alert.event_type === 'system_alert' ? 'Sentinel Internal' : (alert.enrichment?.city || 'Internal/Local')}</span>
                                         </div>
@@ -759,7 +838,7 @@ function App() {
                                     </td>
                                     <td>
                                       <Badge variant={isAttack ? 'danger' : isSuspicious ? 'warning' : 'success'}>
-                                        <HighlightText text={alert.prediction} highlight={filterQuery} />
+                                        <HighlightText text={alert.prediction} highlight={highlightQuery} />
                                       </Badge>
                                     </td>
                                     <td>
@@ -789,6 +868,35 @@ function App() {
                                                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Globe size={12} className="text-muted" /> {alert.enrichment?.location || 'Unknown'}</div>
                                                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><Network size={12} className="text-muted" /> {alert.enrichment?.asn || 'Internal'} {alert.enrichment?.isp && alert.enrichment.isp !== 'Unknown' ? `(${alert.enrichment.isp})` : ''}</div>
                                                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}><FileText size={12} className="text-muted" /> {alert.protocol?.toUpperCase()} / {alert.dst_port || '0'}</div>
+                                                {alert.enrichment?.resolved_domain && (
+                                                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', color: 'var(--primary)' }}>
+                                                    <Link size={12} /> Domain: {alert.enrichment.resolved_domain}
+                                                  </div>
+                                                )}
+                                                {alert.enrichment?.resolved_domain_src && (
+                                                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', color: 'var(--primary)' }}>
+                                                    <Link size={12} /> Domain (Src): {alert.enrichment.resolved_domain_src}
+                                                  </div>
+                                                )}
+                                                {alert.ja3_hash && (
+                                                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }} title={alert.ja3_string}>
+                                                    <Fingerprint size={12} className="text-warning" /> JA3: <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem' }}>{alert.ja3_hash}</span>
+                                                  </div>
+                                                )}
+                                                {alert.enrichment?.http_details && (
+                                                  <div style={{ borderLeft: '2px solid var(--primary)', paddingLeft: '8px', marginTop: '4px', fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                                                    <div style={{ fontWeight: 800 }}>HTTP {alert.enrichment.http_details.method}</div>
+                                                    <div style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{alert.enrichment.http_details.hostname}{alert.enrichment.http_details.url}</div>
+                                                    {alert.enrichment.http_details.user_agent && <div style={{ fontStyle: 'italic', opacity: 0.8 }}>UA: {alert.enrichment.http_details.user_agent}</div>}
+                                                  </div>
+                                                )}
+                                                {alert.enrichment?.tls_details && (
+                                                  <div style={{ borderLeft: '2px solid var(--warning)', paddingLeft: '8px', marginTop: '4px', fontSize: '0.65rem', color: 'var(--text-secondary)' }}>
+                                                    <div style={{ fontWeight: 800, color: 'var(--warning)' }}>TLS Certificate Details</div>
+                                                    <div>Subject: {alert.enrichment.tls_details.subject || 'N/A'}</div>
+                                                    <div>Issuer: {alert.enrichment.tls_details.issuer || 'N/A'}</div>
+                                                  </div>
+                                                )}
                                               </div>
                                             </div>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>

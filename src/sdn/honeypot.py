@@ -6,6 +6,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import aiofiles
 
 LOG_FILE = Path("data/logs/honeypot.jsonl")
 PORTS = [21, 22, 23, 80, 443, 3306, 3389, 5900, 8080]
@@ -28,6 +29,8 @@ class HoneypotServer:
         ip = addr[0]
 
         self.stats["total_connections"] += 1
+        if len(self.stats["unique_ips"]) >= 10000:
+            self.stats["unique_ips"].pop()
         self.stats["unique_ips"].add(ip)
 
         log_entry = {
@@ -58,14 +61,14 @@ class HoneypotServer:
         except Exception as e:
             log_entry["error"] = str(e)
         finally:
-            self.write_log(log_entry)
+            await self.write_log(log_entry)
             writer.close()
             await writer.wait_closed()
 
-    def write_log(self, entry):
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG_FILE, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+    async def write_log(self, entry):
+        await asyncio.to_thread(LOG_FILE.parent.mkdir, parents=True, exist_ok=True)
+        async with aiofiles.open(LOG_FILE, "a") as f:
+            await f.write(json.dumps(entry) + "\n")
 
 async def main():
     hp = HoneypotServer()

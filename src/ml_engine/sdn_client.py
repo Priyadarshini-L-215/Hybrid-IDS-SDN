@@ -117,6 +117,28 @@ class SDNClient:
             logger.error("SDN: Honeypot redirect connection error", error=str(e))
         return False
 
+    async def quarantine_host(self, ip: str, vlan_id: Optional[int] = None, ttl: int = 300) -> bool:
+        """Tells Ryu controller to isolate the specified source IP in a quarantine VLAN."""
+        try:
+            if vlan_id is None:
+                from common.config import QUARANTINE_VLAN_ID
+                vlan_id = QUARANTINE_VLAN_ID
+
+            client = self._async_client or httpx.AsyncClient(timeout=5.0)
+            resp = await client.post(
+                f"{self.api_url}/quarantine", 
+                json={"ip": ip, "vlan_id": vlan_id, "ttl": ttl}
+            )
+            if not self._async_client:
+                await client.aclose()
+            if resp.status_code == 200:
+                logger.info("SDN: Quarantined host into VLAN", ip=ip, vlan_id=vlan_id, ttl=ttl)
+                return True
+            logger.error("SDN: Quarantine failed", status=resp.status_code, body=resp.text)
+        except Exception as e:
+            logger.error("SDN: Quarantine connection error", error=str(e))
+        return False
+
     async def close(self):
         if self._async_client:
             await self._async_client.aclose()

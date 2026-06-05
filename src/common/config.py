@@ -44,7 +44,8 @@ def refresh_config():
            BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, DEV_MODE, \
            ALIENTVAULT_KEY, PCAP_ENABLED, SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, \
            SDN_BRIDGE_NAME, SDN_HONEYPOT_IP, SDN_FALLBACK_TO_IPSET, \
-           BATCH_SIZE, BATCH_FLUSH_INTERVAL, REDIS_DB, AUTOENCODER_THRESHOLD, DB_RETENTION_DAYS
+           BATCH_SIZE, BATCH_FLUSH_INTERVAL, REDIS_DB, AUTOENCODER_THRESHOLD, DB_RETENTION_DAYS, \
+           EBPF_ENABLED, EBPF_INTERFACE, QUARANTINE_VLAN_ID
     
     YAML_CONFIG = _load_yaml_config()
     
@@ -75,6 +76,9 @@ def refresh_config():
     REPUTATION_PERM_BLOCK = get_cfg("mitigation.reputation_perm_block", 50.0)
     BLOCK_TTL = get_cfg("mitigation.block_ttl", 300)
     RATE_LIMIT_PER_SEC = get_cfg("mitigation.rate_limit_per_sec", 5)
+    EBPF_ENABLED = get_cfg("mitigation.ebpf_enabled", False)
+    EBPF_INTERFACE = get_cfg("mitigation.ebpf_interface", "eth0")
+    QUARANTINE_VLAN_ID = get_cfg("mitigation.quarantine_vlan_id", 99)
     
     ACTIVE_MODEL_FILE = get_cfg("detection.ml.active_model", "rf_pipeline.onnx")
     ACTIVE_SCALER_FILE = get_cfg("detection.ml.active_scaler", "scaler.pkl")
@@ -124,6 +128,9 @@ REPUTATION_TEMP_BLOCK = 25.0
 REPUTATION_PERM_BLOCK = 50.0
 BLOCK_TTL = 300
 RATE_LIMIT_PER_SEC = 5
+EBPF_ENABLED = False
+EBPF_INTERFACE = "eth0"
+QUARANTINE_VLAN_ID = 99
 ACTIVE_MODEL_FILE = "rf_model.pkl"
 ACTIVE_SCALER_FILE = "scaler.pkl"
 DEV_MODE = False

@@ -20,6 +20,9 @@ forensics:
   pcap_enabled: true
 mitigation:
   block_ttl: 300
+  ebpf_enabled: false
+  ebpf_interface: eth0
+  quarantine_vlan_id: 99
   rate_limit_per_sec: 5
   reputation_limit: 10.0
   reputation_perm_block: 50.0

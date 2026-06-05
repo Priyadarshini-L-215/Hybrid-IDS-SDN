@@ -68,11 +68,13 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
     """
     alert_info = event.get("alert", {})
     final_classification = prediction.get("prediction", prediction.get("classification", "normal"))
-    final_confidence = safe_float(prediction.get("confidence") or 0.0)
-
-    # Normalize confidence if it's already in [0, 100]
-    if final_confidence > 1.0:
-        final_confidence = final_confidence / 100.0
+    if "final_score" in prediction:
+        final_confidence = safe_float(prediction["final_score"])
+    else:
+        final_confidence = safe_float(prediction.get("confidence") or 0.0)
+        # Normalize confidence if it's already in [0, 100]
+        if final_confidence > 1.0:
+            final_confidence = final_confidence / 100.0
 
     # Note: Signature integration is now handled by DecisionEngine to allow for nuanced confidence.
     sig_present = event.get("event_type") == "alert"

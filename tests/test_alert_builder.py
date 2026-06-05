@@ -143,3 +143,20 @@ def test_build_alert_payload_generic_flow():
     prediction_attack = {"classification": "suspicious"}
     payload_attack = build_alert_payload(event, prediction_attack)
     assert payload_attack["alert_sig"] == "UDP Potential Probe (Port 53)"
+
+
+def test_build_alert_payload_low_confidence_normalization():
+    event = {
+        "event_type": "flow",
+        "proto": "UDP",
+        "dst_port": 53
+    }
+    # Test case representing a flow with a real confidence of 0.76% (final_score = 0.0076)
+    prediction = {
+        "classification": "normal",
+        "confidence": 0.76,
+        "final_score": 0.0076
+    }
+    payload = build_alert_payload(event, prediction)
+    assert payload["confidence"] == 0.76
+

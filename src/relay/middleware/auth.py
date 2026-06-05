@@ -17,6 +17,7 @@ Usage:
 
 import os
 import logging
+import secrets
 from fastapi import Security, HTTPException, status
 from fastapi.security import APIKeyHeader
 
@@ -52,7 +53,7 @@ async def require_api_key(api_key: str = Security(_api_key_header)):
             detail="Missing API key. Provide the X-Sentinel-Key header.",
         )
 
-    if api_key != _API_KEY:
+    if not secrets.compare_digest(api_key, _API_KEY):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key.",

@@ -35,6 +35,9 @@ class MitigationConfig(BaseModel):
     reputation_limit: float = Field(10.0, ge=0)
     reputation_temp_block: float = Field(25.0, ge=0)
     reputation_perm_block: float = Field(50.0, ge=0)
+    ebpf_enabled: bool = Field(False)
+    ebpf_interface: str = Field("eth0")
+    quarantine_vlan_id: int = Field(99, ge=1, le=4094)
 
     @model_validator(mode='after')
     def validate_reputation_tiers(self):

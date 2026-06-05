@@ -66,6 +66,10 @@ class AnomalyScorer:
         Scales MSE using robust statistics (Median and MAD) instead of sensitive mean/std.
         Robust Z-Score = 0.6745 * (mse - median) / MAD
         """
+        with self._lock:
+            return self._robust_scale_mse_unlocked(mse, protocol)
+
+    def _robust_scale_mse_unlocked(self, mse: float, protocol: str) -> float:
         window = self._get_window(protocol)
         if len(window) < self.min_samples:
             return 0.0
@@ -113,60 +117,63 @@ class AnomalyScorer:
 
     def flush_quarantine(self):
         """Merges expired, clean quarantine entries into the active VAE baseline."""
-        now = time.time()
         with self._lock:
-            if self._baseline_frozen:
-                # SOTA Auto-Unfreeze Cooldown: Check if 5 minutes have elapsed since last incident
-                if now - self._last_incident_time > 300.0:
-                    self._baseline_frozen = False
-                    logger.info("Zero-Trust ML: Cooldown period elapsed. Baseline updates UNFROZEN automatically.")
-                else:
-                    # Under a baseline freeze, discard expired quarantine elements to prevent contamination
-                    discard_count = 0
-                    keep = []
-                    for item in self._quarantine_queue:
-                        if now - item[0] > self._quarantine_ttl:
-                            discard_count += 1
-                        else:
-                            keep.append(item)
-                    self._quarantine_queue = keep
-                    if discard_count > 0:
-                        logger.debug("Discarded quarantined flows during active freeze", count=discard_count)
-                    return
+            self._flush_quarantine_unlocked()
 
-            to_merge = []
-            keep = []
-            for item in self._quarantine_queue:
-                if now - item[0] > self._quarantine_ttl:
-                    to_merge.append(item)
-                else:
-                    keep.append(item)
-            self._quarantine_queue = keep
-
-            if not to_merge:
+    def _flush_quarantine_unlocked(self):
+        now = time.time()
+        if self._baseline_frozen:
+            # SOTA Auto-Unfreeze Cooldown: Check if 5 minutes have elapsed since last incident
+            if now - self._last_incident_time > 300.0:
+                self._baseline_frozen = False
+                logger.info("Zero-Trust ML: Cooldown period elapsed. Baseline updates UNFROZEN automatically.")
+            else:
+                # Under a baseline freeze, discard expired quarantine elements to prevent contamination
+                discard_count = 0
+                keep = []
+                for item in self._quarantine_queue:
+                    if now - item[0] > self._quarantine_ttl:
+                        discard_count += 1
+                    else:
+                        keep.append(item)
+                self._quarantine_queue = keep
+                if discard_count > 0:
+                    logger.debug("Discarded quarantined flows during active freeze", count=discard_count)
                 return
 
-            for _, proto, mse, latent_vector, _ in to_merge:
-                window = self._get_window(proto)
-                window.append(mse)
-                self._latent_window.append(latent_vector)
-                self._cov_sample_count += 1
+        to_merge = []
+        keep = []
+        for item in self._quarantine_queue:
+            if now - item[0] > self._quarantine_ttl:
+                to_merge.append(item)
+            else:
+                keep.append(item)
+        self._quarantine_queue = keep
 
-            logger.debug("Merged clean quarantined flows into baseline", count=len(to_merge))
+        if not to_merge:
+            return
 
-            # Recalculate latent stats periodically from normal window
-            if self._cov_sample_count >= 200 and len(self._latent_window) >= 200:
-                try:
-                    arr = np.array(self._latent_window)
-                    self._latent_mean = np.mean(arr, axis=0)
-                    cov = np.cov(arr.T)
-                    # Add ridge regularization for invertibility
-                    cov += np.eye(cov.shape[0]) * 1e-6
-                    self._latent_cov_inv = np.linalg.inv(cov)
-                    self._cov_sample_count = 0
-                    logger.debug("Latent covariance updated", dim=arr.shape[1])
-                except Exception as e:
-                    logger.warning("Covariance update failed", error=str(e))
+        for _, proto, mse, latent_vector, _ in to_merge:
+            window = self._get_window(proto)
+            window.append(mse)
+            self._latent_window.append(latent_vector)
+            self._cov_sample_count += 1
+
+        logger.debug("Merged clean quarantined flows into baseline", count=len(to_merge))
+
+        # Recalculate latent stats periodically from normal window
+        if self._cov_sample_count >= 200 and len(self._latent_window) >= 200:
+            try:
+                arr = np.array(self._latent_window)
+                self._latent_mean = np.mean(arr, axis=0)
+                cov = np.cov(arr.T)
+                # Add ridge regularization for invertibility
+                cov += np.eye(cov.shape[0]) * 1e-6
+                self._latent_cov_inv = np.linalg.inv(cov)
+                self._cov_sample_count = 0
+                logger.debug("Latent covariance updated", dim=arr.shape[1])
+            except Exception as e:
+                logger.warning("Covariance update failed", error=str(e))
 
     def update_latent_stats(self, latent_vectors: np.ndarray):
         """
@@ -180,59 +187,64 @@ class AnomalyScorer:
         Falls back to 0.0 if covariance not yet computed to prevent cold-start anomalies.
         """
         with self._lock:
-            if self._latent_cov_inv is None or self._latent_mean is None:
-                # Fallback to 0.0 if stats not ready
-                return 0.0
-            diff = latent_vector - self._latent_mean
-            return float(np.sqrt(diff @ self._latent_cov_inv @ diff))
+            return self._mahalanobis_score_unlocked(latent_vector)
+
+    def _mahalanobis_score_unlocked(self, latent_vector: np.ndarray) -> float:
+        if self._latent_cov_inv is None or self._latent_mean is None:
+            # Fallback to 0.0 if stats not ready
+            return 0.0
+        diff = latent_vector - self._latent_mean
+        return float(np.sqrt(diff @ self._latent_cov_inv @ diff))
 
     def score(self, mse: float, latent_vector: np.ndarray, protocol: str, src_ip: Optional[str] = None) -> float:
         """
         Returns normalized anomaly score in [0, 1].
         Combines MSE percentile rank, robust MAD z-score, and Mahalanobis distance.
         """
-        # Proactively flush quarantine
-        self.flush_quarantine()
-
         with self._lock:
+            # 1. Proactively flush quarantine
+            self._flush_quarantine_unlocked()
+
+            # 2. Get dynamic threshold
             threshold = self._dynamic_threshold(protocol)
 
-        maha = self.mahalanobis_score(latent_vector)
-        # Handle NaN from Mahalanobis (e.g. if latent vector has NaNs)
-        if np.isnan(maha):
-            maha_norm = 0.0
-        else:
-            # Normalize (10.0 = heuristic cap, adjust based on latent dim)
-            maha_norm = min(maha / 10.0, 1.0) 
+            # 3. Calculate Mahalanobis score
+            maha = self._mahalanobis_score_unlocked(latent_vector)
+            
+            # 4. Calculate robust MAD scaled score
+            robust_norm = self._robust_scale_mse_unlocked(mse, protocol)
 
-        # Calculate robust MAD scaled score
-        robust_norm = self.robust_scale_mse(mse, protocol)
+            # Handle NaN from Mahalanobis (e.g. if latent vector has NaNs)
+            if np.isnan(maha):
+                maha_norm = 0.0
+            else:
+                # Normalize (10.0 = heuristic cap, adjust based on latent dim)
+                maha_norm = min(maha / 10.0, 1.0) 
 
-        if threshold == float("inf"):
-            # Permissive baseline while gathering initial samples
-            mse_norm = 0.0
-        elif threshold <= 0:
-            # If threshold is 0, any MSE > 0 is anomalous, but 0/0 is 0
-            mse_norm = 1.0 if mse > 0 else 0.0
-        else:
-            # How far past the threshold? (e.g. 2x threshold = 1.0)
-            mse_norm = min(mse / threshold, 1.0) 
+            if threshold == float("inf"):
+                # Permissive baseline while gathering initial samples
+                mse_norm = 0.0
+            elif threshold <= 0:
+                # If threshold is 0, any MSE > 0 is anomalous, but 0/0 is 0
+                mse_norm = 1.0 if mse > 0 else 0.0
+            else:
+                # How far past the threshold? (e.g. 2x threshold = 1.0)
+                mse_norm = min(mse / threshold, 1.0) 
 
-        # Final safety check for NaN
-        if np.isnan(mse_norm): mse_norm = 0.0
-        if np.isnan(maha_norm): maha_norm = 0.0
+            # Final safety check for NaN
+            if np.isnan(mse_norm): mse_norm = 0.0
+            if np.isnan(maha_norm): maha_norm = 0.0
 
-        # Zero-trust blend: 50% percentile-MSE, 50% robust MAD z-score
-        blended_mse = 0.5 * mse_norm + 0.5 * robust_norm
+            # Zero-trust blend: 50% percentile-MSE, 50% robust MAD z-score
+            blended_mse = 0.5 * mse_norm + 0.5 * robust_norm
 
-        # Weighted combination: 60% Mahalanobis, 40% blended-MSE
-        combined = 0.6 * maha_norm + 0.4 * blended_mse
-        
-        # Only update baselines with normal traffic (prevent poisoning from attacks)
-        if combined < 0.6:
-            with self._lock:
+            # Weighted combination: 60% Mahalanobis, 40% blended-MSE
+            combined = 0.6 * maha_norm + 0.4 * blended_mse
+            
+            # Only update baselines with normal traffic (prevent poisoning from attacks)
+            if combined < 0.6:
                 if not self._baseline_frozen:
                     # Append to quarantine queue for verification hold instead of immediate baseline inclusion
                     self._quarantine_queue.append((time.time(), protocol, mse, latent_vector, src_ip))
 
-        return round(float(combined), 4)
+            return round(float(combined), 4)

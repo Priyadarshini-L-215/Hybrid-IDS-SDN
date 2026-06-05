@@ -18,13 +18,16 @@ try:
 except ImportError:
     # Dummy fallbacks for imports so the module can be imported without Ryu/Webob installed
     class DummyRyuApp:
-        pass
+        def __init__(self, *args, **kwargs):
+            import logging
+            self.logger = logging.getLogger("DummyRyuApp")
     class DummyControllerBase:
         def __init__(self, *args, **kwargs):
             pass
     class DummyResponse:
         def __init__(self, *args, **kwargs):
-            pass
+            self.status = kwargs.get('status', 200)
+            self.body = kwargs.get('body', '')
     app_manager = type('dummy', (), {'RyuApp': DummyRyuApp})
     ControllerBase = DummyControllerBase
     Response = DummyResponse
@@ -114,6 +117,21 @@ class SentinelRestController(ControllerBase):
         except Exception as e:
             return Response(status=500, body=str(e))
 
+    @route('sentinel', url + '/quarantine', methods=['POST'])
+    def quarantine_ip(self, req, **kwargs):
+        try:
+            data = json.loads(req.body)
+            ip = data.get('ip')
+            vlan_id = data.get('vlan_id')
+            ttl = data.get('ttl', 300)
+            if not ip or vlan_id is None:
+                return Response(status=400, body='Missing ip or vlan_id parameter')
+            
+            self.sentinel_app.add_quarantine_flow(ip, int(vlan_id), ttl)
+            return Response(status=200, body=f'Quarantined {ip} into VLAN {vlan_id}')
+        except Exception as e:
+            return Response(status=500, body=str(e))
+
 # --- RYU APPLICATION ---
 
 class SentinelController(app_manager.RyuApp):
@@ -124,6 +142,7 @@ class SentinelController(app_manager.RyuApp):
         super(SentinelController, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
         self.block_list = set()
+        self.quarantine_list = {} # ip -> vlan_id
         self.datapaths = {} # dpid -> datapath object
         
         # Register REST API
@@ -179,6 +198,9 @@ class SentinelController(app_manager.RyuApp):
                 self.logger.info(f"Sentinel Controller: Block flow for {ip} expired. Removing from block_list.")
                 if ip in self.block_list:
                     self.block_list.remove(ip)
+                if ip in self.quarantine_list:
+                    self.logger.info(f"Sentinel Controller: Quarantine flow for {ip} expired. Removing from quarantine_list.")
+                    self.quarantine_list.pop(ip, None)
 
     def add_block_flow(self, ip, ttl=0):
         """Installs a DROP flow for the specified source IP on all connected switches."""
@@ -195,10 +217,12 @@ class SentinelController(app_manager.RyuApp):
             self.logger.info(f" -> Flow installed on dpid {dpid}")
 
     def remove_block_flow(self, ip):
-        """Removes a DROP flow for the specified source IP from all switches."""
-        self.logger.info(f"Sentinel Controller: Removing DROP flow for {ip}")
+        """Removes a DROP or QUARANTINE flow for the specified source IP from all switches."""
+        self.logger.info(f"Sentinel Controller: Removing block/quarantine flows for {ip}")
         if ip in self.block_list:
             self.block_list.remove(ip)
+        if ip in self.quarantine_list:
+            self.quarantine_list.pop(ip, None)
             
         for dpid, datapath in self.datapaths.items():
             ofproto = datapath.ofproto
@@ -218,8 +242,33 @@ class SentinelController(app_manager.RyuApp):
         """Returns a list of currently blocked IPs and basic stats."""
         return {
             "blocked_ips": list(self.block_list),
+            "quarantined_ips": list(self.quarantine_list.keys()),
             "status": "active"
         }
+
+    def add_quarantine_flow(self, ip, vlan_id, ttl=300):
+        """Installs a flow that pushes a VLAN tag to isolate packets matching source IP."""
+        self.logger.info(f"Sentinel Controller: Pushing QUARANTINE flow for {ip} (VLAN: {vlan_id}, TTL: {ttl})")
+        self.quarantine_list[ip] = vlan_id
+
+        for dpid, datapath in self.datapaths.items():
+            parser = datapath.ofproto_parser
+            ofproto = datapath.ofproto
+
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ip)
+
+            # OpenFlow 1.3 actions to push VLAN tag
+            # 0x8100 is ETH_TYPE_8021Q
+            actions = [
+                parser.OFPActionPushVlan(0x8100),
+                # Set VLAN ID (vlan_id) with the OFPVID_PRESENT bit (0x1000 / 4096)
+                parser.OFPActionSetField(vlan_vid=vlan_id | 0x1000),
+                parser.OFPActionOutput(ofproto.OFPP_FLOOD)
+            ]
+
+            # Priority 200 to override normal forwarding flows
+            self.add_flow(datapath, 200, match, actions, hard_timeout=ttl)
+            self.logger.info(f" -> Quarantine VLAN flow installed on dpid {dpid}")
 
     def add_block_shape_flow(self, ip, protocol, dport, ttl=300):
         """Installs a DROP flow rule for a specific protocol shape (src IP, protocol, dst port)."""
@@ -281,6 +330,26 @@ class SentinelController(app_manager.RyuApp):
                 # Install a hard drop flow to avoid future PacketIn for this IP
                 match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src_ip)
                 self.add_flow(datapath, 100, match, [], hard_timeout=300)
+                return
+
+            if src_ip in self.quarantine_list:
+                vlan_id = self.quarantine_list[src_ip]
+                self.logger.info(f"Packet from quarantined IP {src_ip} tagged with VLAN {vlan_id}.")
+                match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src_ip)
+                actions = [
+                    parser.OFPActionPushVlan(0x8100),
+                    parser.OFPActionSetField(vlan_vid=vlan_id | 0x1000),
+                    parser.OFPActionOutput(ofproto.OFPP_FLOOD)
+                ]
+                self.add_flow(datapath, 100, match, actions, hard_timeout=300)
+                
+                # Send packet out
+                data = None
+                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    data = msg.data
+                out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                          in_port=in_port, actions=actions, data=data)
+                datapath.send_msg(out)
                 return
 
         # 2. Standard L2 Learning

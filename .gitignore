@@ -125,6 +125,9 @@ desktop.ini
 *.pcapng
 user/test.pcapng
 GEMINI.md
+
+# --- Graphify Analysis Output ---
+graphify-out/
 data/logs/heartbeat.jsonl
 config/suricata/suricata.yaml.active
 data/logs/heartbeat.jsonl

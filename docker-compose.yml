@@ -74,5 +74,25 @@ services:
       - relay
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sentinel-prometheus
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    depends_on:
+      - relay
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: sentinel-grafana
+    ports:
+      - "4000:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
 volumes:
   redis_data:
