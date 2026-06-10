@@ -52,7 +52,7 @@ models/metrics.
 json
 models/retrain_*.txt
 models/feature_importance.csv
-new model*/
+
 
 # --- Data & Runtime Logs ---
 data/*.db
