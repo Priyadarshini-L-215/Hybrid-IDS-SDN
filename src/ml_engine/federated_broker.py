@@ -106,6 +106,40 @@ class FederatedThreatBroker:
         }
         return await self._publish(payload)
 
+    def serialize_weights(self, weights: list) -> list:
+        """Serializes a list of numpy weight arrays to base64 strings."""
+        import io
+        import base64
+        import numpy as np
+        serialized = []
+        for w in weights:
+            buf = io.BytesIO()
+            np.save(buf, w)
+            serialized.append(base64.b64encode(buf.getvalue()).decode('utf-8'))
+        return serialized
+
+    def deserialize_weights(self, serialized: list) -> list:
+        """Deserializes base64 strings back to a list of numpy weight arrays."""
+        import io
+        import base64
+        import numpy as np
+        weights = []
+        for s in serialized:
+            data = base64.b64decode(s.encode('utf-8'))
+            w = np.load(io.BytesIO(data), allow_pickle=False)
+            weights.append(w)
+        return weights
+
+    async def broadcast_vae_weights(self, encoder_weights: list, decoder_weights: list) -> int:
+        """Broadcasts cryptographically signed VAE model weights to peer nodes."""
+        payload = {
+            "node_id": self.node_id,
+            "type": "vae_weights",
+            "encoder": self.serialize_weights(encoder_weights),
+            "decoder": self.serialize_weights(decoder_weights)
+        }
+        return await self._publish(payload)
+
     async def _publish(self, payload: dict) -> int:
         try:
             client = rc.async_redis_client
@@ -130,7 +164,7 @@ class FederatedThreatBroker:
                 
                 message = json.dumps(wrapped)
                 subs = await client.publish(self.CHANNEL_NAME, message)
-                logger.debug("Broadcasted secure threat message", payload=payload, subscribers=subs)
+                logger.debug("Broadcasted secure threat message", type=payload.get("type"), subscribers=subs)
                 return subs
         except Exception as e:
             logger.error("Failed to publish secure threat update", error=str(e))
@@ -259,6 +293,31 @@ class FederatedThreatBroker:
                     await fp_store.add_suppression(src_ip, alert_sig)
                     logger.info("Federated Sync: Added suppression rule from verified peer", 
                                 peer=sender_id, src_ip=src_ip, alert_sig=alert_sig)
+                                
+            elif msg_type == "vae_weights":
+                logger.info("Federated Sync: Received new VAE weights from verified peer", peer=sender_id)
+                detector = getattr(ml_engine, "vae_detector", None)
+                if detector and detector.is_ready and not detector.use_onnx:
+                    try:
+                        enc_w = self.deserialize_weights(payload.get("encoder", []))
+                        dec_w = self.deserialize_weights(payload.get("decoder", []))
+                        
+                        # Set weights dynamically
+                        detector.encoder.set_weights(enc_w)
+                        detector.decoder.set_weights(dec_w)
+                        
+                        # Write back model weights to disk to ensure persistence across reboots
+                        from common.model_manifest import get_active_model_spec
+                        spec = get_active_model_spec()
+                        if spec and "vae" in spec:
+                            encoder_path = os.path.join("models", spec["vae"]["encoder"])
+                            decoder_path = os.path.join("models", spec["vae"]["decoder"])
+                            detector.encoder.save(encoder_path)
+                            detector.decoder.save(decoder_path)
+                            
+                        logger.info("Federated Sync: Successfully applied and saved VAE model weights from peer", peer=sender_id)
+                    except Exception as w_err:
+                        logger.error("Federated Sync: Failed to deserialize/apply model weights", error=str(w_err))
                                 
         except Exception as e:
             logger.error("Failed to process secured federated sync message", error=str(e))

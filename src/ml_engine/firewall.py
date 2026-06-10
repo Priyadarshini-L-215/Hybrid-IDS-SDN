@@ -38,6 +38,7 @@ class ActiveFirewall:
     _backend = "legacy" # Default to legacy
     _decay_task: Optional[asyncio.Task] = None
     _kernel_sets_initialized = False
+    _auditor = None
     
     # Redis Keys
     REDIS_REPUTATION_KEY = "sentinel_reputation"
@@ -92,6 +93,14 @@ class ActiveFirewall:
             # Start decay task instead of thread
             cls._decay_task = asyncio.create_task(cls._decay_loop())
             
+            # Start Mitigation Auditor
+            try:
+                from ml_engine.mitigation_auditor import MitigationAuditor
+                cls._auditor = MitigationAuditor()
+                cls._auditor.start()
+            except Exception as aud_err:
+                logger.error("Failed to start Mitigation Auditor", error=str(aud_err))
+            
             # Cold-start: Load existing high-reputation offenders from Redis into backend
             await cls._repopulate_from_reputation()
             
@@ -103,6 +112,13 @@ class ActiveFirewall:
         if cls._lock is None: return
         
         async with cls._lock:
+            if hasattr(cls, "_auditor") and cls._auditor:
+                try:
+                    await cls._auditor.stop()
+                except Exception as aud_err:
+                    logger.warning("Failed to stop Mitigation Auditor cleanly", error=str(aud_err))
+                cls._auditor = None
+
             if cls._decay_task:
                 cls._decay_task.cancel()
                 try:
@@ -564,7 +580,7 @@ class ActiveFirewall:
     _status_cache: Dict[str, Any] = {}
     _status_cache_time: float = 0
     _status_cache_ttl: int = 5
-    _status_lock = asyncio.Lock()
+    _status_lock: Optional[asyncio.Lock] = None
 
     @classmethod
     async def get_status(cls) -> Dict[str, Any]:
@@ -582,6 +598,8 @@ class ActiveFirewall:
     async def get_detailed_status(cls) -> Dict[str, Any]:
         """Returns actual list of IPs with TTL-based caching."""
         await cls._ensure_kernel_sets()
+        if cls._status_lock is None:
+            cls._status_lock = asyncio.Lock()
         async with cls._status_lock:
             now = time.time()
             if cls._status_cache and (now - cls._status_cache_time) < cls._status_cache_ttl:

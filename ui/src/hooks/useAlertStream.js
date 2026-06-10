@@ -215,6 +215,17 @@ export const useAlertStream = () => {
   };
 
   /**
+   * Manually update mitigation status for all alerts from a specific source IP
+   */
+  const updateAlertsMitigation = (ip, mitigation) => {
+    setAlerts(prev => prev.map(a => 
+      (a.src_ip === ip) 
+        ? { ...a, mitigation: mitigation } 
+        : a
+    ));
+  };
+
+  /**
    * DERIVED DATA: Incidents
    * Groups raw alerts by src_ip and prediction within the current session.
    */
@@ -247,6 +258,7 @@ export const useAlertStream = () => {
     alerts,
     incidents,
     updateAlert,
+    updateAlertsMitigation,
     streamStatus,
     error,
     isConnected

@@ -81,3 +81,49 @@ async def test_federated_broker_fp_suppression_sync():
         mock_fp_store.add_suppression.assert_awaited_once_with("192.168.1.99", "ET ATTACK Bruteforce")
     finally:
         await broker2.stop()
+
+@pytest.mark.asyncio
+async def test_federated_broker_vae_weights_sync():
+    """Verify that broadcasting VAE weights on Node 1 updates Node 2 in real-time."""
+    # Reset connection
+    await rc.close_async_redis()
+    await rc.init_async_redis()
+    
+    mock_encoder = MagicMock()
+    mock_decoder = MagicMock()
+    mock_detector = MagicMock()
+    mock_detector.is_ready = True
+    mock_detector.use_onnx = False
+    mock_detector.encoder = mock_encoder
+    mock_detector.decoder = mock_decoder
+    
+    mock_ml_engine = MagicMock()
+    mock_ml_engine.vae_detector = mock_detector
+    mock_fp_store = AsyncMock()
+    
+    broker1 = FederatedThreatBroker(node_id="node-1")
+    broker2 = FederatedThreatBroker(node_id="node-2")
+    
+    broker2.start(mock_ml_engine, mock_fp_store)
+    await asyncio.sleep(0.2)
+    
+    try:
+        import numpy as np
+        dummy_weights_enc = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
+        dummy_weights_dec = [np.array([5.0, 6.0])]
+        
+        subs = 0
+        for _ in range(30):
+            subs = await broker1.broadcast_vae_weights(dummy_weights_enc, dummy_weights_dec)
+            if subs > 0:
+                break
+            await asyncio.sleep(0.1)
+            
+        assert subs > 0, "No active subscribers found on threat exchange channel"
+        await asyncio.sleep(0.3)
+        
+        # Verify Node 2 successfully set the weights on the encoder/decoder
+        mock_encoder.set_weights.assert_called_once()
+        mock_decoder.set_weights.assert_called_once()
+    finally:
+        await broker2.stop()

@@ -4,17 +4,17 @@ detection:
   correlation_window: 10.0
   decision_engine:
     thresholds:
-      anomaly: 0.6
-      attack: 0.9
-      suspicious: 0.7
+      anomaly: 0.8
+      attack: 0.95
+      suspicious: 0.85
     weights:
       anomaly: 0.3
       ml: 0.7
       signature: 1.0
   dos_threshold: 100
   ml:
-    active_model: rf_model.pkl
-    active_scaler: scaler.pkl
+    active_model: Encrypted_C2_Model_V2.pkl
+    active_scaler: none
   port_scan_threshold: 25
 forensics:
   pcap_enabled: true

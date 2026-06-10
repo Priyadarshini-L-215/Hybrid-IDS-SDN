@@ -1,16 +1,16 @@
 {
     "active": {
         "feature_schema": {
-            "feature_count": 49,
-            "name": "UNSW-NB15"
+            "feature_count": 29,
+            "name": "Encrypted_C2"
         },
         "metadata": "model_meta.json",
-        "model_family": "vae_anomaly_detector",
-        "name": "v4.0.0-multi-retrained",
+        "model_family": "lightgbm_classifier",
+        "name": "v4.1.0-encrypted-c2",
         "rf": {
-            "model": "rf_model.pkl",
-            "onnx": "rf_model.pkl",
-            "scaler": "scaler.pkl"
+            "model": "Encrypted_C2_Model_V2.pkl",
+            "onnx": "",
+            "scaler": "none"
         },
         "vae": {
             "config": "vae_config.json",

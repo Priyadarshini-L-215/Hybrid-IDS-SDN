@@ -319,7 +319,7 @@ const ObservationsDisplay = ({ count }) => {
 // --- MAIN APPLICATION ---
 function App() {
   // ===== CUSTOM HOOKS (State Management) =====
-  const { alerts, incidents, updateAlert, isConnected, bufferSize } = useAlertStream();
+  const { alerts, incidents, updateAlert, updateAlertsMitigation, isConnected, bufferSize } = useAlertStream();
   const { health, setHealth, isHealthy, refresh: refreshHealth } = useHealthStatus();
   const { stats, chartData } = useStats(alerts);
 
@@ -509,8 +509,10 @@ function App() {
         newFinal = newFinal.filter(x => x !== ip);
         addLog(`System: Initiating manual authorization / lift ban for ${ip}`);
       } else if (action === 'block') {
-        if (!newPerm.includes(ip)) {
-          newPerm.push(ip);
+        newPerm = newPerm.filter(x => x !== ip);
+        newTemp = newTemp.filter(x => x !== ip);
+        if (!newFinal.includes(ip)) {
+          newFinal.push(ip);
         }
         addLog(`System: Initiating manual block for ${ip}`);
       } else if (action === 'block-final') {
@@ -547,6 +549,8 @@ function App() {
 
     try {
       await apiClient.post(`/api/mitigation/${action}`, { ip });
+      const mitigationText = (action === 'unblock' || action === 'unwhitelist') ? null : (action === 'whitelist' ? 'WHITELISTED' : 'BLOCKED');
+      updateAlertsMitigation(ip, mitigationText);
       refreshHealth(); // Refresh health status from hook
       if (selectedIp === ip) fetchNodeIntel(ip);
     } catch (e) { 
@@ -773,7 +777,7 @@ function App() {
                 <StatCard label="Threat Vectors" value={stats.attacks?.toLocaleString()} icon={Flame} color="var(--danger)" isLoading={!stats.processed_total && !isConnected} />
                 <StatCard 
                   label="Blocked Hosts" 
-                  value={(health?.ipset_detailed?.permanent_ips?.length || 0) + (health?.ipset_detailed?.temporary_ips?.length || 0)} 
+                  value={(health?.ipset_detailed?.permanent_ips?.length || 0) + (health?.ipset_detailed?.temporary_ips?.length || 0) + (health?.ipset_detailed?.final_blocked_ips?.length || 0)} 
                   icon={Shield} 
                   color="var(--success)" 
                   isLoading={!health}

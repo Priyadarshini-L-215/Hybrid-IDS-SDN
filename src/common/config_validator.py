@@ -74,19 +74,20 @@ class ConfigValidator:
             )
 
         feature_count = active.get("feature_schema", {}).get("feature_count")
-        if feature_count and feature_count != 49:
-            self.warnings.append(f"Manifest feature count is {feature_count}, expected 49 for the current VAE schema")
+        if feature_count and feature_count not in (49, 29):
+            self.warnings.append(f"Manifest feature count is {feature_count}, expected 49 (UNSW-NB15) or 29 (Encrypted C2)")
 
     def check_model_files(self):
         """Verify essential model files exist."""
         required_models = [
             ACTIVE_MODEL_FILE,
-            ACTIVE_SCALER_FILE,
             "vae_encoder.keras",
             "vae_decoder.keras",
             "vae_scaler.pkl",
             "features.json"
         ]
+        if ACTIVE_SCALER_FILE and ACTIVE_SCALER_FILE.lower() not in ("none", "null", ""):
+            required_models.append(ACTIVE_SCALER_FILE)
         
         for model in required_models:
             path = MODELS_DIR / model

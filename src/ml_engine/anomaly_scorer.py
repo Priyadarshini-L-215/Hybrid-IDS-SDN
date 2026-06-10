@@ -41,25 +41,63 @@ class AnomalyScorer:
             self._error_windows[proto] = collections.deque(maxlen=_WINDOW_SIZE)
         return self._error_windows[proto]
 
+    def _update_running_percentile(self, protocol: str, mse: float):
+        """Updates the running threshold using Robbins-Monro stochastic approximation (O(1))."""
+        proto = (protocol or "unknown").lower()
+        window = self._get_window(proto)
+        
+        if len(window) < self.min_samples:
+            return
+            
+        p = self.percentile / 100.0
+        
+        # Initialize running threshold if not cached
+        if proto not in self._threshold_cache or self._threshold_cache[proto] == float("inf"):
+            arr = np.array(list(window))
+            initial_t = float(np.percentile(arr, self.percentile))
+            self._threshold_cache[proto] = initial_t
+            self._update_counter[proto] = 0
+            return
+            
+        current_t = self._threshold_cache[proto]
+        
+        # Determine learning step size based on local variation (Robust MAD)
+        arr = np.array(list(window))
+        median = np.median(arr)
+        mad = np.median(np.abs(arr - median)) or 1e-6
+        eta = 0.005 * mad
+        
+        if mse > current_t:
+            new_t = current_t + eta * p
+        else:
+            new_t = current_t - eta * (1.0 - p)
+            
+        # Keep threshold reasonable (at least median)
+        self._threshold_cache[proto] = max(new_t, float(median))
+
+    def calibrate_on_fp(self, protocol: str, mse: float):
+        """Boosts the threshold when an admin-suppressed false positive is encountered."""
+        proto = (protocol or "unknown").lower()
+        with self._lock:
+            if proto in self._threshold_cache:
+                current_t = self._threshold_cache[proto]
+                if mse > current_t:
+                    self._threshold_cache[proto] = float(mse * 1.05)
+                    logger.warning("Adaptive Calibration: Boosted VAE threshold due to false positive feedback", 
+                                   protocol=proto, old_t=current_t, new_t=self._threshold_cache[proto])
+
     def _dynamic_threshold(self, protocol: str) -> float:
-        """Returns the current percentile-based threshold for this protocol (with caching)."""
+        """Returns the current percentile-based threshold for this protocol (O(1) cached)."""
         proto = (protocol or "unknown").lower()
         
-        # Return cached threshold if we've updated it recently
-        if proto in self._threshold_cache and self._update_counter.get(proto, 0) < 100:
-            self._update_counter[proto] += 1
-            return self._threshold_cache[proto]
-
-        window = self._get_window(protocol)
-        if len(window) < self.min_samples:
-            # Not enough samples yet — return a permissive default
-            return float("inf")
-        
-        # Expensive operation: convert deque to list and calculate percentile
-        threshold = float(np.percentile(list(window), self.percentile))
-        self._threshold_cache[proto] = threshold
-        self._update_counter[proto] = 0
-        return threshold
+        if proto not in self._threshold_cache:
+            window = self._get_window(protocol)
+            if len(window) < self.min_samples:
+                return float("inf")
+            arr = np.array(list(window))
+            self._threshold_cache[proto] = float(np.percentile(arr, self.percentile))
+            
+        return self._threshold_cache[proto]
 
     def robust_scale_mse(self, mse: float, protocol: str) -> float:
         """
@@ -156,6 +194,7 @@ class AnomalyScorer:
         for _, proto, mse, latent_vector, _ in to_merge:
             window = self._get_window(proto)
             window.append(mse)
+            self._update_running_percentile(proto, mse)
             self._latent_window.append(latent_vector)
             self._cov_sample_count += 1
 

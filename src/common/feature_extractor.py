@@ -97,6 +97,10 @@ class StatefulFeatureTracker:
         self.idx_dst_dport = {}
         self.idx_dst_sport = {}
         self.idx_src_dst = {}
+        
+        # Additional state for C2 features
+        self.connection_timestamps = {}  # (src_ip, dst_ip) -> deque(timestamps, maxlen=10)
+        self.src_dst_counts = {}  # src_ip -> Counter of dst_ips
 
     async def update(self, event_meta):
         async with self._lock:
@@ -113,6 +117,7 @@ class StatefulFeatureTracker:
         s, d = entry['src_ip'], entry['dst_ip']
         srv = entry['service']
         dp, sp = entry['dst_port'], entry['src_port']
+        t = entry.get('time')
         
         # Inlined dict updates for performance: 7 index updates per packet
         for idx, key in [
@@ -130,6 +135,34 @@ class StatefulFeatureTracker:
             else:
                 idx[key] = val
 
+        # Update C2 specific metrics if time is tracked
+        if t is not None:
+            key = (s, d)
+            if delta == 1:
+                if key not in self.connection_timestamps:
+                    self.connection_timestamps[key] = deque(maxlen=10)
+                self.connection_timestamps[key].append(t)
+                
+                if s not in self.src_dst_counts:
+                    self.src_dst_counts[s] = Counter()
+                self.src_dst_counts[s][d] += 1
+            else:
+                if key in self.connection_timestamps:
+                    try:
+                        self.connection_timestamps[key].remove(t)
+                    except ValueError:
+                        if self.connection_timestamps[key]:
+                            self.connection_timestamps[key].popleft()
+                    if not self.connection_timestamps[key]:
+                        del self.connection_timestamps[key]
+                
+                if s in self.src_dst_counts:
+                    self.src_dst_counts[s][d] -= 1
+                    if self.src_dst_counts[s][d] <= 0:
+                        del self.src_dst_counts[s][d]
+                    if not self.src_dst_counts[s]:
+                        del self.src_dst_counts[s]
+
     def get_ct_stats(self, src_ip, dst_ip, service, dst_port, src_port):
         """O(1) lookups instead of O(n) linear scan."""
         # Note: We don't hold the lock during read for maximum performance.
@@ -142,6 +175,27 @@ class StatefulFeatureTracker:
             'ct_src_dport_ltm': float(self.idx_dst_dport.get((dst_ip, dst_port), 0)),
             'ct_dst_sport_ltm': float(self.idx_dst_sport.get((dst_ip, src_port), 0)),
             'ct_dst_src_ltm': float(self.idx_src_dst.get((src_ip, dst_ip), 0))
+        }
+
+    def get_c2_stats(self, src_ip, dst_ip):
+        ts = list(self.connection_timestamps.get((src_ip, dst_ip), []))
+        if len(ts) >= 2:
+            import numpy as np
+            intervals = [ts[i] - ts[i-1] for i in range(1, len(ts))]
+            mean_val = float(np.mean(intervals))
+            std_val = float(np.std(intervals)) if len(intervals) >= 2 else 0.0
+        else:
+            mean_val = 0.0
+            std_val = 0.0
+            
+        freq = float(len(ts))
+        rep_count = float(len(self.src_dst_counts.get(src_ip, {})))
+        
+        return {
+            'connection_frequency': freq,
+            'repeated_destination_count': rep_count,
+            'beacon_interval_mean': mean_val,
+            'beacon_interval_std': std_val
         }
 
 # Singleton instance for the process
@@ -216,13 +270,210 @@ def get_proto_encoder():
                     logger.error(f"Failed to load {le_path}: {e}")
     return _LE_PROTO
 
+async def extract_c2_features_from_eve(event: dict, features: list) -> list | None:
+    event_type = event.get("event_type")
+    if event_type not in ("flow", "tls", "dns", "http", "alert"):
+        return None
+        
+    # Basic info
+    src_ip = event.get('src_ip', '0.0.0.0')
+    dst_ip = event.get('dest_ip', '0.0.0.0')
+    service = event.get('app_proto', 'unknown')
+    dst_port = int(event.get('dest_port', 0))
+    src_port = int(event.get('src_port', 0))
+    
+    # Get timestamp for tracking
+    timestamp_str = event.get("timestamp", "")
+    try:
+        from datetime import datetime
+        t = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00")).timestamp()
+    except:
+        t = time.time()
+        
+    # Update stateful tracker with time
+    await tracker.update({
+        'src_ip': src_ip, 
+        'dst_ip': dst_ip, 
+        'service': service, 
+        'dst_port': dst_port,
+        'src_port': src_port,
+        'time': t
+    })
+    
+    c2_stats = tracker.get_c2_stats(src_ip, dst_ip)
+    
+    # 1. ja3_present
+    ja3_present = 1.0 if event.get("tls", {}).get("ja3") else 0.0
+    
+    # 2-6. TLS certificate properties
+    tls_info = event.get("tls", {}) or {}
+    issuer_length = float(len(tls_info.get("issuerdn", "")))
+    subject_length = float(len(tls_info.get("subject", "")))
+    certificate_serial_length = float(len(tls_info.get("serial", "")))
+    certificate_fingerprint_length = float(len(tls_info.get("fingerprint", "")))
+    
+    certificate_validity_days = 0.0
+    try:
+        nb = tls_info.get("notbefore")
+        na = tls_info.get("notafter")
+        if nb and na:
+            nb = nb.split(".")[0].split("+")[0].rstrip("Z")
+            na = na.split(".")[0].split("+")[0].rstrip("Z")
+            dt_nb = datetime.fromisoformat(nb)
+            dt_na = datetime.fromisoformat(na)
+            certificate_validity_days = float((dt_na - dt_nb).days)
+    except:
+        pass
+        
+    # 7. self_signed_flag
+    self_signed_flag = 1.0 if tls_info.get("self_signed", False) else 0.0
+    
+    # 8. tls_version
+    tls_version = 0.0
+    version_str = tls_info.get("version", "")
+    if "1.3" in version_str: tls_version = 1.3
+    elif "1.2" in version_str: tls_version = 1.2
+    elif "1.1" in version_str: tls_version = 1.1
+    elif "1.0" in version_str: tls_version = 1.0
+    
+    # 9. sni_dns_mismatch
+    sni = tls_info.get("sni", "").lower()
+    dns_info = event.get("dns", {}) or {}
+    dns_query = dns_info.get("query", "").lower()
+    http_info = event.get("http", {}) or {}
+    http_host = http_info.get("hostname", "").lower()
+    
+    sni_dns_mismatch = 0.0
+    if sni:
+        if dns_query and sni != dns_query:
+            sni_dns_mismatch = 1.0
+        elif http_host and sni != http_host:
+            sni_dns_mismatch = 1.0
+            
+    # Helper to compute Shannon entropy
+    import math
+    def calculate_entropy(text: str) -> float:
+        if not text:
+            return 0.0
+        text_len = len(text)
+        frequencies = Counter(text)
+        entropy = 0.0
+        for count in frequencies.values():
+            p = count / text_len
+            entropy -= p * math.log2(p)
+        return float(entropy)
+        
+    # 10. domain_length
+    domain = dns_query or http_host or sni
+    domain_length = float(len(domain))
+    
+    # 11. subdomain_depth
+    subdomain_depth = float(domain.count(".")) if domain else 0.0
+    
+    # 12. dns_entropy
+    dns_entropy = calculate_entropy(domain)
+    
+    # 13. resolved_domain_count
+    answers = dns_info.get("answers", [])
+    resolved_domain_count = float(len(answers)) if isinstance(answers, list) else 0.0
+    
+    # 14. dynamic_dns_indicator
+    dynamic_dns_indicator = 0.0
+    if domain:
+        dyndns_suffixes = [".dyndns.org", ".no-ip.info", ".no-ip.org", ".ddns.net", ".duckdns.org", ".zapto.org"]
+        if any(domain.endswith(suffix) for suffix in dyndns_suffixes):
+            dynamic_dns_indicator = 1.0
+            
+    # 15. dns_ttl
+    dns_ttl = 0.0
+    if isinstance(answers, list) and answers:
+        ttls = [float(a.get("ttl", 0.0)) for a in answers if isinstance(a, dict) and "ttl" in a]
+        if ttls:
+            dns_ttl = float(max(ttls))
+            
+    # 16-20. HTTP properties
+    ua = http_info.get("http_user_agent", "")
+    user_agent_length = float(len(ua))
+    user_agent_entropy = calculate_entropy(ua)
+    
+    hostname_length = float(len(http_host))
+    url = http_info.get("url", "")
+    url_length = float(len(url))
+    url_entropy = calculate_entropy(url)
+    
+    # 21. http_method_is_post
+    method = http_info.get("http_method", "")
+    http_method_is_post = 1.0 if method.upper() == "POST" else 0.0
+    
+    # 22-26. Connection state/beaconing properties (from tracker)
+    connection_frequency = c2_stats['connection_frequency']
+    repeated_destination_count = c2_stats['repeated_destination_count']
+    beacon_interval_mean = c2_stats['beacon_interval_mean']
+    beacon_interval_std = c2_stats['beacon_interval_std']
+    
+    flow = event.get("flow", {}) or {}
+    session_duration = float(flow.get("age", 0.0))
+    
+    # 27-28. Ratios
+    pkts_in = float(flow.get("pkts_toclient", 0.0))
+    pkts_out = float(flow.get("pkts_toserver", 0.0))
+    packet_ratio = float(pkts_out / (pkts_in + pkts_out)) if (pkts_in + pkts_out) > 0.0 else 0.5
+    
+    bytes_in = float(flow.get("bytes_toclient", 0.0))
+    bytes_out = float(flow.get("bytes_toserver", 0.0))
+    byte_ratio = float(bytes_out / (bytes_in + bytes_out)) if (bytes_in + bytes_out) > 0.0 else 0.5
+    
+    # 29. is_standard_port
+    is_standard_port = 1.0 if dst_port in (80, 443, 8080, 8443) else 0.0
+    
+    feature_dict = {
+        'ja3_present': ja3_present,
+        'issuer_length': issuer_length,
+        'subject_length': subject_length,
+        'certificate_serial_length': certificate_serial_length,
+        'certificate_fingerprint_length': certificate_fingerprint_length,
+        'certificate_validity_days': certificate_validity_days,
+        'self_signed_flag': self_signed_flag,
+        'tls_version': tls_version,
+        'sni_dns_mismatch': sni_dns_mismatch,
+        'domain_length': domain_length,
+        'subdomain_depth': subdomain_depth,
+        'dns_entropy': dns_entropy,
+        'resolved_domain_count': resolved_domain_count,
+        'dynamic_dns_indicator': dynamic_dns_indicator,
+        'dns_ttl': dns_ttl,
+        'user_agent_length': user_agent_length,
+        'user_agent_entropy': user_agent_entropy,
+        'hostname_length': hostname_length,
+        'url_length': url_length,
+        'url_entropy': url_entropy,
+        'http_method_is_post': http_method_is_post,
+        'connection_frequency': connection_frequency,
+        'repeated_destination_count': repeated_destination_count,
+        'session_duration': session_duration,
+        'beacon_interval_mean': beacon_interval_mean,
+        'beacon_interval_std': beacon_interval_std,
+        'packet_ratio': packet_ratio,
+        'byte_ratio': byte_ratio,
+        'is_standard_port': is_standard_port
+    }
+    
+    feature_vector = []
+    for fn in features:
+        feature_vector.append(float(feature_dict.get(fn, 0.0)))
+        
+    return feature_vector
+
 @event_cache(maxsize=256)
 async def extract_features_from_eve(event: dict, features: list = None) -> list | None:
-    if event.get('event_type') not in ['flow', 'alert']:
-        return None
-    
     if features is None:
         features = load_feature_names()
+        
+    if features and "ja3_present" in features:
+        return await extract_c2_features_from_eve(event, features)
+        
+    if event.get('event_type') not in ['flow', 'alert']:
+        return None
     
     flow = event.get('flow', {})
     if not flow and 'raw' in event:

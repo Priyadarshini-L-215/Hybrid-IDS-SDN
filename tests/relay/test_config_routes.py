@@ -119,8 +119,10 @@ async def test_update_config_unknown_key(client):
     bad_config = dict(VALID_CONFIG)
     bad_config["nonexistent_section"] = {"foo": "bar"}
 
-    response = await client.post(
-        "/api/config",
-        json={"config": bad_config}
-    )
+    with patch("asyncio.to_thread", new_callable=AsyncMock), \
+         patch("common.config.refresh_config"):
+        response = await client.post(
+            "/api/config",
+            json={"config": bad_config}
+        )
     assert response.status_code == 200

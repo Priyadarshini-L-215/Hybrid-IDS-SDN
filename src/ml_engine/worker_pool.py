@@ -1,6 +1,7 @@
 import json
 import orjson
 import time
+import random
 import asyncio
 import structlog
 from typing import Optional, List, Callable
@@ -167,9 +168,9 @@ class WorkerPool:
                 
                 # If Tier 2 detects something Tier 1 missed
                 if score > 0.85 and alert.get("prediction") == "normal":
-                    logger.warning("Tier 2 Deep Model flagged an anomaly!", src_ip=src_ip, score=score)
-                    # Issue retroactive block
-                    await self._apply_mitigation(alert, {"prediction": "zero-day anomaly", "final_score": score})
+                    logger.warning("Tier 2 Deep Model flagged an anomaly! (Mitigation disabled for synthetic data)", src_ip=src_ip, score=score)
+                    # Issue retroactive block (DISABLED/TODO: wire real sliding-window packet sequences)
+                    # await self._apply_mitigation(alert, {"prediction": "zero-day anomaly", "final_score": score})
                     
                 self.deep_queue.task_done()
             except asyncio.CancelledError:
@@ -210,9 +211,10 @@ class WorkerPool:
                     
                     if batch_msgs:
                         results = await self.ml_engine.predict_batch(batch_msgs)
-                        # Minimal processing for recovery (just broadcast/ACK)
+                        # Process and mitigate for recovery, then broadcast/ACK
                         for i, res in enumerate(results):
                             alert = build_alert_payload(batch_msgs[i], res)
+                            await self._apply_mitigation(alert, res)
                             if self.broadcast_func:
                                 await self.broadcast_func([alert])
                         
@@ -309,6 +311,11 @@ class WorkerPool:
                     
                     # FP Suppression Check
                     if await fp_store.is_suppressed(alert.get("src_ip"), alert.get("alert_sig")):
+                        # Calibrate VAE threshold using false-positive feedback
+                        vae_raw_mse = res.get("vae_raw_mse")
+                        if vae_raw_mse is not None and self.ml_engine.anomaly_scorer:
+                            proto = alert.get("proto", "TCP")
+                            self.ml_engine.anomaly_scorer.calibrate_on_fp(proto, vae_raw_mse)
                         # Still count as processed but don't broadcast
                         return None
                     
@@ -336,7 +343,7 @@ class WorkerPool:
                     
                     # 3b-2. Push to Tier 2 Asynchronous Deep Inference
                     # We only deep-inspect a sample of normal traffic to save compute, but all suspicious traffic
-                    if alert.get("prediction") != "normal" or time.time() % 10 < 2:
+                    if alert.get("prediction") != "normal" or random.random() < 0.2:
                         try:
                             self.deep_queue.put_nowait((alert, raw_event))
                         except asyncio.QueueFull:

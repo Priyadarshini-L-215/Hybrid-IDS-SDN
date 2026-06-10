@@ -14,11 +14,11 @@ def test_decision_engine_initialization():
 def test_decide_all_signals_agree(engine):
     classification, score = engine.decide(
         sig_present=True,
-        ml_score=0.9,
-        anomaly_score=0.8,
-        cti_score=0.9
+        ml_score=0.98,
+        anomaly_score=0.98,
+        cti_score=0.98
     )
-    assert score >= 0.9
+    assert score >= 0.95
     assert classification == "attack"
 
 def test_decide_only_signature(engine):

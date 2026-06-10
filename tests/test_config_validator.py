@@ -14,7 +14,9 @@ def test_check_model_files_missing_critical():
     validator = ConfigValidator()
 
     # Mock Path.exists to always return False
-    with patch.object(Path, 'exists', return_value=False):
+    with patch.object(Path, 'exists', return_value=False), \
+         patch('common.config_validator.ACTIVE_MODEL_FILE', 'rf_model.pkl'), \
+         patch('common.config_validator.ACTIVE_SCALER_FILE', 'scaler.pkl'):
         validator.check_model_files()
 
     # check that we have errors for missing critical files

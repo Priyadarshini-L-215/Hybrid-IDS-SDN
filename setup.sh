@@ -394,6 +394,7 @@ setup_model_files() {
         while IFS= read -r -d '' src; do
             cp "$src" "$PROJECT_ROOT/models/$(basename "$src")"
         done < <(find "$PROJECT_ROOT/new model" -maxdepth 1 -type f -print0)
+    fi
     log_info "Synchronizing model files for 49-feature schema..."
 
     mkdir -p "$PROJECT_ROOT/models"
@@ -403,7 +404,7 @@ setup_model_files() {
         log_info "Found updated models in 'new model' directory. Synchronizing..."
 
         # Files to sync from 'new model'
-        local files_to_sync=("rf_model.pkl" "scaler.pkl" "feature_order.pkl" "le_proto.pkl")
+        local files_to_sync=("rf_model.pkl" "scaler.pkl" "feature_order.pkl" "le_proto.pkl" "Encrypted_C2_Model_V2.pkl" "Encrypted_C2_Features_V2.pkl")
 
         for file in "${files_to_sync[@]}"; do
             if [ -f "$PROJECT_ROOT/new model/$file" ]; then

@@ -145,17 +145,37 @@ class MLEngine:
         try:
             # 1. Load Feature Order
             from common.config import MODELS_DIR
-            order_path = MODELS_DIR / "feature_order.json"
-            if order_path.exists():
-                with open(order_path, "r") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        self.feature_order = data.get("feature_order", data.get("features", []))
-                    else:
-                        self.feature_order = data
-                logger.info("Feature order locked", count=len(self.feature_order))
+            active_spec = get_active_model_spec()
+            feature_schema_name = active_spec.get("feature_schema", {}).get("name", "")
+            
+            if feature_schema_name == "Encrypted_C2":
+                c2_features_path = MODELS_DIR / "Encrypted_C2_Features_V2.pkl"
+                if c2_features_path.exists():
+                    self.feature_order = joblib.load(c2_features_path)
+                else:
+                    self.feature_order = [
+                        'ja3_present', 'issuer_length', 'subject_length', 'certificate_serial_length',
+                        'certificate_fingerprint_length', 'certificate_validity_days', 'self_signed_flag',
+                        'tls_version', 'sni_dns_mismatch', 'domain_length', 'subdomain_depth',
+                        'dns_entropy', 'resolved_domain_count', 'dynamic_dns_indicator', 'dns_ttl',
+                        'user_agent_length', 'user_agent_entropy', 'hostname_length', 'url_length',
+                        'url_entropy', 'http_method_is_post', 'connection_frequency', 
+                        'repeated_destination_count', 'session_duration', 'beacon_interval_mean',
+                        'beacon_interval_std', 'packet_ratio', 'byte_ratio', 'is_standard_port'
+                    ]
+                logger.info("Loaded Encrypted C2 Feature schema", count=len(self.feature_order))
             else:
-                self.feature_order = load_feature_names()
+                order_path = MODELS_DIR / "feature_order.json"
+                if order_path.exists():
+                    with open(order_path, "r") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            self.feature_order = data.get("feature_order", data.get("features", []))
+                        else:
+                            self.feature_order = data
+                    logger.info("Feature order locked", count=len(self.feature_order))
+                else:
+                    self.feature_order = load_feature_names()
                 
             # Sync feature names to decision engine
             if self.decision_engine:
@@ -164,13 +184,18 @@ class MLEngine:
             # 2. Load Scaler
             from common.config import ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, MODELS_DIR
             
-            scaler_path = get_scaler_path()
-            if scaler_path.exists():
-                self.scaler = joblib.load(scaler_path)
-                self.stage_status["scaler"] = "loaded"
-                logger.info("Scaler loaded", path=str(scaler_path))
+            if ACTIVE_SCALER_FILE and ACTIVE_SCALER_FILE.lower() in ("none", "null", ""):
+                self.scaler = None
+                self.stage_status["scaler"] = "bypassed"
+                logger.info("Scaler bypassed (scale-invariant model)")
             else:
-                self.load_warnings.append(f"Missing scaler: {scaler_path}")
+                scaler_path = get_scaler_path()
+                if scaler_path.exists():
+                    self.scaler = joblib.load(scaler_path)
+                    self.stage_status["scaler"] = "loaded"
+                    logger.info("Scaler loaded", path=str(scaler_path))
+                else:
+                    self.load_warnings.append(f"Missing scaler: {scaler_path}")
             
             # 3. Load RF (Check extension)
             model_path = get_model_path()
@@ -272,7 +297,8 @@ class MLEngine:
                 except Exception as e:
                     logger.warning("Failed to init SHAP explainer", error=str(e))
 
-            if (self.rf_model or self.rf_session) and self.scaler:
+            scaler_ok = (self.scaler is not None) or (ACTIVE_SCALER_FILE and ACTIVE_SCALER_FILE.lower() in ("none", "null", ""))
+            if (self.rf_model or self.rf_session) and scaler_ok:
                 self.is_ready = self._validate_schema()
                 if self.stage_status.get("vae") in {"missing", "disabled"}:
                     self.fallback_mode = False
@@ -296,7 +322,11 @@ class MLEngine:
         
         try:
             # Align features
-            expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
+            if self.scaler:
+                expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
+            else:
+                expected_dim = getattr(self.rf_model, 'n_features_in_', X.shape[1])
+
             if X.shape[1] != expected_dim:
                 if X.shape[1] > expected_dim:
                     X_aligned = X[:, :expected_dim]
@@ -305,7 +335,10 @@ class MLEngine:
             else:
                 X_aligned = X
             
-            X_scaled = self.scaler.transform(X_aligned)
+            if self.scaler:
+                X_scaled = self.scaler.transform(X_aligned)
+            else:
+                X_scaled = X_aligned
             probs = self.rf_model.predict_proba(X_scaled)
             return probs[:, 1]
         except Exception as e:
@@ -448,9 +481,13 @@ class MLEngine:
                         ml_scores_valid = [d[1] for d in outputs[1]]
                     else:
                         ml_scores_valid = outputs[1][:, 1]
-                elif self.rf_model and self.scaler:
+                elif self.rf_model:
                     # Pkl path
-                    expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
+                    if self.scaler:
+                        expected_dim = getattr(self.scaler, 'n_features_in_', X.shape[1])
+                    else:
+                        expected_dim = getattr(self.rf_model, 'n_features_in_', X.shape[1])
+                        
                     if X.shape[1] != expected_dim:
                         logger.warning("Feature dimension mismatch, attempting to align", 
                                        extracted=X.shape[1], expected=expected_dim)
@@ -461,7 +498,10 @@ class MLEngine:
                     else:
                         X_aligned = X
                         
-                    X_scaled = self.scaler.transform(X_aligned)
+                    if self.scaler:
+                        X_scaled = self.scaler.transform(X_aligned)
+                    else:
+                        X_scaled = X_aligned
                     ml_scores_valid = self.rf_model.predict_proba(X_scaled)[:, 1]
                 else:
                     ml_scores_valid = [0.0] * len(valid_features)
@@ -471,6 +511,7 @@ class MLEngine:
                 
                 # 2b. VAE Anomaly Detection (Stage 3)
                 batch_anomaly_scores = [None] * len(valid_features)
+                valid_raw_mses = [None] * len(valid_features)
                 
                 if self.vae_detector and self.vae_detector.is_ready:
                     uncertain_mask = np.array(ml_scores_valid, dtype=np.float32) < ML_THRESHOLD_SUSPICIOUS
@@ -494,6 +535,7 @@ class MLEngine:
                                 src_ip=src_ip
                             )
                             batch_anomaly_scores[pos] = score
+                            valid_raw_mses[pos] = float(mse_raw[pos_idx])
                     valid_anomaly_scores = batch_anomaly_scores
 
                 # 2c. Batch SHAP (Performance optimization)
@@ -570,9 +612,12 @@ class MLEngine:
             
             # Layer 3: Anomaly (Real)
             anomaly_score = None
+            vae_raw_mse = None
             v_idx = valid_index_map.get(i)
             if v_idx is not None and v_idx < len(valid_anomaly_scores):
                 anomaly_score = valid_anomaly_scores[v_idx]
+                if 'valid_raw_mses' in locals() and v_idx < len(valid_raw_mses):
+                    vae_raw_mse = valid_raw_mses[v_idx]
             
             shap_top3 = batch_shap_results.get(i, [])
             # Use None as default for CTI if not provided (Decision Engine handles None)
@@ -582,6 +627,7 @@ class MLEngine:
                 "prediction": "unknown",
                 "ml_score": safe_score(ml_scores[i]),
                 "anomaly_score": safe_score(anomaly_score),
+                "vae_raw_mse": safe_score(vae_raw_mse),
                 "sig_present": sig_present,
                 "shap_top3": shap_top3,
                 "_feature_vector": valid_features[v_idx] if v_idx is not None and v_idx < len(valid_features) else None,
