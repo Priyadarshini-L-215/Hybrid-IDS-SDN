@@ -36,22 +36,7 @@ ui/dist/
 
 # --- Machine Learning Models ---
 # Binary models ignored by default. Use Git LFS for large files.
-models/*.pkl
-!models/rf_model.pkl
-!models/scaler.pkl
-!models/vae_scaler.pkl
-models/*.joblib
-models/*.pth
-models/*.h5
-models/*.onnx
-models/autoencoder.onnx.data
-!models/vae_encoder.keras
-!models/vae_decoder.keras
-models/backup*/
-models/metrics.
-json
-models/retrain_*.txt
-models/feature_importance.csv
+
 
 
 # --- Data & Runtime Logs ---
