@@ -29,7 +29,7 @@ from common.config import (
     get_cfg
 )
 from common.model_manifest import get_active_model_spec, load_model_manifest
-from common.feature_extractor import extract_features_batch, load_feature_names, validate_feature_vector
+from common.feature_extractor import extract_features_batch, extract_c2_features_from_eve, load_feature_names, validate_feature_vector
 from ml_engine.decision_engine import DecisionEngine
 from ml_engine.anomaly_scorer import AnomalyScorer
 from ml_engine.vae_detector import VaeAnomalyDetector
@@ -69,6 +69,12 @@ class MLEngine:
         self.vae_detector = None  # Stage 3: Keras VAE anomaly detector
         self.vae_threshold = AUTOENCODER_THRESHOLD
         
+        # Stage 1b: LightGBM Encrypted C2 Specialist
+        self.c2_model = None
+        self.c2_feature_order = []
+        self.c2_shap_explainer = None
+        self.stage_status["c2"] = "not_loaded"
+        
         self._load_metadata()
         self._load_models()
 
@@ -104,7 +110,7 @@ class MLEngine:
             from common.config import refresh_config
             refresh_config()
             from common.config import (
-                ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE,
+                ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, ML_WEIGHT_C2,
                 ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS,
                 ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES,
                 ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE
@@ -117,6 +123,7 @@ class MLEngine:
                     "signature": ML_WEIGHT_SIG,
                     "ml": ML_WEIGHT_RF,
                     "anomaly": ML_WEIGHT_AE,
+                    "c2": ML_WEIGHT_C2,
                     "cti": 0.8
                 },
                 thresholds={
@@ -297,6 +304,58 @@ class MLEngine:
                 except Exception as e:
                     logger.warning("Failed to init SHAP explainer", error=str(e))
 
+            # 6. Load LightGBM Encrypted C2 Specialist (Stage 1b)
+            try:
+                c2_spec = active_spec.get("c2", {})
+                c2_model_name = c2_spec.get("model", "")
+                if c2_model_name:
+                    c2_model_path = MODELS_DIR / c2_model_name
+                    if c2_model_path.exists():
+                        self.c2_model = joblib.load(c2_model_path)
+                        self.stage_status["c2"] = "loaded"
+                        
+                        # Resolve feature order for C2 model
+                        # Try to get from model's feature_name_ attribute (LightGBM native)
+                        if hasattr(self.c2_model, 'feature_name_'):
+                            self.c2_feature_order = list(self.c2_model.feature_name_)
+                        elif hasattr(self.c2_model, 'feature_names_in_'):
+                            self.c2_feature_order = list(self.c2_model.feature_names_in_)
+                        else:
+                            # Fallback: hardcoded 25-feature schema
+                            self.c2_feature_order = [
+                                'source_port', 'destination_port', 'protocol_tcp', 'protocol_udp',
+                                'ja3_present', 'issuer_length', 'subject_length',
+                                'certificate_serial_length', 'certificate_fingerprint_length',
+                                'self_signed_flag', 'tls_version_tls1_2', 'tls_version_tls1_3',
+                                'domain_length', 'subdomain_depth', 'dns_entropy',
+                                'user_agent_length', 'user_agent_entropy', 'hostname_length',
+                                'url_length', 'url_entropy', 'http_method_is_post',
+                                'packet_ratio', 'byte_ratio', 'session_duration', 'is_standard_port'
+                            ]
+                        
+                        logger.info("LightGBM C2 Specialist loaded",
+                                    path=str(c2_model_path),
+                                    features=len(self.c2_feature_order))
+                        
+                        # Initialize SHAP for C2 model
+                        try:
+                            c2_inner = self.c2_model
+                            if hasattr(self.c2_model, "booster_"):
+                                c2_inner = self.c2_model
+                            self.c2_shap_explainer = shap.TreeExplainer(c2_inner)
+                            logger.info("SHAP TreeExplainer initialized for C2 model")
+                        except Exception as e:
+                            logger.warning("Failed to init C2 SHAP explainer", error=str(e))
+                    else:
+                        logger.warning("C2 model file not found", path=str(c2_model_path))
+                        self.stage_status["c2"] = "missing"
+                else:
+                    logger.info("No C2 model specified in manifest, C2 detection disabled")
+                    self.stage_status["c2"] = "disabled"
+            except Exception as e:
+                logger.warning("Failed to load C2 specialist model (non-fatal)", error=str(e))
+                self.stage_status["c2"] = "error"
+
             scaler_ok = (self.scaler is not None) or (ACTIVE_SCALER_FILE and ACTIVE_SCALER_FILE.lower() in ("none", "null", ""))
             if (self.rf_model or self.rf_session) and scaler_ok:
                 self.is_ready = self._validate_schema()
@@ -400,6 +459,8 @@ class MLEngine:
             "model_version": self.meta.get("model_version", "unknown"),
             "vae_enabled": self.vae_detector is not None,
             "vae_threshold": self.vae_threshold,
+            "c2_enabled": self.c2_model is not None,
+            "c2_feature_count": len(self.c2_feature_order),
             "baseline_frozen": self.anomaly_scorer._baseline_frozen if self.anomaly_scorer else False,
         }
 
@@ -499,7 +560,15 @@ class MLEngine:
                         X_aligned = X
                         
                     if self.scaler:
-                        X_scaled = self.scaler.transform(X_aligned)
+                        # Pre-scaled/simulated features should bypass the scaler transform
+                        X_scaled = np.zeros_like(X_aligned)
+                        non_sim_indices = [pos for pos, orig_idx in enumerate(valid_indices) if "features" not in events[orig_idx]]
+                        sim_indices = [pos for pos, orig_idx in enumerate(valid_indices) if "features" in events[orig_idx]]
+                        
+                        if non_sim_indices:
+                            X_scaled[non_sim_indices] = self.scaler.transform(X_aligned[non_sim_indices])
+                        if sim_indices:
+                            X_scaled[sim_indices] = X_aligned[sim_indices]
                     else:
                         X_scaled = X_aligned
                     ml_scores_valid = self.rf_model.predict_proba(X_scaled)[:, 1]
@@ -588,11 +657,46 @@ class MLEngine:
                     except Exception as e:
                         logger.warning("Selective SHAP failed", error=str(e))
 
+                # 2d. LightGBM C2 Specialist Inference (Stage 1b)
+                # Runs on a separate 25-feature extraction path
+                c2_scores = [None] * len(events)
+                if self.c2_model and self.c2_feature_order:
+                    try:
+                        import asyncio
+                        # Extract C2 features for all events in parallel
+                        c2_tasks = [
+                            extract_c2_features_from_eve(events[idx], self.c2_feature_order)
+                            for idx in valid_indices
+                        ]
+                        c2_features_list = await asyncio.gather(*c2_tasks)
+                        
+                        # Filter valid C2 feature vectors
+                        c2_valid = []
+                        c2_valid_positions = []
+                        for pos, (feat, orig_idx) in enumerate(zip(c2_features_list, valid_indices)):
+                            if feat is not None and len(feat) == len(self.c2_feature_order):
+                                c2_valid.append(feat)
+                                c2_valid_positions.append(orig_idx)
+                        
+                        if c2_valid:
+                            X_c2 = np.array(c2_valid, dtype=np.float32)
+                            c2_probs = self.c2_model.predict_proba(X_c2)[:, 1]
+                            for j, orig_idx in enumerate(c2_valid_positions):
+                                c2_scores[orig_idx] = float(c2_probs[j])
+                            
+                            logger.debug("C2 specialist inference complete",
+                                         count=len(c2_valid),
+                                         mean_score=round(float(np.mean(c2_probs)), 4))
+                    except Exception as e:
+                        logger.warning("C2 specialist inference failed (non-fatal)", error=str(e))
+
             except Exception as e:
                 logger.error("Batch inference failed", error=str(e))
                 valid_anomaly_scores = [None] * len(valid_features)
+                c2_scores = [None] * len(events)
         else:
             valid_anomaly_scores = [None] * len(events)
+            c2_scores = [None] * len(events)
         
         infer_ms = (time.time() - t_infer_start) * 1000
         
@@ -626,6 +730,7 @@ class MLEngine:
             res = {
                 "prediction": "unknown",
                 "ml_score": safe_score(ml_scores[i]),
+                "c2_score": safe_score(c2_scores[i]),
                 "anomaly_score": safe_score(anomaly_score),
                 "vae_raw_mse": safe_score(vae_raw_mse),
                 "sig_present": sig_present,
@@ -635,7 +740,7 @@ class MLEngine:
 
 
             classification, normalized_score = self.decision_engine.decide(
-                sig_present, ml_scores[i], anomaly_score, cti_score, res, event
+                sig_present, ml_scores[i], anomaly_score, cti_score, c2_scores[i], res, event
             )
             
             res.update({

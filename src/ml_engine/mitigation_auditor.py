@@ -91,6 +91,10 @@ class MitigationAuditor:
 
     async def _audit_blocked_ips(self):
         """Cross-references the active blocks in Redis against active members in the ipset."""
+        if await ActiveFirewall.is_banning_disabled():
+            logger.debug("Auditor: Skipping block self-healing because automatic banning is disabled")
+            return
+            
         detailed = await ActiveFirewall.get_detailed_status()
         
         # final_blocked_ips and high reputation offenders (> temp block threshold)

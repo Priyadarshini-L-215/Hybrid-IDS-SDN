@@ -10,11 +10,12 @@ detection:
     weights:
       anomaly: 0.3
       ml: 0.7
+      c2: 0.6
       signature: 1.0
   dos_threshold: 100
   ml:
-    active_model: Encrypted_C2_Model_V2.pkl
-    active_scaler: none
+    active_model: rf_model.pkl
+    active_scaler: scaler.pkl
   port_scan_threshold: 25
 forensics:
   pcap_enabled: true
@@ -27,6 +28,10 @@ mitigation:
   reputation_limit: 10.0
   reputation_perm_block: 50.0
   reputation_temp_block: 25.0
+  protected_ips:
+    - "13.107.64.0/18"
+    - "52.112.0.0/14"
+    - "52.120.0.0/14"
 network:
   api_port: 3000
   redis_host: 127.0.0.1

@@ -51,30 +51,23 @@ def event_cache(maxsize=128):
     """
     def decorator(func):
         cache = {}
-        # We don't use functools.lru_cache because dicts are unhashable
-        # Instead we compute a stable hash of the event dict
         @functools.wraps(func)
-        def wrapper(event_dict, *args, **kwargs):
-            # Create stable fingerprint
+        async def wrapper(event_dict, *args, **kwargs):
             try:
-                # Only hash fields that matter for extraction
-                # Instead of expensive JSON + SHA256, use a fast tuple fingerprint
-                # We sort the keys once and reuse the order for speed
                 cache_keys = sorted([k for k in event_dict.keys() if k not in {'timestamp', 'flow_id', 'pcap_cnt'}])
                 fingerprint = tuple(event_dict.get(k) for k in cache_keys)
                 
                 if fingerprint in cache:
                     return cache[fingerprint]
                 
-                result = func(event_dict, *args, **kwargs)
+                result = await func(event_dict, *args, **kwargs)
                 
                 if len(cache) >= maxsize:
-                    # Simple FIFO eviction
                     cache.pop(next(iter(cache)))
                 cache[fingerprint] = result
                 return result
             except Exception:
-                return func(event_dict, *args, **kwargs)
+                return await func(event_dict, *args, **kwargs)
         return wrapper
     return decorator
 
@@ -104,9 +97,24 @@ class StatefulFeatureTracker:
 
     async def update(self, event_meta):
         async with self._lock:
-            # If we're at max capacity, we need to decrement indices for the element being evicted
+            # Get event time or fallback to current time
+            now = event_meta.get('time') or time.time()
+            
+            # Load correlation window from config to evict old entries
+            try:
+                from common.config import get_cfg
+                decay_window = float(get_cfg("detection.correlation_window", 60.0))
+            except Exception:
+                decay_window = 60.0
+                
+            # Evict entries older than the decay window
+            while self.window and (now - (self.window[0].get('time') or 0.0) > decay_window):
+                old = self.window.popleft()
+                self._update_indices(old, -1)
+                
+            # If we're still at max capacity, evict the oldest
             if len(self.window) == self.window.maxlen:
-                old = self.window[0] # peek oldest
+                old = self.window.popleft()
                 self._update_indices(old, -1)
             
             self.window.append(event_meta)
@@ -426,7 +434,26 @@ async def extract_c2_features_from_eve(event: dict, features: list) -> list | No
     # 29. is_standard_port
     is_standard_port = 1.0 if dst_port in (80, 443, 8080, 8443) else 0.0
     
+    # Protocol one-hot encoding for LightGBM C2 model
+    proto = event.get("proto", "").upper()
+    protocol_tcp = 1.0 if proto == "TCP" else 0.0
+    protocol_udp = 1.0 if proto == "UDP" else 0.0
+    
+    # TLS version one-hot encoding for LightGBM C2 model
+    tls_version_tls1_2 = 1.0 if "1.2" in version_str else 0.0
+    tls_version_tls1_3 = 1.0 if "1.3" in version_str else 0.0
+
     feature_dict = {
+        # Raw port features (used by 25-feature C2 model)
+        'source_port': float(src_port),
+        'destination_port': float(dst_port),
+        # Protocol one-hot features (used by 25-feature C2 model)
+        'protocol_tcp': protocol_tcp,
+        'protocol_udp': protocol_udp,
+        # TLS version one-hot features (used by 25-feature C2 model)
+        'tls_version_tls1_2': tls_version_tls1_2,
+        'tls_version_tls1_3': tls_version_tls1_3,
+        # Common features (used by both 25 and 29-feature schemas)
         'ja3_present': ja3_present,
         'issuer_length': issuer_length,
         'subject_length': subject_length,
@@ -469,6 +496,9 @@ async def extract_features_from_eve(event: dict, features: list = None) -> list 
     if features is None:
         features = load_feature_names()
         
+    if "features" in event and isinstance(event["features"], list):
+        return event["features"]
+        
     if features and "ja3_present" in features:
         return await extract_c2_features_from_eve(event, features)
         
@@ -507,12 +537,23 @@ async def extract_features_from_eve(event: dict, features: list = None) -> list 
     src_port = int(event.get('src_port', 0))
     protocol = event.get('protocol', 'TCP').lower()
     
+    # Parse event timestamp if available, fallback to current time
+    event_timestamp = event.get("timestamp")
+    t = time.time()
+    if event_timestamp:
+        try:
+            from datetime import datetime
+            t = datetime.fromisoformat(event_timestamp.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+
     await tracker.update({
         'src_ip': src_ip, 
         'dst_ip': dst_ip, 
         'service': service, 
         'dst_port': dst_port,
-        'src_port': src_port
+        'src_port': src_port,
+        'time': t
     })
     ct_stats = tracker.get_ct_stats(src_ip, dst_ip, service, dst_port, src_port)
 

@@ -83,8 +83,9 @@ async def test_c2_feature_extraction():
 async def test_engine_load_and_predict():
     engine = MLEngine()
     assert engine.is_ready
-    assert engine.stage_status["scaler"] == "bypassed"
+    assert engine.stage_status["scaler"] == "loaded"
     assert engine.rf_model is not None
+    assert engine.c2_model is not None
     
     # Run test prediction
     test_event = {
@@ -109,4 +110,6 @@ async def test_engine_load_and_predict():
     assert len(results) == 1
     assert "prediction" in results[0]
     assert "ml_score" in results[0]
+    assert "c2_score" in results[0]
     assert results[0]["ml_score"] is not None
+    assert results[0]["c2_score"] is not None

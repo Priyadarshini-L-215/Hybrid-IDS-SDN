@@ -39,7 +39,7 @@ def get_cfg(path, default=None):
 def refresh_config():
     """Reloads the YAML config from disk and updates global state."""
     global YAML_CONFIG, API_PORT, REDIS_HOST, REDIS_PORT, \
-           ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_THRESHOLD_ANOMALY, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, \
+           ML_THRESHOLD_ATTACK, ML_THRESHOLD_SUSPICIOUS, ML_THRESHOLD_ANOMALY, ML_WEIGHT_SIG, ML_WEIGHT_RF, ML_WEIGHT_AE, ML_WEIGHT_C2, \
            ANOMALY_PERCENTILE, ANOMALY_MIN_SAMPLES, REPUTATION_LIMIT, REPUTATION_TEMP_BLOCK, REPUTATION_PERM_BLOCK, \
            BLOCK_TTL, RATE_LIMIT_PER_SEC, ACTIVE_MODEL_FILE, ACTIVE_SCALER_FILE, DEV_MODE, \
            ALIENTVAULT_KEY, PCAP_ENABLED, SDN_ENABLED, SDN_CONTROLLER_HOST, SDN_CONTROLLER_PORT, \
@@ -64,6 +64,7 @@ def refresh_config():
     ML_WEIGHT_SIG = get_cfg("detection.decision_engine.weights.signature", 1.0)
     ML_WEIGHT_RF = get_cfg("detection.decision_engine.weights.ml", 0.5)
     ML_WEIGHT_AE = get_cfg("detection.decision_engine.weights.anomaly", 0.3)
+    ML_WEIGHT_C2 = get_cfg("detection.decision_engine.weights.c2", 0.6)
     
     # Update anomaly settings
     ANOMALY_PERCENTILE = float(get_cfg("detection.anomaly_percentile", 99.5))
@@ -121,6 +122,7 @@ ML_THRESHOLD_ANOMALY = 0.5
 ML_WEIGHT_SIG = 1.0
 ML_WEIGHT_RF = 0.8
 ML_WEIGHT_AE = 0.2
+ML_WEIGHT_C2 = 0.6
 ANOMALY_PERCENTILE = 99.5
 ANOMALY_MIN_SAMPLES = 50
 REPUTATION_LIMIT = 10.0
@@ -221,6 +223,29 @@ def get_protected_ips() -> set:
     if isinstance(extra, list):
         protected.update(extra)
     return protected
+
+def is_ip_protected(ip: str) -> bool:
+    """Checks if an IP is protected (either matches exactly or belongs to a protected CIDR subnet)."""
+    import ipaddress
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+        
+    protected_set = get_protected_ips()
+    for item in protected_set:
+        try:
+            if "/" in str(item):
+                net = ipaddress.ip_network(item, strict=False)
+                if ip_obj in net:
+                    return True
+            else:
+                if ip_obj == ipaddress.ip_address(item):
+                    return True
+        except ValueError:
+            if ip == str(item):
+                return True
+    return False
 
 # --- LATE BINDING REDUNDANCY REMOVAL ---
 # These were already set by refresh_config() called above.

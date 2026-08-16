@@ -167,7 +167,7 @@ const ShapPanel = ({ alert }) => {
         <span style={{ fontSize: '0.9rem', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Detection Stage Breakdown</span>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
         <ScoreMetric
           label="Signature"
           value={stageScores.signature || 0}
@@ -177,6 +177,11 @@ const ShapPanel = ({ alert }) => {
           label="ML Engine"
           value={stageScores.ml || alert.confidence / 100 || 0}
           color="var(--secondary)"
+        />
+        <ScoreMetric
+          label="C2 Specialist"
+          value={stageScores.c2 || alert.c2_score || 0}
+          color="var(--danger)"
         />
         <ScoreMetric
           label="Anomaly"

@@ -70,3 +70,42 @@ def test_get_reputation_delta(engine):
     assert engine.get_reputation_delta("suspicious", 0.7) > 0
     assert engine.get_reputation_delta("anomaly", 0.6) > 0
     assert engine.get_reputation_delta("normal", 0.1) < 0
+
+
+def test_decide_simulation_restriction_in_production(engine, monkeypatch):
+    import sys
+    orig_modules = sys.modules
+    
+    class FakeModules(dict):
+        def keys(self):
+            return [k for k in super().keys() if not k.startswith("pytest")]
+        def __iter__(self):
+            return iter([k for k in super().keys() if not k.startswith("pytest")])
+            
+    fake_modules = FakeModules(orig_modules)
+    monkeypatch.setattr(sys, "modules", fake_modules)
+    
+    # 1. Non-simulated event in simulated production run should be forced to normal, but keeps score at normal rate (scaled)
+    event_non_sim = {"dest_ip": "10.0.0.2"}
+    classification, score = engine.decide(
+        sig_present=True,
+        ml_score=0.99,
+        anomaly_score=0.99,
+        cti_score=0.99,
+        event=event_non_sim
+    )
+    assert classification == "normal"
+    assert score >= 0.05
+    assert score < 0.2
+    
+    # 2. Simulated event in simulated production run should be classified normally
+    event_sim = {"dest_ip": "10.0.0.2", "is_simulated_attack": True}
+    classification_sim, score_sim = engine.decide(
+        sig_present=True,
+        ml_score=0.99,
+        anomaly_score=0.99,
+        cti_score=0.99,
+        event=event_sim
+    )
+    assert classification_sim == "attack"
+    assert score_sim >= 0.95

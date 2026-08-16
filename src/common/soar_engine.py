@@ -40,9 +40,8 @@ class SOAREngine:
         if not src_ip:
             return  # Can't mitigate without a source IP
 
-        # Skip protected internal IPs
-        from common.config import get_protected_ips
-        if src_ip in get_protected_ips():
+        from common.config import is_ip_protected
+        if is_ip_protected(src_ip):
             logger.debug("SOAR: Skipping mitigation for protected IP", ip=src_ip)
             return
 
@@ -92,6 +91,9 @@ class SOAREngine:
 
     async def _run_actions(self, actions: List[Dict[str, Any]], src_ip: str, shap_features: List[Dict[str, Any]], event: Dict[str, Any]):
         from ml_engine.firewall import ActiveFirewall
+        if await ActiveFirewall.is_banning_disabled():
+            logger.info("SOAR: Bypassing automated actions because automatic banning is disabled")
+            return
         
         for action in actions:
             action_type = action.get("type")

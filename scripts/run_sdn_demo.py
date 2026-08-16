@@ -15,20 +15,13 @@ from mininet.log import setLogLevel, info
 def sentinel_topo():
     net = Mininet(topo=None, build=False, ipBase='10.0.0.0/8')
 
-    info('*** Adding controller\n')
-    c0 = net.addController(name='c0',
-                           controller=RemoteController,
-                           ip='127.0.0.1',
-                           protocol='tcp',
-                           port=6653)
-
     info('*** Adding hosts\n')
     h1 = net.addHost('h1', ip='10.0.0.1')
     h2 = net.addHost('h2', ip='10.0.0.2')
     h3 = net.addHost('h3', ip='10.0.0.3') # Honeypot IP
 
     info('*** Adding switch\n')
-    s1 = net.addSwitch('s1', cls=OVSKernelSwitch, protocols='OpenFlow13')
+    s1 = net.addSwitch('s1', cls=OVSKernelSwitch, failMode='standalone')
 
     info('*** Creating links\n')
     net.addLink(h1, s1)
@@ -37,8 +30,7 @@ def sentinel_topo():
 
     info('*** Starting network\n')
     net.build()
-    c0.start()
-    s1.start([c0])
+    s1.start([])
 
     info('*** Post-startup configuration\n')
     # Optional: Start a simple listener on h2 to act as a target

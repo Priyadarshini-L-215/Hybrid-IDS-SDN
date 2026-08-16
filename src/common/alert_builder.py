@@ -135,7 +135,8 @@ def build_alert_payload(event: dict, prediction: dict, *, event_id: str = None) 
             "stage_scores": {
                 "signature": 1.0 if sig_present else 0.0,
                 "ml": safe_float(prediction.get("ml_score")),
-                "anomaly": safe_float(prediction.get("anomaly_score"))
+                "anomaly": safe_float(prediction.get("anomaly_score")),
+                "c2": safe_float(prediction.get("c2_score"))
             },
             "correlation_id": hashlib.md5(f"{event.get('src_ip')}-{event.get('dst_ip')}".encode()).hexdigest()[:8]
         },

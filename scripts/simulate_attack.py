@@ -164,6 +164,7 @@ def _jitter(vec, noise=0.03):
 def _stamp_features(ev, feat_vec):
     """Embed a calibrated feature vector into the event dict."""
     ev["features"] = _jitter(feat_vec)
+    ev["is_simulated_attack"] = True
     return ev
 
 
@@ -173,9 +174,13 @@ def sim_portscan(r, count=1):
     total    = 0
     for burst in range(count):
         ports = random.sample(range(1, 65535), random.randint(8, 15))
-        evs = [make_event(attacker, target, random.randint(49152,65535), p,
-                          pkts_s=1, bytes_s=44, pkts_c=0, bytes_c=0,
-                          age=0.001, tcp_flags="S") for p in ports]
+        evs = []
+        for p in ports:
+            ev = make_event(attacker, target, random.randint(49152,65535), p,
+                            pkts_s=1, bytes_s=44, pkts_c=0, bytes_c=0,
+                            age=0.001, tcp_flags="S")
+            ev["is_simulated_attack"] = True
+            evs.append(ev)
         total += push(r, evs)
         progress_bar(f"Burst {burst+1}/{count} — {len(evs)} probes", min(burst+1, 30), color=YELLOW)
         time.sleep(0.3)

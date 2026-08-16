@@ -347,7 +347,8 @@ class ActiveFirewall:
         """
         if not cls._initialized: await cls._initialize()
         
-        if src_ip in cls._protected_ips:
+        from common.config import is_ip_protected
+        if is_ip_protected(src_ip):
             return "skipped"
 
         if cls._redis_client:

@@ -11,6 +11,7 @@ def mock_firewall():
         mock_fw.rate_limit = AsyncMock(return_value=True)
         mock_fw.block = AsyncMock(return_value=True)
         mock_fw.process_incident = AsyncMock(return_value=True)
+        mock_fw.is_banning_disabled = AsyncMock(return_value=False)
         yield mock_fw
 
 @pytest.mark.asyncio

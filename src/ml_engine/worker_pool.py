@@ -356,7 +356,10 @@ class WorkerPool:
                             sig_present=alert.get("sig_present", False),
                             ml_score=res.get("ml_score", 0.0),
                             anomaly_score=res.get("anomaly_score", 0.0),
-                            cti_score=cti_score
+                            cti_score=cti_score,
+                            c2_score=res.get("c2_score"),
+                            prediction=res,
+                            event=alert
                         )
                         alert["prediction"] = new_class
                         alert["confidence"] = round(new_conf * 100, 2)
@@ -412,32 +415,8 @@ class WorkerPool:
             except Exception as e:
                 logger.error("Auto-refresh trigger failed", error=str(e))
 
-        # 2. Broadcast to UI
-        if self.broadcast_func:
-            try:
-                drift_alert = {
-                    "event_id": f"drift-{int(time.time())}",
-                    "event_type": "system_alert",
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "prediction": "drift_detected",
-                    "confidence": 98.0,
-                    "alert_sig": "Model Drift Detected" if drift_info.get("type") != "vae_drift" else "VAE Baseline Drift",
-                    "category": "System health",
-                    "details": drift_info,
-                    "forensics": {
-                        "packet_hash": "system-event",
-                        "stage_scores": {
-                            "signature": 0.0,
-                            "ml": 0.98,
-                            "anomaly": 0.0
-                        }
-                    }
-
-                }
-
-                await self.broadcast_func([drift_alert])
-            except Exception as e:
-                logger.error("Failed to broadcast drift alert", error=str(e))
+        # 2. Log drift event internally (do not broadcast to UI as threat alerts)
+        logger.info("Model drift alert processed", drift_type=drift_info.get("type"))
 
     async def _apply_mitigation(self, alert: dict, res: dict):
         """Interface with ActiveFirewall for IPS actions."""
